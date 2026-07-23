@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -12,13 +13,78 @@ import (
 
 var ErrDuplicateMember = errors.New("user is already a member of this repo")
 
-// SetRepoConfig registers/replaces the pipeline YAML for a repo.
-func (s *Store) SetRepoConfig(ctx context.Context, repo, config string) error {
-	_, err := s.pool.Exec(ctx,
+// SetRepoConfig saves the pipeline YAML as a NEW immutable version and moves
+// the current pointer. Returns the new version number. History is append-only.
+func (s *Store) SetRepoConfig(ctx context.Context, repo, config, author, message string) (int, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+
+	var version int
+	err = tx.QueryRow(ctx,
+		`INSERT INTO repo_config_versions (repo, version, config_yaml, author, message)
+		 VALUES ($1, COALESCE((SELECT max(version) FROM repo_config_versions WHERE repo=$1), 0) + 1, $2, $3, $4)
+		 RETURNING version`,
+		repo, config, author, message).Scan(&version)
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(ctx,
 		`INSERT INTO repo_configs (repo, config_yaml) VALUES ($1,$2)
 		 ON CONFLICT (repo) DO UPDATE SET config_yaml = EXCLUDED.config_yaml, updated_at = now()`,
-		repo, config)
-	return err
+		repo, config); err != nil {
+		return 0, err
+	}
+	return version, tx.Commit(ctx)
+}
+
+// ConfigVersion is one row of a repo's config history (YAML omitted in lists).
+type ConfigVersion struct {
+	Version   int       `json:"version"`
+	Author    string    `json:"author"`
+	Message   string    `json:"message"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func (s *Store) ListConfigVersions(ctx context.Context, repo string) ([]ConfigVersion, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT version, author, message, created_at
+		 FROM repo_config_versions WHERE repo=$1 ORDER BY version DESC`, repo)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ConfigVersion{}
+	for rows.Next() {
+		var v ConfigVersion
+		if err := rows.Scan(&v.Version, &v.Author, &v.Message, &v.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// GetConfigVersion returns one historical version's YAML.
+func (s *Store) GetConfigVersion(ctx context.Context, repo string, version int) (string, error) {
+	var config string
+	err := s.pool.QueryRow(ctx,
+		`SELECT config_yaml FROM repo_config_versions WHERE repo=$1 AND version=$2`,
+		repo, version).Scan(&config)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return config, err
+}
+
+// CurrentConfigVersion returns the latest version number (0 = none).
+func (s *Store) CurrentConfigVersion(ctx context.Context, repo string) (int, error) {
+	var v int
+	err := s.pool.QueryRow(ctx,
+		`SELECT COALESCE(max(version), 0) FROM repo_config_versions WHERE repo=$1`, repo).Scan(&v)
+	return v, err
 }
 
 // SetRepoDefaultTags stores the repo's runner-group selection.

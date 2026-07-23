@@ -21,7 +21,8 @@ Legend: ✅ shipped · 🟡 partial · ❌ not yet (roadmap).
 | Templates: `include`, `extends`, anchors | ✅ | ❌ | needed for org-wide standards |
 | Matrix builds (`parallel:`) | ✅ | ❌ | |
 | Manual jobs (`when: manual`) | ✅ | 🟡 | approvals cover the gated case; plain manual next |
-| Retry policy, timeouts per job | ✅ | ❌ | job timeout exists only via runner-stale detection |
+| Timeouts (per job + pipeline default) | ✅ | ✅ | runner group-kill + server backstop + queue timeout |
+| Retry policy | ✅ | ❌ | |
 | Child/multi-project pipelines, triggers | ✅ | ❌ | |
 | Scheduled pipelines (cron) | ✅ | ❌ | easy: scheduler already ticks |
 

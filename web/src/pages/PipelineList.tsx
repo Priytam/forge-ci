@@ -10,6 +10,7 @@ import {
 import { usePoll } from "../hooks/usePoll";
 import StatusBadge from "../components/StatusBadge";
 import StageDots from "../components/StageDots";
+import ConfigChip from "../components/ConfigChip";
 import { ProviderChip } from "./Repos";
 
 export default function PipelineList() {
@@ -42,7 +43,7 @@ export default function PipelineList() {
             ⚙ Settings
           </Link>
           <Link to="/new" className="btn btn-primary">
-            New Pipeline
+            Run pipeline
           </Link>
         </div>
       </div>
@@ -81,7 +82,10 @@ export default function PipelineList() {
                   <td className="mono">#{p.id}</td>
                   <td>{p.repo}</td>
                   <td>{p.ref}</td>
-                  <td className="mono">{shortSha(p.sha)}</td>
+                  <td className="mono">
+                    {shortSha(p.sha)}{" "}
+                    <ConfigChip version={p.config_version ?? null} />
+                  </td>
                   <td>
                     <StageDots stages={p.stages ?? []} />
                   </td>

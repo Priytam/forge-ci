@@ -18,6 +18,7 @@ import {
   getRepoSettings,
   humanSize,
   listArtifacts,
+  listConfigVersions,
   listMembers,
   listProtectedEnvironments,
   listRunners,
@@ -25,6 +26,7 @@ import {
   putRepoConfig,
   putRepoSettings,
   relativeTime,
+  revertConfig,
   updateVariable,
   upsertProtectedEnvironment,
   type Variable,
@@ -754,17 +756,31 @@ function MembersSection({ repo }: { repo: string }) {
   );
 }
 
-/* ---------------- Pipeline config ---------------- */
+/* ---------------- Pipeline config (versioned) ---------------- */
 
 function ConfigSection({ repo }: { repo: string }) {
   const fetcher = useCallback(() => getRepoConfig(repo), [repo]);
-  const { data, error, loading } = usePoll(fetcher, 0, false);
+  const { data, error, loading, refresh } = usePoll(fetcher, 0, false);
+
+  const versionsFetcher = useCallback(() => listConfigVersions(repo), [repo]);
+  const { data: versions, refresh: refreshVersions } = usePoll(
+    versionsFetcher,
+    0,
+    false
+  );
 
   const [text, setText] = useState("");
   const [initialized, setInitialized] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
-  const [saved, setSaved] = useState(false);
+  const [author, setAuthor] = useState(
+    () => window.localStorage.getItem("forge-author") ?? ""
+  );
+  const [message, setMessage] = useState("");
+  const [viewing, setViewing] = useState<number | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [pushedVersion, setPushedVersion] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
+
+  const currentVersion = data?.version ?? null;
 
   useEffect(() => {
     if (!initialized && !loading) {
@@ -773,15 +789,75 @@ function ConfigSection({ repo }: { repo: string }) {
     }
   }, [data, loading, initialized]);
 
-  const onSave = async () => {
-    setBusy(true);
-    setSaveError(null);
-    setSaved(false);
+  const setAuthorPersist = (value: string) => {
+    setAuthor(value);
     try {
-      await putRepoConfig(repo, text);
-      setSaved(true);
+      window.localStorage.setItem("forge-author", value);
+    } catch {
+      // storage unavailable — non-fatal
+    }
+  };
+
+  const onPush = async () => {
+    setBusy(true);
+    setActionError(null);
+    setPushedVersion(null);
+    try {
+      const res = await putRepoConfig(repo, text, author.trim(), message.trim());
+      setPushedVersion(res.version);
+      setMessage("");
+      refresh();
+      refreshVersions();
     } catch (err) {
-      setSaveError(err instanceof Error ? err.message : String(err));
+      setActionError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onView = async (version: number) => {
+    setActionError(null);
+    setPushedVersion(null);
+    try {
+      const rc = await getRepoConfig(repo, version);
+      if (rc) {
+        setText(rc.config);
+        setViewing(version);
+      }
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const backToCurrent = () => {
+    setText(data?.config ?? "");
+    setViewing(null);
+  };
+
+  const onRevert = async (version: number) => {
+    setActionError(null);
+    if (!author.trim()) {
+      setActionError("Enter your name in the author field before reverting.");
+      return;
+    }
+    if (
+      !window.confirm(
+        `This creates a new version identical to v${version}. Nothing is deleted.`
+      )
+    ) {
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await revertConfig(repo, version, author.trim());
+      setPushedVersion(res.version);
+      setViewing(null);
+      const rc = await getRepoConfig(repo);
+      setText(rc?.config ?? "");
+      refresh();
+      refreshVersions();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
     }
@@ -790,35 +866,124 @@ function ConfigSection({ repo }: { repo: string }) {
   return (
     <div>
       {error && <div className="error-banner">{error}</div>}
-      {initialized && data === null && text === "" && (
+      {initialized && data === null && (
         <div className="muted small-note">
           No config registered — pipelines for this repo can only be triggered
           manually until one is registered.
         </div>
       )}
+
+      {currentVersion !== null && (
+        <div className="config-editor-head">
+          <span className="cfg-chip">Current: v{currentVersion}</span>
+        </div>
+      )}
+
+      {viewing !== null && (
+        <div className="view-banner">
+          Viewing v{viewing} — current is v{currentVersion ?? "?"}
+          <button type="button" className="btn" onClick={backToCurrent}>
+            Back to current
+          </button>
+        </div>
+      )}
+
       <textarea
         rows={16}
         className="mono yaml-input config-textarea"
         value={text}
+        readOnly={viewing !== null}
         onChange={(e) => {
           setText(e.target.value);
-          setSaved(false);
+          setPushedVersion(null);
         }}
         spellCheck={false}
         placeholder="stages: [build, test, deploy]&#10;jobs:&#10;  ..."
       />
-      {saveError && <div className="error-banner">{saveError}</div>}
-      {saved && <div className="saved-note">Config saved.</div>}
-      <div className="form-actions">
+
+      {actionError && <div className="error-banner">{actionError}</div>}
+      {pushedVersion !== null && (
+        <div className="saved-note">Pushed v{pushedVersion}</div>
+      )}
+
+      <div className="push-row">
+        <label className="field push-author">
+          <span>Author</span>
+          <input
+            value={author}
+            onChange={(e) => setAuthorPersist(e.target.value)}
+            placeholder="your name"
+            required
+          />
+        </label>
+        <label className="field push-message">
+          <span>Change message (optional)</span>
+          <input
+            value={message}
+            onChange={(e) => setMessage(e.target.value)}
+            placeholder="what changed and why"
+          />
+        </label>
         <button
           type="button"
           className="btn btn-primary"
-          disabled={busy}
-          onClick={() => void onSave()}
+          disabled={busy || viewing !== null || !author.trim()}
+          onClick={() => void onPush()}
         >
-          Save config
+          Push new version
         </button>
       </div>
+
+      <h3 className="subsection-title">Version history</h3>
+      {versions && versions.length > 0 ? (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Version</th>
+                <th>Author</th>
+                <th>Message</th>
+                <th>When</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {versions.map((v) => (
+                <tr key={v.version}>
+                  <td className="mono">
+                    v{v.version}
+                    {v.version === currentVersion && (
+                      <span className="global-chip">current</span>
+                    )}
+                  </td>
+                  <td>{v.author}</td>
+                  <td>{v.message || <span className="muted">—</span>}</td>
+                  <td className="muted">{relativeTime(v.created_at)}</td>
+                  <td className="actions-cell">
+                    <button
+                      type="button"
+                      className="btn btn-icon"
+                      onClick={() => void onView(v.version)}
+                    >
+                      View
+                    </button>{" "}
+                    <button
+                      type="button"
+                      className="btn btn-icon"
+                      disabled={busy}
+                      onClick={() => void onRevert(v.version)}
+                    >
+                      Revert to this
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="muted">No versions yet.</div>
+      )}
     </div>
   );
 }

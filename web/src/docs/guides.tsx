@@ -262,7 +262,9 @@ function RunnerKubernetes() {
         <li>
           Start the manager — <code>KUBE_CONTEXT</code> is{" "}
           <strong>required</strong> (it refuses the kubeconfig
-          current-context to protect shared kubeconfigs):
+          current-context to protect shared kubeconfigs; it also accepts the
+          literal <code>in-cluster</code> to use the pod's ServiceAccount
+          when the manager runs inside the job cluster):
           <CodeBlock
             code={`KUBE_CONTEXT=my-ci-cluster KUBE_NAMESPACE=ci \\
 ./forge-runner --executor=kubernetes --id=k8s-manager-1 --tags=k8s \\
@@ -300,6 +302,11 @@ function RunnerKubernetes() {
         <code>--concurrency N</code> lets one manager keep up to N pods in
         flight.
       </Note>
+      <p>
+        ServiceAccount permissions, network paths, and both deployment
+        topologies:{" "}
+        <Link to="/docs/k8s-deployment">Deployment & RBAC reference →</Link>
+      </p>
       <h2>Alternative: resident fleet</h2>
       <p>
         When per-job pod overhead isn't wanted, run N resident shell/docker
@@ -354,6 +361,240 @@ kubectl scale deploy/forge-runners --replicas=10`}
         job after 90s and the registry shows the runner offline after 30s —
         pod churn is safe.
       </Note>
+    </>
+  );
+}
+
+function K8sDeployment() {
+  return (
+    <>
+      <p>
+        What exactly the kubernetes executor needs — ServiceAccount
+        permissions, pod requirements, and network paths — for both
+        topologies: manager inside the job cluster, and manager targeting a{" "}
+        <strong>separate</strong> cluster.
+      </p>
+
+      <h2>Who talks to whom</h2>
+      <DocTable
+        head={["Path", "Protocol", "Needed by"]}
+        rows={[
+          [
+            "manager → forge-server",
+            <>HTTP(S) outbound (<code>SERVER_URL</code>)</>,
+            "acquire jobs, stream logs, upload/download artifacts",
+          ],
+          [
+            "manager → VCS (github.com / bitbucket.org)",
+            "HTTPS outbound",
+            <>source clone happens <strong>on the manager</strong></>,
+          ],
+          [
+            "manager → job cluster API server",
+            "HTTPS (kubectl)",
+            "pod create/exec/cp/delete",
+          ],
+          ["job pod → image registry", "HTTPS", "image pull (kubelet)"],
+          [
+            "job pod → anything else",
+            "—",
+            <>
+              <strong>nothing required</strong> — job pods never talk to
+              forge-server or the VCS; source and artifacts move through the
+              manager via <code>kubectl cp</code>
+            </>,
+          ],
+        ]}
+      />
+      <Note tone="info">
+        That last row is what makes the separate-cluster case easy: the job
+        cluster needs <strong>no route to Forge at all</strong> — only the
+        manager needs connectivity to both sides.
+      </Note>
+
+      <h2>Exact RBAC (namespace-scoped)</h2>
+      <p>
+        The executor issues: <code>kubectl run</code> (create pod),{" "}
+        <code>kubectl wait</code> (get/watch), <code>kubectl cp</code> and{" "}
+        <code>kubectl exec</code> (pods/exec), <code>kubectl delete pod</code>.
+        Nothing cluster-scoped, nothing beyond one namespace:
+      </p>
+      <CodeBlock
+        code={`apiVersion: v1
+kind: Namespace
+metadata: {name: forge-ci}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: forge-runner, namespace: forge-ci}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: forge-runner, namespace: forge-ci}
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["create", "get", "list", "watch", "delete"]
+- apiGroups: [""]
+  resources: ["pods/exec"]        # kubectl exec AND kubectl cp
+  verbs: ["create"]
+- apiGroups: [""]
+  resources: ["pods/log"]         # kubectl wait error diagnostics
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: forge-runner, namespace: forge-ci}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: forge-runner}
+subjects:
+- {kind: ServiceAccount, name: forge-runner, namespace: forge-ci}`}
+      />
+
+      <h2>Topology A — manager inside the job cluster</h2>
+      <Steps>
+        <li>Apply the RBAC above.</li>
+        <li>
+          Build the manager image (includes kubectl + git):
+          <CodeBlock
+            code={`docker build -f deploy/Dockerfile.runner-k8s -t <registry>/forge-runner-k8s .`}
+          />
+        </li>
+        <li>
+          Deploy the manager with <code>KUBE_CONTEXT=in-cluster</code> (uses
+          the pod's ServiceAccount — no kubeconfig needed):
+          <CodeBlock
+            code={`apiVersion: apps/v1
+kind: Deployment
+metadata: {name: forge-runner-manager, namespace: forge-ci}
+spec:
+  replicas: 1                    # one manager; scale jobs with RUNNER_CONCURRENCY
+  selector: {matchLabels: {app: forge-runner-manager}}
+  template:
+    metadata: {labels: {app: forge-runner-manager}}
+    spec:
+      serviceAccountName: forge-runner
+      containers:
+      - name: manager
+        image: <registry>/forge-runner-k8s:latest
+        env:
+        - {name: SERVER_URL, value: "https://forge.internal.example.com"}
+        - {name: EXECUTOR, value: "kubernetes"}
+        - {name: KUBE_CONTEXT, value: "in-cluster"}
+        - {name: KUBE_NAMESPACE, value: "forge-ci"}
+        - {name: RUNNER_TAGS, value: "k8s"}
+        - {name: RUNNER_CONCURRENCY, value: "4"}
+        - name: RUNNER_ID
+          valueFrom: {fieldRef: {fieldPath: metadata.name}}`}
+          />
+        </li>
+      </Steps>
+
+      <h2>Topology B — manager targets a separate cluster</h2>
+      <p>
+        The manager runs anywhere (a VM next to forge-server, another
+        cluster) and drives job pods in a remote cluster it holds credentials
+        for.
+      </p>
+      <Steps>
+        <li>
+          In the <strong>job cluster</strong>: apply the RBAC above, then mint
+          a token for the ServiceAccount (long-lived secret form, k8s ≥1.24):
+          <CodeBlock
+            code={`apiVersion: v1
+kind: Secret
+metadata:
+  name: forge-runner-token
+  namespace: forge-ci
+  annotations: {kubernetes.io/service-account.name: forge-runner}
+type: kubernetes.io/service-account-token`}
+          />
+          <CodeBlock
+            code={`TOKEN=$(kubectl -n forge-ci get secret forge-runner-token -o jsonpath='{.data.token}' | base64 -d)
+CA=$(kubectl -n forge-ci get secret forge-runner-token -o jsonpath='{.data.ca\\.crt}')
+APISERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')`}
+          />
+        </li>
+        <li>
+          Build a dedicated kubeconfig for the manager (never reuse a
+          human's):
+          <CodeBlock
+            code={`cat > forge-runner.kubeconfig <<EOF
+apiVersion: v1
+kind: Config
+clusters:
+- name: ci-cluster
+  cluster: {server: $APISERVER, certificate-authority-data: $CA}
+users:
+- name: forge-runner
+  user: {token: $TOKEN}
+contexts:
+- name: forge-ci
+  context: {cluster: ci-cluster, user: forge-runner, namespace: forge-ci}
+EOF`}
+          />
+        </li>
+        <li>
+          Run the manager pointing at that context (and only that file):
+          <CodeBlock
+            code={`KUBECONFIG=/etc/forge/forge-runner.kubeconfig \\
+KUBE_CONTEXT=forge-ci KUBE_NAMESPACE=forge-ci \\
+SERVER_URL=https://forge.internal.example.com \\
+./forge-runner --executor=kubernetes --id=k8s-remote-1 --tags=k8s --concurrency=4`}
+          />
+          If the manager itself runs in some cluster, mount the kubeconfig
+          from a Secret and set <code>KUBECONFIG</code> to the mount path in
+          the Deployment.
+        </li>
+        <li>
+          Network: the manager host must reach the remote API server
+          (firewall / private endpoint allowlist) <em>and</em> forge-server.
+          Job pods still need nothing.
+        </li>
+      </Steps>
+
+      <h2>Job pod requirements & namespace hygiene</h2>
+      <Steps>
+        <li>
+          <strong>Images</strong>: must contain <code>sh</code> and{" "}
+          <code>tar</code> (alpine, debian, and typical build images qualify;
+          distroless does not).
+        </li>
+        <li>
+          <strong>Registry access</strong>: private registries need an
+          imagePullSecret on the <code>forge-runner</code> ServiceAccount or
+          namespace default.
+        </li>
+        <li>
+          <strong>Quotas</strong>: job pods currently run without resource
+          requests/limits — set a namespace <code>LimitRange</code> so
+          runaway jobs can't starve the cluster:
+          <CodeBlock
+            code={`apiVersion: v1
+kind: LimitRange
+metadata: {name: forge-job-defaults, namespace: forge-ci}
+spec:
+  limits:
+  - type: Container
+    default: {cpu: "1", memory: 2Gi}
+    defaultRequest: {cpu: 250m, memory: 256Mi}`}
+          />
+        </li>
+        <li>
+          <strong>Cleanup guarantees</strong>: pods are deleted after each
+          job; if a manager dies mid-job the pod's <code>sleep 7200</code>{" "}
+          entrypoint self-terminates within 2h. All job pods carry{" "}
+          <code>app=forge-ci-job</code> — a periodic
+          <CodeBlock
+            code={`kubectl -n forge-ci delete pod -l app=forge-ci-job --field-selector=status.phase=Succeeded`}
+          />
+          is a belt-and-braces cron.
+        </li>
+        <li>
+          <strong>Isolation</strong>: use a dedicated namespace per trust
+          boundary; nothing in the executor requires privileged pods,
+          hostPath, or cluster-scoped access.
+        </li>
+      </Steps>
     </>
   );
 }
@@ -458,8 +699,9 @@ function RunnerGroups() {
       </Steps>
       <Note tone="warn">
         Tags are capability labels, not queues — if no online runner
-        advertises all of a job's tags, the job sits in{" "}
-        <code>pending</code> until one appears.
+        advertises all of a job's tags, the job sits in <code>pending</code>{" "}
+        and fails after the server's <code>QUEUE_TIMEOUT</code> (24h) rather
+        than waiting forever.
       </Note>
       <Note tone="info" title="Concurrency">
         A shell/docker runner processes one job at a time — run one process
@@ -520,8 +762,50 @@ jobs:
           [<code>tags</code>, "Runner routing: job runs only on a runner advertising all tags (overrides repo default tags)"],
           [<code>artifacts.paths</code>, "Workspace-relative paths archived as artifacts.tar.gz on success; missing paths are skipped"],
           [<><code>only</code> / <code>except</code></>, "Ref globs; excluded jobs are dropped from the DAG at compile time"],
+          [<code>timeout</code>, <>Max run time (Go duration, min 1m); see Timeouts below</>],
         ]}
       />
+      <h2>Timeouts (TTL)</h2>
+      <p>
+        Every job has a TTL. Set it per job with <code>timeout:</code> (a Go
+        duration like <code>"30m"</code>, minimum 1m) or pipeline-wide with a{" "}
+        <code>default:</code> block:
+      </p>
+      <CodeBlock
+        code={`default:
+  timeout: 45m          # pipeline-global default
+stages: [build, test]
+jobs:
+  build:
+    stage: build
+    script: [make build]           # inherits 45m
+  integration:
+    stage: test
+    timeout: "30m"                 # job-level override
+    script: [make integration]`}
+      />
+      <p>
+        Precedence: job <code>timeout</code> &gt; pipeline{" "}
+        <code>default.timeout</code> &gt; server env{" "}
+        <code>DEFAULT_JOB_TIMEOUT</code> (1h) — all capped by{" "}
+        <code>MAX_JOB_TIMEOUT</code> (4h).
+      </p>
+      <Steps>
+        <li>
+          When the TTL elapses the runner kills the job — the whole process
+          group, docker container, or k8s pod. The log ends with{" "}
+          <code>ERROR: job timed out after X and was killed</code> and the
+          exit code is <code>124</code>.
+        </li>
+        <li>
+          A server-side backstop fails overdue jobs (+2m grace) even if a
+          runner misbehaves or dies.
+        </li>
+        <li>
+          Jobs stuck in the queue (e.g. no runner matches their tags) fail
+          after <code>QUEUE_TIMEOUT</code> (24h) instead of waiting forever.
+        </li>
+      </Steps>
       <h2>Artifact passing</h2>
       <p>
         A job automatically receives the artifacts of the jobs it{" "}
@@ -840,6 +1124,212 @@ function VariablesSecrets() {
   );
 }
 
+/* ================= SSO ================= */
+
+function SsoOverview() {
+  return (
+    <>
+      <p>
+        Forge starts in <strong>open mode</strong> (no login). The moment any
+        provider is enabled in <Link to="/admin/sso">Admin → SSO</Link>, the
+        whole API and UI require a signed-in session — except the runner
+        protocol, webhooks, and the auth endpoints themselves, which have
+        their own authentication.
+      </p>
+      <Note tone="info" title="Session identity on approvals">
+        Once signed in, approvals use the <strong>authenticated email</strong>:
+        the server ignores any client-supplied approver name. RBAC membership
+        should therefore use work emails as usernames — see{" "}
+        <Link to="/docs/approvals">Approvals & RBAC</Link>.
+      </Note>
+      <Steps>
+        <li>
+          Set <code>EXTERNAL_URL</code> on forge-server to your real https URL
+          — every provider form derives its <strong>Redirect URI</strong> from
+          it. Also set <code>FRONTEND_URL</code> to where the dashboard lives
+          so post-login redirects land correctly.
+        </li>
+        <li>
+          Configure each provider on its own form in Admin → SSO:{" "}
+          <Link to="/docs/sso-google">Google</Link>,{" "}
+          <Link to="/docs/sso-microsoft">Microsoft (Entra ID)</Link>,{" "}
+          <Link to="/docs/sso-github">GitHub</Link>.
+        </li>
+        <li>
+          Tick <strong>Enabled</strong> and save — enforcement turns on for
+          everyone immediately.
+        </li>
+      </Steps>
+      <Note tone="warn" title="Lockout escape hatch">
+        Enabling a provider with bad credentials locks the UI (config API
+        included — by design). Disable via SQL and retry:{" "}
+        <code>UPDATE sso_providers SET enabled=false;</code> (takes effect
+        within ~5s).
+      </Note>
+      <h2>Operational notes</h2>
+      <Steps>
+        <li>
+          Sessions last 12h, are HttpOnly cookies backed by server-side rows,
+          and can be revoked by deleting from the <code>sessions</code> table.
+        </li>
+        <li>
+          Secrets are write-only through the API (reads return{" "}
+          <code>has_secret</code>), stored plaintext in Postgres today — same
+          encrypt-at-rest caveat as CI variables.
+        </li>
+        <li>
+          Not yet: no roles on top of login (any signed-in user can reach
+          admin pages — repo-role checks still apply to approvals), no SAML,
+          no SCIM provisioning, no session-idle timeout.
+        </li>
+      </Steps>
+    </>
+  );
+}
+
+function SsoGoogle() {
+  return (
+    <>
+      <p>
+        Configure Google sign-in on the Google form in{" "}
+        <Link to="/admin/sso">Admin → SSO</Link>. The form shows the exact
+        Redirect URI to paste into the Google console.
+      </p>
+      <Steps>
+        <li>
+          Open <code>https://console.cloud.google.com</code> → select/create a
+          project.
+        </li>
+        <li>
+          <strong>APIs & Services → OAuth consent screen</strong>: user type{" "}
+          <em>Internal</em> (Workspace org) or <em>External</em>; fill app
+          name and contacts; scopes <code>openid</code>, <code>email</code>,{" "}
+          <code>profile</code> (non-sensitive, no verification needed).
+        </li>
+        <li>
+          <strong>
+            APIs & Services → Credentials → Create credentials → OAuth client
+            ID
+          </strong>
+          : application type <strong>Web application</strong>; Authorized
+          redirect URI: paste the Redirect URI shown on Forge's Google form
+          (<code>https://&lt;forge-host&gt;/api/v1/auth/callback/google</code>).
+        </li>
+        <li>
+          Copy the <strong>Client ID</strong> and <strong>Client secret</strong>{" "}
+          into Forge's Google form.
+        </li>
+        <li>
+          Optional: set <strong>Allowed domain</strong> (e.g.{" "}
+          <code>meesho.com</code>) — Forge both hints Google's account picker
+          (<code>hd</code>) and enforces the email domain server-side.
+        </li>
+        <li>
+          Tick <strong>Enabled</strong>, save, then use "Continue with Google"
+          from the login page.
+        </li>
+      </Steps>
+      <Note tone="warn">
+        Saving with Enabled turns on login enforcement for everyone
+        immediately — see the{" "}
+        <Link to="/docs/sso-overview">overview</Link> for the lockout escape
+        hatch.
+      </Note>
+    </>
+  );
+}
+
+function SsoMicrosoft() {
+  return (
+    <>
+      <p>
+        Configure Microsoft (Entra ID / Azure AD) sign-in on the Microsoft
+        form in <Link to="/admin/sso">Admin → SSO</Link>.
+      </p>
+      <Steps>
+        <li>
+          Open <code>https://portal.azure.com</code> →{" "}
+          <strong>
+            Microsoft Entra ID → App registrations → New registration
+          </strong>
+          .
+        </li>
+        <li>
+          Name it (e.g. <code>Forge CI</code>); supported account types:{" "}
+          <em>Accounts in this organizational directory only</em> for
+          single-tenant.
+        </li>
+        <li>
+          Redirect URI: platform <strong>Web</strong>, value from Forge's
+          Microsoft form
+          (<code>https://&lt;forge-host&gt;/api/v1/auth/callback/microsoft</code>).
+        </li>
+        <li>
+          After creation, from <strong>Overview</strong> copy:{" "}
+          <strong>Application (client) ID</strong> → Forge's Client ID field;{" "}
+          <strong>Directory (tenant) ID</strong> → Forge's Tenant field (or
+          leave <code>common</code> for multi-tenant).
+        </li>
+        <li>
+          <strong>Certificates & secrets → New client secret</strong> → copy
+          the secret <strong>Value</strong> (not the ID) into Forge. Note its
+          expiry — rotate before then.
+        </li>
+        <li>
+          API permissions: the default delegated{" "}
+          <code>openid email profile</code> (Microsoft Graph) suffice; grant
+          admin consent if your tenant requires it.
+        </li>
+        <li>Enable and test.</li>
+      </Steps>
+      <Note tone="warn">
+        Client secrets in Entra ID expire — note the expiry date when you
+        create one and rotate before then, or logins will start failing.
+      </Note>
+    </>
+  );
+}
+
+function SsoGithub() {
+  return (
+    <>
+      <p>
+        Configure GitHub sign-in on the GitHub form in{" "}
+        <Link to="/admin/sso">Admin → SSO</Link>.
+      </p>
+      <Steps>
+        <li>
+          GitHub →{" "}
+          <strong>
+            Settings → Developer settings → OAuth Apps → New OAuth App
+          </strong>{" "}
+          (use an org-owned app under the org's settings for team use).
+        </li>
+        <li>
+          Homepage URL: your Forge URL.{" "}
+          <strong>Authorization callback URL</strong>: from Forge's GitHub
+          form
+          (<code>https://&lt;forge-host&gt;/api/v1/auth/callback/github</code>).
+        </li>
+        <li>
+          Register, then <strong>Generate a new client secret</strong>; copy
+          Client ID + secret into Forge's GitHub form.
+        </li>
+        <li>
+          Scopes are requested by Forge automatically (
+          <code>read:user user:email</code> — to read the verified primary
+          email).
+        </li>
+        <li>
+          Optional Allowed domain restricts sign-ins by email domain
+          server-side.
+        </li>
+        <li>Enable and test.</li>
+      </Steps>
+    </>
+  );
+}
+
 export const GUIDES: Guide[] = [
   {
     slug: "add-a-repo",
@@ -864,6 +1354,12 @@ export const GUIDES: Guide[] = [
     group: "Runners",
     title: "Kubernetes runner fleet",
     render: RunnerKubernetes,
+  },
+  {
+    slug: "k8s-deployment",
+    group: "Runners",
+    title: "Kubernetes: access & RBAC",
+    render: K8sDeployment,
   },
   {
     slug: "runner-vm",
@@ -900,5 +1396,29 @@ export const GUIDES: Guide[] = [
     group: "Security",
     title: "Variables & secrets",
     render: VariablesSecrets,
+  },
+  {
+    slug: "sso-overview",
+    group: "Security",
+    title: "SSO overview",
+    render: SsoOverview,
+  },
+  {
+    slug: "sso-google",
+    group: "Security",
+    title: "SSO: Google",
+    render: SsoGoogle,
+  },
+  {
+    slug: "sso-microsoft",
+    group: "Security",
+    title: "SSO: Microsoft (Entra ID)",
+    render: SsoMicrosoft,
+  },
+  {
+    slug: "sso-github",
+    group: "Security",
+    title: "SSO: GitHub",
+    render: SsoGithub,
   },
 ];

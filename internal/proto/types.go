@@ -5,13 +5,16 @@ package proto
 import "time"
 
 type Pipeline struct {
-	ID        int64         `json:"id"`
-	Repo      string        `json:"repo"`
-	Ref       string        `json:"ref"`
-	SHA       string        `json:"sha"`
-	Status    string        `json:"status"`
-	Stages    []StageStatus `json:"stages"`
-	CreatedAt time.Time     `json:"created_at"`
+	ID     int64         `json:"id"`
+	Repo   string        `json:"repo"`
+	Ref    string        `json:"ref"`
+	SHA    string        `json:"sha"`
+	Status string        `json:"status"`
+	Stages []StageStatus `json:"stages"`
+	// ConfigVersion is the registered config version this pipeline ran;
+	// nil means a one-off custom config was supplied at run time.
+	ConfigVersion *int      `json:"config_version"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 // StageStatus is the derived status of one stage, for the mini per-stage
@@ -59,6 +62,11 @@ type RunnerJob struct {
 	Env        map[string]string `json:"env"`
 
 	ArtifactPaths []string `json:"artifact_paths"`
+
+	// TimeoutSeconds is the resolved execution timeout (job value clamped to
+	// the server cap, or the server default). The runner kills the job when
+	// it elapses; the scheduler backstops with a grace period.
+	TimeoutSeconds int `json:"timeout_seconds"`
 
 	// Source checkout: when CloneURL is set (repo is registered) the runner
 	// clones SHA into the workspace before running. RedactValues must never

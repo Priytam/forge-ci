@@ -97,6 +97,12 @@ forks each one into its own ephemeral Pod (created on acquire, deleted after).
    within 2h; all job pods carry the `app=forge-ci-job` label.
 4. Job images need `sh` and `tar` (alpine and typical build images do).
 
+Full deployment reference — exact ServiceAccount/Role RBAC, the
+manager-in-cluster Deployment (`KUBE_CONTEXT=in-cluster`), driving a
+**separate** job cluster via a dedicated kubeconfig, network matrix, quotas —
+lives in [kubernetes-deployment.md](kubernetes-deployment.md). The
+kubectl-equipped manager image is `deploy/Dockerfile.runner-k8s`.
+
 ## 3b. Alternative: fleet of shell/docker runners on Kubernetes
 
 When per-job pod overhead isn't wanted, run N resident runners as a

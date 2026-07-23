@@ -11,6 +11,7 @@ import { duration, getPipeline, isTerminalStatus, shortSha, type Job } from "../
 import { usePoll } from "../hooks/usePoll";
 import StatusBadge from "../components/StatusBadge";
 import { StatusIcon } from "../components/StageDots";
+import ConfigChip from "../components/ConfigChip";
 import ApprovalButtons from "../components/ApprovalButtons";
 
 interface Stage {
@@ -219,6 +220,7 @@ export default function PipelineDetail() {
           </h1>
           <div className="pipeline-meta">
             <span className="mono sha">{shortSha(pipeline.sha)}</span>
+            <ConfigChip version={pipeline.config_version ?? null} />
           </div>
         </div>
         <StatusBadge status={pipeline.status} />

@@ -3,8 +3,12 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/url"
+	"os"
+	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -46,6 +50,38 @@ func (s *Store) ListRegisteredRepos(ctx context.Context) ([]proto.RepoRegistrati
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// ResolveRef resolves a branch/tag name to its tip SHA via git ls-remote
+// against the registered clone URL. Returns ErrNotFound when the repo isn't
+// registered; token is stripped from any error text.
+func (s *Store) ResolveRef(ctx context.Context, repo, ref string) (string, error) {
+	cloneURL, token, err := s.cloneAuth(ctx, repo)
+	if err != nil {
+		return "", err
+	}
+	if cloneURL == "" {
+		return "", ErrNotFound
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "ls-remote", cloneURL,
+		"refs/heads/"+ref, "refs/tags/"+ref)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := string(out)
+		if token != "" {
+			msg = strings.ReplaceAll(msg, token, "[REDACTED]")
+		}
+		return "", fmt.Errorf("ls-remote: %s", strings.TrimSpace(msg))
+	}
+	line := strings.TrimSpace(string(out))
+	if line == "" {
+		return "", fmt.Errorf("ref %q not found in %s", ref, repo)
+	}
+	fields := strings.Fields(strings.Split(line, "\n")[0])
+	return fields[0], nil
 }
 
 // cloneAuth returns the clone URL with credentials embedded (or "" when the

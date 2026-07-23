@@ -27,17 +27,23 @@ import (
 //
 // KUBE_CONTEXT is REQUIRED — the executor refuses to run against the
 // kubeconfig's current context to prevent accidents with production clusters.
-// KUBE_NAMESPACE defaults to "default". Job images need sh + tar (kubectl cp
-// uses tar), which alpine and most build images have.
+// The sentinel value "in-cluster" runs kubectl with no --context flag, which
+// makes it use the pod's ServiceAccount when the manager runs inside the
+// target cluster. KUBE_NAMESPACE defaults to "default". Job images need
+// sh + tar (kubectl cp uses tar), which alpine and most build images have.
 type kubeExecutor struct {
-	kubeContext string
+	kubeContext string // "" means in-cluster (ServiceAccount auth)
 	namespace   string
 }
 
 func newKubeExecutor() (Executor, error) {
 	kctx := os.Getenv("KUBE_CONTEXT")
 	if kctx == "" {
-		return nil, fmt.Errorf("kubernetes executor requires KUBE_CONTEXT to be set explicitly (refusing to use the kubeconfig current context)")
+		return nil, fmt.Errorf("kubernetes executor requires KUBE_CONTEXT to be set explicitly " +
+			"(a named kubeconfig context, or \"in-cluster\" to use the pod ServiceAccount)")
+	}
+	if kctx == "in-cluster" {
+		kctx = ""
 	}
 	ns := os.Getenv("KUBE_NAMESPACE")
 	if ns == "" {
@@ -49,7 +55,10 @@ func newKubeExecutor() (Executor, error) {
 func (k *kubeExecutor) Name() string { return "kubernetes" }
 
 func (k *kubeExecutor) kubectl(ctx context.Context, args ...string) *exec.Cmd {
-	base := []string{"--context", k.kubeContext, "-n", k.namespace}
+	base := []string{"-n", k.namespace}
+	if k.kubeContext != "" {
+		base = append([]string{"--context", k.kubeContext}, base...)
+	}
 	return exec.CommandContext(ctx, "kubectl", append(base, args...)...)
 }
 

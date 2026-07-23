@@ -1,0 +1,19 @@
+FROM golang:1.25-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd ./cmd
+COPY internal ./internal
+RUN CGO_ENABLED=0 go build -o /out/forge-runner ./cmd/runner
+
+# Runner manager image for the kubernetes executor: needs kubectl to drive
+# per-job ephemeral pods, plus git for source checkout on the manager.
+FROM alpine:3
+RUN apk add --no-cache git curl tar \
+ && ARCH=$(apk --print-arch | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
+ && curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/v1.31.0/bin/linux/${ARCH}/kubectl" \
+ && chmod +x /usr/local/bin/kubectl
+RUN adduser -D forge
+USER forge
+COPY --from=build /out/forge-runner /usr/local/bin/forge-runner
+ENTRYPOINT ["forge-runner"]

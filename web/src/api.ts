@@ -29,6 +29,8 @@ export interface Pipeline {
   created_at: string;
   /** Derived per-stage statuses, ordered by stage_idx. */
   stages: StageStatus[];
+  /** Registered config version this run used; null = one-off custom config. */
+  config_version: number | null;
 }
 
 export interface Job {
@@ -106,6 +108,14 @@ export interface ProtectedEnvironment {
 export interface RepoConfig {
   repo: string;
   config: string;
+  version: number;
+}
+
+export interface ConfigVersion {
+  version: number;
+  author: string;
+  message: string;
+  created_at: string;
 }
 
 export interface RepoSettings {
@@ -154,7 +164,8 @@ export interface ApprovalRequest {
 export interface CreatePipelineRequest {
   repo: string;
   ref: string;
-  sha: string;
+  /** Optional: connected repos resolve the ref tip server-side. */
+  sha?: string;
   config: string;
 }
 
@@ -177,6 +188,15 @@ async function parseError(res: Response): Promise<ApiError> {
     }
   } catch {
     // response body was not JSON; keep default message
+  }
+  // When SSO enforcement is on, every non-auth endpoint 401s — send the
+  // user to the login page (auth endpoints bypass this helper).
+  if (
+    res.status === 401 &&
+    typeof window !== "undefined" &&
+    !window.location.pathname.startsWith("/login")
+  ) {
+    window.location.assign("/login");
   }
   return new ApiError(res.status, message);
 }
@@ -338,17 +358,50 @@ export function upsertProtectedEnvironment(
   });
 }
 
-export async function getRepoConfig(repo: string): Promise<RepoConfig | null> {
+export async function getRepoConfig(
+  repo: string,
+  version?: number
+): Promise<RepoConfig | null> {
+  const qs = `?repo=${encodeURIComponent(repo)}${
+    version !== undefined ? `&version=${version}` : ""
+  }`;
   try {
-    return await getJSON<RepoConfig>(`/repo-configs?repo=${encodeURIComponent(repo)}`);
+    return await getJSON<RepoConfig>(`/repo-configs${qs}`);
   } catch (err) {
     if (err instanceof ApiError && err.status === 404) return null;
     throw err;
   }
 }
 
-export function putRepoConfig(repo: string, config: string): Promise<void> {
-  return requestVoid("PUT", "/repo-configs", { repo, config });
+export function putRepoConfig(
+  repo: string,
+  config: string,
+  author: string,
+  message: string
+): Promise<{ repo: string; version: number }> {
+  return putJSON<{ repo: string; version: number }>("/repo-configs", {
+    repo,
+    config,
+    author,
+    message,
+  });
+}
+
+export function listConfigVersions(repo: string): Promise<ConfigVersion[]> {
+  return getJSON<ConfigVersion[]>(
+    `/repo-configs/versions?repo=${encodeURIComponent(repo)}`
+  );
+}
+
+export function revertConfig(
+  repo: string,
+  version: number,
+  author: string
+): Promise<{ repo: string; version: number; reverted_to: number }> {
+  return postJSON<{ repo: string; version: number; reverted_to: number }>(
+    "/repo-configs/revert",
+    { repo, version, author }
+  );
 }
 
 export function listRegistry(): Promise<RegisteredRepo[]> {
@@ -368,6 +421,128 @@ export function putRepoSettings(
   default_runner_tags: string[]
 ): Promise<void> {
   return requestVoid("PUT", "/repo-settings", { repo, default_runner_tags });
+}
+
+// --- Stats / dashboard ---
+
+export interface StatsNow {
+  running_jobs: number;
+  pending_jobs: number;
+  blocked_jobs: number;
+  online_runners: number;
+  active_executors: number;
+  pipelines_today: number;
+  /** -1 = no data in the window */
+  success_rate_24h: number;
+}
+
+export interface PipelineBucket {
+  hour: string;
+  success: number;
+  failed: number;
+  other: number;
+}
+
+export interface JobBucket {
+  hour: string;
+  count: number;
+}
+
+export interface Stats {
+  now: StatsNow;
+  /** exactly 24 hourly buckets, oldest first */
+  pipelines: PipelineBucket[];
+  jobs: JobBucket[];
+}
+
+export function getStats(): Promise<Stats> {
+  return getJSON<Stats>("/stats");
+}
+
+// --- Auth / SSO ---
+
+export interface AuthUser {
+  email: string;
+  name: string;
+  provider: string;
+  expires_at: string;
+}
+
+export interface AuthProviders {
+  providers: string[];
+  enforced: boolean;
+}
+
+/** Public endpoint; bypasses the central 401 redirect. */
+export async function getAuthProviders(): Promise<AuthProviders> {
+  const res = await fetch(`${BASE}/auth/providers`);
+  if (!res.ok) {
+    throw new ApiError(res.status, `Request failed with status ${res.status}`);
+  }
+  return (await res.json()) as AuthProviders;
+}
+
+let meCache: Promise<AuthUser | null> | null = null;
+
+/**
+ * Current session identity, or null when signed out. 401 here is normal in
+ * open mode, so this bypasses the central redirect. Cached per page load.
+ */
+export function getMe(force = false): Promise<AuthUser | null> {
+  if (!meCache || force) {
+    meCache = (async () => {
+      try {
+        const res = await fetch(`${BASE}/auth/me`);
+        if (!res.ok) return null;
+        return (await res.json()) as AuthUser;
+      } catch {
+        return null;
+      }
+    })();
+  }
+  return meCache;
+}
+
+/** Full-page navigation target for starting an IdP login (302s to the IdP). */
+export function loginUrl(provider: string): string {
+  return `${BASE}/auth/login/${encodeURIComponent(provider)}`;
+}
+
+export async function logout(): Promise<void> {
+  await fetch(`${BASE}/auth/logout`, { method: "POST" });
+  meCache = null;
+}
+
+export interface SsoProviderConfig {
+  provider: string;
+  enabled: boolean;
+  client_id: string;
+  has_secret: boolean;
+  tenant: string;
+  allowed_domain: string;
+}
+
+export interface SsoConfig {
+  providers: SsoProviderConfig[];
+  redirect_uris: Record<string, string>;
+}
+
+export function getSsoConfig(): Promise<SsoConfig> {
+  return getJSON<SsoConfig>("/sso");
+}
+
+export interface SsoProviderInput {
+  provider: string;
+  enabled: boolean;
+  client_id: string;
+  /** omit / empty to keep the stored secret */
+  client_secret?: string;
+  tenant?: string;
+  allowed_domain?: string;
+}
+
+export function putSsoProvider(input: SsoProviderInput): Promise<void> {
+  return requestVoid("PUT", "/sso", input);
 }
 
 /** Human-readable byte size, e.g. "1.4 MB". */

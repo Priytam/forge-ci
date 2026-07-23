@@ -110,8 +110,10 @@ Runner protocol:
 
 - [VCS integration (GitHub/Bitbucket webhooks)](docs/vcs-integration.md)
 - [Registering runners (VM/systemd, Docker, Kubernetes)](docs/runners.md)
+- [Kubernetes executor: deployment, access & RBAC (incl. separate-cluster)](docs/kubernetes-deployment.md)
 - [Artifact storage (local, MinIO, S3, GCS)](docs/artifact-storage.md)
 - [Roles, membership & approval rules](docs/rbac-approvals.md)
+- [SSO setup: Google, Microsoft, GitHub](docs/sso.md)
 - [Feature comparison vs GitLab CI + roadmap](docs/feature-comparison.md)
 
 ## What's here beyond the core

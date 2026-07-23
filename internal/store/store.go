@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"time"
 
@@ -31,7 +32,23 @@ var (
 	ErrSelfApproval  = errors.New("pipeline author may not approve their own deployment")
 )
 
-type Store struct{ pool *pgxpool.Pool }
+type Store struct {
+	pool *pgxpool.Pool
+
+	// Execution-timeout policy (env-configured, see New).
+	defaultJobTimeout time.Duration // DEFAULT_JOB_TIMEOUT, jobs without timeout:
+	maxJobTimeout     time.Duration // MAX_JOB_TIMEOUT, hard cap on job values
+	queueTimeout      time.Duration // QUEUE_TIMEOUT, max time in pending
+}
+
+func envDuration(key string, fallback time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return fallback
+}
 
 func New(ctx context.Context, dsn string) (*Store, error) {
 	pool, err := pgxpool.New(ctx, dsn)
@@ -44,14 +61,21 @@ func New(ctx context.Context, dsn string) (*Store, error) {
 	if _, err := pool.Exec(ctx, migrations); err != nil {
 		return nil, fmt.Errorf("migrations: %w", err)
 	}
-	return &Store{pool: pool}, nil
+	return &Store{
+		pool:              pool,
+		defaultJobTimeout: envDuration("DEFAULT_JOB_TIMEOUT", time.Hour),
+		maxJobTimeout:     envDuration("MAX_JOB_TIMEOUT", 4*time.Hour),
+		queueTimeout:      envDuration("QUEUE_TIMEOUT", 24*time.Hour),
+	}, nil
 }
 
 func (s *Store) Close() { s.pool.Close() }
 
 // ---- pipelines ----
 
-func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequest, jobs []compiler.CompiledJob) (*proto.Pipeline, error) {
+// CreatePipeline records the run. configVersion links it to the registered
+// config version it was compiled from (nil = one-off custom config).
+func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequest, jobs []compiler.CompiledJob, configVersion *int) (*proto.Pipeline, error) {
 	// Repo-level runner-group selection: jobs without explicit tags inherit
 	// the repo's default runner tags (job-level tags: overrides).
 	defaultTags, err := s.GetRepoDefaultTags(ctx, req.Repo)
@@ -68,10 +92,11 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 	var p proto.Pipeline
 	p.Repo, p.Ref, p.SHA = req.Repo, req.Ref, req.SHA
 	p.Status = "created"
+	p.ConfigVersion = configVersion
 	err = tx.QueryRow(ctx,
-		`INSERT INTO pipelines (repo, ref, sha, config_yaml, triggered_by)
-		 VALUES ($1,$2,$3,$4,$5) RETURNING id, created_at`,
-		req.Repo, req.Ref, req.SHA, req.Config, req.TriggeredBy).Scan(&p.ID, &p.CreatedAt)
+		`INSERT INTO pipelines (repo, ref, sha, config_yaml, triggered_by, config_version)
+		 VALUES ($1,$2,$3,$4,$5,$6) RETURNING id, created_at`,
+		req.Repo, req.Ref, req.SHA, req.Config, req.TriggeredBy, configVersion).Scan(&p.ID, &p.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -84,6 +109,10 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 		if len(tags) == 0 {
 			tags = defaultTags
 		}
+		timeoutSec := j.TimeoutSec
+		if max := int(s.maxJobTimeout.Seconds()); timeoutSec > max {
+			timeoutSec = max
+		}
 		var image, environment *string
 		if j.Image != "" {
 			image = &j.Image
@@ -93,9 +122,9 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 		}
 		var id int64
 		err = tx.QueryRow(ctx,
-			`INSERT INTO jobs (pipeline_id, name, stage, stage_idx, image, script, env, environment, tags, artifact_paths)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
-			p.ID, j.Name, j.Stage, j.StageIdx, image, j.Script, env, environment, tags, artifacts).Scan(&id)
+			`INSERT INTO jobs (pipeline_id, name, stage, stage_idx, image, script, env, environment, tags, artifact_paths, timeout_seconds)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+			p.ID, j.Name, j.Stage, j.StageIdx, image, j.Script, env, environment, tags, artifacts, timeoutSec).Scan(&id)
 		if err != nil {
 			return nil, err
 		}
@@ -174,7 +203,7 @@ type stageJob struct {
 // its derived overall status and per-stage statuses.
 func (s *Store) ListPipelines(ctx context.Context, repo string) ([]proto.Pipeline, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT p.id, p.repo, p.ref, p.sha, p.created_at,
+		`SELECT p.id, p.repo, p.ref, p.sha, p.config_version, p.created_at,
 		        COALESCE(json_agg(json_build_object(
 		            'stage', j.stage, 'idx', j.stage_idx, 'status', j.status
 		        ) ORDER BY j.stage_idx) FILTER (WHERE j.id IS NOT NULL), '[]')
@@ -190,7 +219,7 @@ func (s *Store) ListPipelines(ctx context.Context, repo string) ([]proto.Pipelin
 	for rows.Next() {
 		var p proto.Pipeline
 		var raw []byte
-		if err := rows.Scan(&p.ID, &p.Repo, &p.Ref, &p.SHA, &p.CreatedAt, &raw); err != nil {
+		if err := rows.Scan(&p.ID, &p.Repo, &p.Ref, &p.SHA, &p.ConfigVersion, &p.CreatedAt, &raw); err != nil {
 			return nil, err
 		}
 		var sjs []stageJob
@@ -273,8 +302,8 @@ func (s *Store) ListRepos(ctx context.Context) ([]proto.RepoSummary, error) {
 func (s *Store) GetPipeline(ctx context.Context, id int64) (*proto.Pipeline, []proto.Job, error) {
 	var p proto.Pipeline
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, repo, ref, sha, created_at FROM pipelines WHERE id=$1`, id).
-		Scan(&p.ID, &p.Repo, &p.Ref, &p.SHA, &p.CreatedAt)
+		`SELECT id, repo, ref, sha, config_version, created_at FROM pipelines WHERE id=$1`, id).
+		Scan(&p.ID, &p.Repo, &p.Ref, &p.SHA, &p.ConfigVersion, &p.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil, ErrNotFound
 	}
@@ -477,10 +506,11 @@ func (s *Store) AcquireJob(ctx context.Context, req proto.AcquireRequest) (*prot
 		      pipelines p
 		 WHERE j.id = next.id AND p.id = j.pipeline_id
 		 RETURNING j.id, j.pipeline_id, j.name, j.image, j.script, j.env,
-		           j.artifact_paths, j.environment, p.repo, p.ref, p.sha`,
+		           j.artifact_paths, j.environment, j.timeout_seconds,
+		           p.repo, p.ref, p.sha`,
 		req.RunnerID, runnerTags).
 		Scan(&j.ID, &j.PipelineID, &j.Name, &image, &j.Script, &envRaw,
-			&artifactsRaw, &environment, &repo, &ref, &sha)
+			&artifactsRaw, &environment, &j.TimeoutSeconds, &repo, &ref, &sha)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -489,6 +519,9 @@ func (s *Store) AcquireJob(ctx context.Context, req proto.AcquireRequest) (*prot
 	}
 	if image != nil {
 		j.Image = *image
+	}
+	if j.TimeoutSeconds <= 0 {
+		j.TimeoutSeconds = int(s.defaultJobTimeout.Seconds())
 	}
 	env := ""
 	if environment != nil {
@@ -623,5 +656,31 @@ func (s *Store) FailStaleJobs(ctx context.Context, staleAfter time.Duration) (in
 		`UPDATE jobs SET status='failed', finished_at=now()
 		 WHERE status='running' AND heartbeat_at < now() - $1::interval`,
 		staleAfter.String())
+	return tag.RowsAffected(), err
+}
+
+// FailOverdueJobs is the server-side timeout backstop: running jobs past
+// their (or the default) timeout plus a grace period are failed even if the
+// runner keeps heartbeating — covers runners that fail to enforce the kill.
+func (s *Store) FailOverdueJobs(ctx context.Context) (int64, error) {
+	const grace = 2 * time.Minute
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE jobs SET status='failed', finished_at=now()
+		 WHERE status='running'
+		   AND started_at + make_interval(secs =>
+		       (CASE WHEN timeout_seconds > 0 THEN timeout_seconds ELSE $1 END) + $2) < now()`,
+		int(s.defaultJobTimeout.Seconds()), int(grace.Seconds()))
+	return tag.RowsAffected(), err
+}
+
+// FailStuckPending fails jobs that no runner picked up within the queue
+// timeout (usually a tag routing mistake — no runner matches).
+func (s *Store) FailStuckPending(ctx context.Context) (int64, error) {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE jobs j SET status='failed', finished_at=now()
+		 WHERE j.status='pending' AND EXISTS (
+		   SELECT 1 FROM pipelines p WHERE p.id = j.pipeline_id
+		   AND p.created_at + $1::interval < now())`,
+		s.queueTimeout.String())
 	return tag.RowsAffected(), err
 }

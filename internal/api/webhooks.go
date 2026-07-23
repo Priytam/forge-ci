@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -30,6 +31,8 @@ func (s *Server) registerWebhookRoutes() {
 	s.mux.HandleFunc("POST /api/v1/webhooks/bitbucket", s.bitbucketWebhook)
 	s.mux.HandleFunc("PUT /api/v1/repo-configs", s.putRepoConfig)
 	s.mux.HandleFunc("GET /api/v1/repo-configs", s.getRepoConfig)
+	s.mux.HandleFunc("GET /api/v1/repo-configs/versions", s.listConfigVersions)
+	s.mux.HandleFunc("POST /api/v1/repo-configs/revert", s.revertRepoConfig)
 	s.mux.HandleFunc("POST /api/v1/repo-registry", s.registerRepo)
 	s.mux.HandleFunc("GET /api/v1/repo-registry", s.listRegisteredRepos)
 }
@@ -147,9 +150,13 @@ func (s *Server) triggerFromWebhook(w http.ResponseWriter, r *http.Request, repo
 		writeErr(w, http.StatusUnprocessableEntity, "pipeline config error: "+err.Error())
 		return
 	}
+	var configVersion *int
+	if v, verr := s.store.CurrentConfigVersion(r.Context(), repo); verr == nil && v > 0 {
+		configVersion = &v
+	}
 	p, err := s.store.CreatePipeline(r.Context(),
 		proto.CreatePipelineRequest{Repo: repo, Ref: ref, SHA: sha, Config: config, TriggeredBy: author},
-		jobs)
+		jobs, configVersion)
 	if err != nil {
 		slog.Error("webhook pipeline create", "err", err)
 		writeErr(w, http.StatusInternalServerError, "failed to create pipeline")
@@ -238,10 +245,14 @@ func (s *Server) bitbucketWebhook(w http.ResponseWriter, r *http.Request) {
 
 // ---- registered pipeline configs ----
 
+// putRepoConfig pushes a NEW config version (append-only history) and moves
+// the current pointer. Run-form edits never hit this endpoint.
 func (s *Server) putRepoConfig(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Repo   string `json:"repo"`
-		Config string `json:"config"`
+		Repo    string `json:"repo"`
+		Config  string `json:"config"`
+		Author  string `json:"author"`
+		Message string `json:"message"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Repo == "" || req.Config == "" {
 		writeErr(w, http.StatusBadRequest, "repo and config are required")
@@ -252,17 +263,37 @@ func (s *Server) putRepoConfig(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "config error: "+err.Error())
 		return
 	}
-	if err := s.store.SetRepoConfig(r.Context(), req.Repo, req.Config); err != nil {
+	version, err := s.store.SetRepoConfig(r.Context(), req.Repo, req.Config, req.Author, req.Message)
+	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "failed to save config")
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	writeJSON(w, http.StatusOK, map[string]any{"repo": req.Repo, "version": version})
 }
 
+// getRepoConfig returns the current config, or a specific ?version=N.
 func (s *Server) getRepoConfig(w http.ResponseWriter, r *http.Request) {
 	repo := r.URL.Query().Get("repo")
 	if repo == "" {
 		writeErr(w, http.StatusBadRequest, "repo query param is required")
+		return
+	}
+	if v := r.URL.Query().Get("version"); v != "" {
+		var version int
+		if _, err := fmt.Sscanf(v, "%d", &version); err != nil || version < 1 {
+			writeErr(w, http.StatusBadRequest, "invalid version")
+			return
+		}
+		config, err := s.store.GetConfigVersion(r.Context(), repo, version)
+		if errors.Is(err, store.ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "version not found")
+			return
+		}
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "failed to load version")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"repo": repo, "config": config, "version": version})
 		return
 	}
 	config, err := s.store.GetRepoConfig(r.Context(), repo)
@@ -274,5 +305,50 @@ func (s *Server) getRepoConfig(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "failed to load config")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"repo": repo, "config": config})
+	current, _ := s.store.CurrentConfigVersion(r.Context(), repo)
+	writeJSON(w, http.StatusOK, map[string]any{"repo": repo, "config": config, "version": current})
+}
+
+func (s *Server) listConfigVersions(w http.ResponseWriter, r *http.Request) {
+	repo := r.URL.Query().Get("repo")
+	if repo == "" {
+		writeErr(w, http.StatusBadRequest, "repo query param is required")
+		return
+	}
+	versions, err := s.store.ListConfigVersions(r.Context(), repo)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to list versions")
+		return
+	}
+	writeJSON(w, http.StatusOK, versions)
+}
+
+// revertRepoConfig copies an old version forward as a brand-new version —
+// history is never rewritten, so the revert itself is auditable.
+func (s *Server) revertRepoConfig(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Repo    string `json:"repo"`
+		Version int    `json:"version"`
+		Author  string `json:"author"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Repo == "" || req.Version < 1 {
+		writeErr(w, http.StatusBadRequest, "repo and version are required")
+		return
+	}
+	config, err := s.store.GetConfigVersion(r.Context(), req.Repo, req.Version)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "version not found")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to load version")
+		return
+	}
+	newVersion, err := s.store.SetRepoConfig(r.Context(), req.Repo, config, req.Author,
+		fmt.Sprintf("revert to v%d", req.Version))
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to revert")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"repo": req.Repo, "version": newVersion, "reverted_to": req.Version})
 }

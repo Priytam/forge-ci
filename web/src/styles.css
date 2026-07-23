@@ -1377,6 +1377,23 @@ select:focus {
   white-space: nowrap;
 }
 
+.link-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  margin-left: 10px;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  font-family: var(--font);
+  cursor: pointer;
+  text-transform: none;
+  letter-spacing: normal;
+}
+.link-btn:hover {
+  text-decoration: underline;
+}
+
 /* ---------- Repo registry / add repository ---------- */
 
 .provider-chip {
@@ -1437,6 +1454,400 @@ select:focus {
 }
 .next-steps li {
   margin: 6px 0;
+}
+
+/* ---------- Dashboard (borderless, tone-separated) ---------- */
+
+.dash {
+  margin-bottom: 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 14px;
+}
+
+.stat-tile {
+  border-radius: 12px;
+  padding: 16px 18px 14px;
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.055),
+    rgba(255, 255, 255, 0.015)
+  );
+}
+
+.stat-value {
+  font-size: 30px;
+  font-weight: 650;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.stat-label {
+  margin-top: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+}
+
+.stat-sublabel {
+  font-size: 11px;
+  color: var(--text-muted);
+  opacity: 0.75;
+}
+
+.stat-blocked {
+  color: #fb923c;
+}
+.stat-good {
+  color: #4ade80;
+}
+.stat-warn {
+  color: #fbbf24;
+}
+.stat-bad {
+  color: #f87171;
+}
+
+.stat-pulse-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #58a6ff;
+  animation: pulse 1.6s ease-in-out infinite;
+  flex: none;
+}
+
+.chart-panel {
+  min-width: 0;
+  padding: 4px 0 0;
+}
+
+.chart-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.chart-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+}
+
+.chart-max {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-body {
+  position: relative;
+  height: 200px;
+}
+
+.chart-svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.chart-endlabel {
+  position: absolute;
+  right: 2px;
+  transform: translateY(-110%);
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.chart-tooltip {
+  position: absolute;
+  top: 8px;
+  background: rgba(22, 27, 34, 0.95);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--text);
+  pointer-events: none;
+  white-space: nowrap;
+  z-index: 5;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-tooltip-hour {
+  font-weight: 650;
+  margin-bottom: 4px;
+}
+
+.chart-tooltip-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.legend-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.chart-hours {
+  position: relative;
+  height: 16px;
+  margin-top: 2px;
+}
+.chart-hours span {
+  position: absolute;
+  transform: translateX(-50%);
+  font-size: 10px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.chart-hours span:first-child {
+  transform: none;
+}
+
+.chart-legend {
+  display: flex;
+  gap: 16px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.chart-legend > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ---------- Login / auth ---------- */
+
+.login-wrap {
+  display: flex;
+  justify-content: center;
+  padding-top: 10vh;
+}
+
+.login-card {
+  width: 360px;
+  max-width: 100%;
+  padding: 32px;
+  text-align: center;
+}
+
+.login-brand {
+  font-size: 22px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.login-sub {
+  margin: 6px 0 20px;
+  font-size: 13px;
+}
+
+.login-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.login-btn {
+  justify-content: center;
+  padding: 9px 14px;
+  font-size: 14px;
+  color: #fff;
+}
+
+.login-google {
+  background: #4285f4;
+  border-color: #4285f4;
+}
+.login-microsoft {
+  background: #0067b8;
+  border-color: #0067b8;
+}
+.login-github {
+  background: #24292e;
+  border-color: #444c56;
+}
+
+.login-open {
+  margin: 16px 0 0;
+  font-size: 13px;
+}
+
+.auth-menu {
+  position: relative;
+}
+
+.auth-trigger {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 600;
+  font-family: var(--font);
+  cursor: pointer;
+  padding: 4px 6px;
+}
+.auth-trigger:hover {
+  color: var(--text);
+}
+
+.auth-dropdown {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px;
+  min-width: 200px;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+.auth-dropdown-meta {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* ---------- Admin SSO ---------- */
+
+.sso-warning {
+  margin-bottom: 20px;
+}
+
+.sso-card {
+  padding: 20px;
+  margin-bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.sso-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sso-card-head h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.redirect-row {
+  display: flex;
+  gap: 8px;
+}
+.redirect-row input {
+  flex: 1;
+  color: var(--text-muted);
+}
+
+/* ---------- Config versioning ---------- */
+
+.cfg-chip {
+  display: inline-block;
+  vertical-align: middle;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  border: 1px solid rgba(56, 139, 253, 0.4);
+  color: #60a5fa;
+  background: rgba(56, 139, 253, 0.1);
+  border-radius: 999px;
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+
+.cfg-chip-custom {
+  border-color: var(--border);
+  color: var(--text-muted);
+  background: rgba(110, 118, 129, 0.12);
+}
+
+.config-editor-head {
+  margin-bottom: 10px;
+}
+
+.view-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid rgba(212, 167, 44, 0.45);
+  background: rgba(212, 167, 44, 0.1);
+  color: #fbbf24;
+  border-radius: var(--radius);
+  padding: 8px 14px;
+  margin-bottom: 10px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.push-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+.push-author {
+  flex: 0 1 180px !important;
+}
+
+.push-message {
+  flex: 1 1 260px !important;
+}
+
+/* ---------- Advanced disclosure (new pipeline) ---------- */
+
+.advanced-toggle {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 600;
+  font-family: var(--font);
+  cursor: pointer;
+  padding: 0;
+}
+.advanced-toggle:hover {
+  color: var(--text);
+}
+
+.advanced-body {
+  margin-top: 10px;
+  max-width: 440px;
 }
 
 /* ---------- Artifacts box (job log) ---------- */

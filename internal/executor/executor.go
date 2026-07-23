@@ -10,6 +10,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"syscall"
+	"time"
 
 	"github.com/priytamjeepandey/forge-ci/internal/proto"
 )
@@ -41,6 +43,18 @@ func start(cmd *exec.Cmd) (io.ReadCloser, func() int, error) {
 	pr, pw := io.Pipe()
 	cmd.Stdout = pw
 	cmd.Stderr = pw
+	// Kill the whole process group on cancel/timeout — killing only the
+	// shell leaves grandchildren (e.g. `sleep`) holding the output pipe,
+	// which would block Wait until they exit on their own.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	// Even if something survives the group kill, stop waiting for the pipe.
+	cmd.WaitDelay = 10 * time.Second
 	if err := cmd.Start(); err != nil {
 		return nil, nil, err
 	}
@@ -96,13 +110,29 @@ func (dockerExecutor) Start(ctx context.Context, job *proto.RunnerJob, workdir s
 	if image == "" {
 		image = defaultImage
 	}
+	name := fmt.Sprintf("forge-job-%d", job.ID)
 	// The workspace is bind-mounted so artifacts land on the host for
 	// collection after the container exits.
-	args := []string{"run", "--rm", "--network", "none",
+	args := []string{"run", "--rm", "--name", name, "--network", "none",
 		"-v", workdir + ":/workspace", "-w", "/workspace"}
 	for _, kv := range ciEnv(job) {
 		args = append(args, "-e", kv)
 	}
 	args = append(args, image, "sh", "-ce", job.Script)
-	return start(exec.CommandContext(ctx, "docker", args...))
+	pr, wait, err := start(exec.CommandContext(ctx, "docker", args...))
+	if err != nil {
+		return nil, nil, err
+	}
+	// Killing the docker CLI does not stop the container — remove it
+	// explicitly when the context ended (timeout/shutdown).
+	waitCleanup := func() int {
+		code := wait()
+		if ctx.Err() != nil {
+			rctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			_ = exec.CommandContext(rctx, "docker", "rm", "-f", name).Run()
+		}
+		return code
+	}
+	return pr, waitCleanup, nil
 }

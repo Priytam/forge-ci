@@ -87,6 +87,54 @@ CREATE TABLE IF NOT EXISTS repo_configs (
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- SSO provider configuration, editable in-product (Admin -> SSO). Secrets are
+-- write-only through the API. While NO provider is enabled the API runs in
+-- open bootstrap mode; enabling any provider turns on session enforcement.
+CREATE TABLE IF NOT EXISTS sso_providers (
+    provider       TEXT PRIMARY KEY CHECK (provider IN ('google','microsoft','github')),
+    enabled        BOOLEAN     NOT NULL DEFAULT FALSE,
+    client_id      TEXT        NOT NULL DEFAULT '',
+    client_secret  TEXT        NOT NULL DEFAULT '',
+    tenant         TEXT        NOT NULL DEFAULT 'common',  -- microsoft only
+    allowed_domain TEXT        NOT NULL DEFAULT '',        -- e.g. meesho.com
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Server-side login sessions (cookie carries only the random token).
+CREATE TABLE IF NOT EXISTS sessions (
+    token      TEXT PRIMARY KEY,
+    email      TEXT        NOT NULL,
+    name       TEXT        NOT NULL DEFAULT '',
+    provider   TEXT        NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS sessions_expiry_idx ON sessions (expires_at);
+
+-- Append-only pipeline-config history. Every save is a new version; revert
+-- copies an old version forward as a new one. History is never rewritten, so
+-- any change can be traced and undone. repo_configs stays the "current"
+-- pointer used by webhooks.
+CREATE TABLE IF NOT EXISTS repo_config_versions (
+    id          BIGSERIAL PRIMARY KEY,
+    repo        TEXT        NOT NULL,
+    version     INT         NOT NULL,
+    config_yaml TEXT        NOT NULL,
+    author      TEXT        NOT NULL DEFAULT '',
+    message     TEXT        NOT NULL DEFAULT '',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (repo, version)
+);
+-- Seed v1 from any config saved before versioning existed.
+INSERT INTO repo_config_versions (repo, version, config_yaml, author, message)
+SELECT rc.repo, 1, rc.config_yaml, '', 'pre-versioning config'
+FROM repo_configs rc
+WHERE NOT EXISTS (SELECT 1 FROM repo_config_versions v WHERE v.repo = rc.repo);
+
+-- Which registered config version a pipeline ran (NULL = one-off custom
+-- config supplied at run time; never persisted to the registry).
+ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS config_version INT;
+
 -- First-class repo registry: the connection to the real VCS repo. token is
 -- used to build authenticated clone URLs for runners (never returned by the
 -- API, never logged). Plaintext at rest for now — same caveat as variables.
@@ -110,6 +158,8 @@ CREATE TABLE IF NOT EXISTS repo_settings (
 
 -- Job routing tags and artifact declarations.
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS tags TEXT[] NOT NULL DEFAULT '{}';
+-- Per-job execution timeout; 0 = use the server default.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS timeout_seconds INT NOT NULL DEFAULT 0;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS artifact_paths JSONB NOT NULL DEFAULT '[]';
 
 -- Runner registry: runners self-register on their first acquire and update

@@ -207,8 +207,17 @@ func runJob(ctx context.Context, c *client, exec executor.Executor, job *proto.R
 		}
 	}
 
+	// Execution timeout: the context deadline kills the process (or the
+	// kubectl exec driving the pod) when it elapses.
+	timeout := time.Duration(job.TimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = time.Hour
+	}
+	jobCtx, cancelJob := context.WithTimeout(ctx, timeout)
+	defer cancelJob()
+
 	logs.printf("$ %s\n", job.Script)
-	out, wait, err := exec.Start(ctx, job, workdir)
+	out, wait, err := exec.Start(jobCtx, job, workdir)
 	if err != nil {
 		status, exitCode = "failed", 1
 		logs.printf("executor error: %v\n", err)
@@ -227,7 +236,12 @@ func runJob(ctx context.Context, c *client, exec executor.Executor, job *proto.R
 		if exitCode != 0 {
 			status = "failed"
 		}
-		logs.printf("\nJob exited with code %d\n", exitCode)
+		if jobCtx.Err() == context.DeadlineExceeded {
+			status, exitCode = "failed", 124
+			logs.printf("\nERROR: job timed out after %s and was killed\n", timeout)
+		} else {
+			logs.printf("\nJob exited with code %d\n", exitCode)
+		}
 	}
 
 	if status == "success" && len(job.ArtifactPaths) > 0 {

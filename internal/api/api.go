@@ -27,6 +27,7 @@ type Server struct {
 	store *store.Store
 	blobs blob.Store
 	mux   *http.ServeMux
+	sso   ssoCache
 }
 
 func New(s *store.Store, blobs blob.Store) *Server {
@@ -38,6 +39,7 @@ func New(s *store.Store, blobs blob.Store) *Server {
 	m.HandleFunc("GET /api/v1/pipelines", srv.listPipelines)
 	m.HandleFunc("GET /api/v1/pipelines/{id}", srv.getPipeline)
 	m.HandleFunc("GET /api/v1/repos", srv.listRepos)
+	m.HandleFunc("GET /api/v1/stats", srv.dashboardStats)
 	m.HandleFunc("GET /api/v1/jobs/{id}/logs", srv.getLogs)
 	m.HandleFunc("POST /api/v1/jobs/{id}/approvals", srv.approve)
 	m.HandleFunc("GET /api/v1/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -52,6 +54,7 @@ func New(s *store.Store, blobs blob.Store) *Server {
 
 	srv.registerSettingsRoutes()
 	srv.registerWebhookRoutes()
+	srv.registerAuthRoutes()
 
 	return srv
 }
@@ -63,6 +66,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	// Session enforcement: active once any SSO provider is enabled.
+	if !s.requireAuth(w, r) {
 		return
 	}
 	s.mux.ServeHTTP(w, r)
@@ -91,16 +98,39 @@ func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if req.Repo == "" || req.Ref == "" || req.SHA == "" || req.Config == "" {
-		writeErr(w, http.StatusBadRequest, "repo, ref, sha and config are required")
+	if req.Repo == "" || req.Ref == "" || req.Config == "" {
+		writeErr(w, http.StatusBadRequest, "repo, ref and config are required")
 		return
+	}
+	// Connected repos resolve the ref tip themselves — an explicit sha is an
+	// advanced override. Unconnected repos have nothing to resolve against.
+	if req.SHA == "" {
+		sha, err := s.store.ResolveRef(r.Context(), req.Repo, req.Ref)
+		if errors.Is(err, store.ErrNotFound) {
+			writeErr(w, http.StatusBadRequest,
+				"sha is required for repos that are not connected (Repos → Add repository)")
+			return
+		}
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "could not resolve ref: "+err.Error())
+			return
+		}
+		req.SHA = sha
 	}
 	jobs, err := compiler.Compile(req.Config, req.Ref)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	p, err := s.store.CreatePipeline(r.Context(), req, jobs)
+	// Stamp the config version when the submitted YAML matches the current
+	// registered config; otherwise it's recorded as a one-off custom run.
+	var configVersion *int
+	if current, err := s.store.GetRepoConfig(r.Context(), req.Repo); err == nil && current == req.Config {
+		if v, err := s.store.CurrentConfigVersion(r.Context(), req.Repo); err == nil && v > 0 {
+			configVersion = &v
+		}
+	}
+	p, err := s.store.CreatePipeline(r.Context(), req, jobs, configVersion)
 	if err != nil {
 		slog.Error("create pipeline", "err", err)
 		writeErr(w, http.StatusInternalServerError, "failed to create pipeline")
@@ -117,6 +147,16 @@ func (s *Server) listRepos(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, repos)
+}
+
+func (s *Server) dashboardStats(w http.ResponseWriter, r *http.Request) {
+	stats, err := s.store.DashboardStats(r.Context())
+	if err != nil {
+		slog.Error("stats", "err", err)
+		writeErr(w, http.StatusInternalServerError, "failed to compute stats")
+		return
+	}
+	writeJSON(w, http.StatusOK, stats)
 }
 
 func (s *Server) listPipelines(w http.ResponseWriter, r *http.Request) {
@@ -174,6 +214,11 @@ func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
+	}
+	// With a live SSO session the approver is the AUTHENTICATED identity —
+	// the client-supplied name is ignored.
+	if sess := s.currentSession(r); sess != nil {
+		req.Approver = sess.Email
 	}
 	if req.Approver == "" {
 		writeErr(w, http.StatusBadRequest, "approver is required")

@@ -8,6 +8,9 @@ import RepoSettings from "./pages/RepoSettings";
 import Runners from "./pages/Runners";
 import Docs from "./pages/Docs";
 import AddRepo from "./pages/AddRepo";
+import Login from "./pages/Login";
+import AdminSso from "./pages/AdminSso";
+import AuthMenu from "./components/AuthMenu";
 
 export default function App() {
   return (
@@ -24,9 +27,13 @@ export default function App() {
             <Link to="/docs" className="header-link">
               Docs
             </Link>
-            <Link to="/new" className="btn header-action">
-              New Pipeline
+            <Link to="/admin/sso" className="header-link">
+              Admin
             </Link>
+            <Link to="/new" className="btn header-action">
+              Run pipeline
+            </Link>
+            <AuthMenu />
           </nav>
         </div>
       </header>
@@ -39,6 +46,8 @@ export default function App() {
           <Route path="/runners" element={<Runners />} />
           <Route path="/docs" element={<Docs />} />
           <Route path="/docs/:guide" element={<Docs />} />
+          <Route path="/login" element={<Login />} />
+          <Route path="/admin/sso" element={<AdminSso />} />
           <Route path="/pipelines/:id" element={<PipelineDetail />} />
           <Route path="/jobs/:id" element={<JobLog />} />
           <Route path="/new" element={<NewPipeline />} />

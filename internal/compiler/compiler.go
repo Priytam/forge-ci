@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"path"
 	"sort"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -41,6 +42,7 @@ type jobSpec struct {
 	Except      []string          `yaml:"except"`
 	Tags        []string          `yaml:"tags"`
 	Artifacts   artifactSpec      `yaml:"artifacts"`
+	Timeout     string            `yaml:"timeout"` // Go duration, e.g. "30m", "2h"
 }
 
 type artifactSpec struct {
@@ -70,8 +72,22 @@ func (s jobSpec) includedFor(ref string) bool {
 }
 
 type config struct {
-	Stages []string           `yaml:"stages"`
-	Jobs   map[string]jobSpec `yaml:"jobs"`
+	Stages  []string           `yaml:"stages"`
+	Jobs    map[string]jobSpec `yaml:"jobs"`
+	Default struct {
+		Timeout string `yaml:"timeout"` // pipeline-wide TTL for jobs without their own
+	} `yaml:"default"`
+}
+
+func parseTimeout(where, v string) (int, error) {
+	if v == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < time.Minute {
+		return 0, fmt.Errorf("%s: timeout must be a duration of at least 1m (e.g. \"30m\", \"2h\")", where)
+	}
+	return int(d.Seconds()), nil
 }
 
 type CompiledJob struct {
@@ -85,6 +101,7 @@ type CompiledJob struct {
 	Needs         []string // job names in earlier stages
 	Tags          []string // runner routing: job runs only on runners with all these tags
 	ArtifactPaths []string // workspace paths archived after success
+	TimeoutSec    int      // 0 = server default
 }
 
 // Compile builds the job DAG for one specific ref: jobs whose only/except
@@ -146,6 +163,16 @@ func Compile(yml, ref string) ([]CompiledJob, error) {
 		if len(spec.Script) == 0 {
 			return nil, fmt.Errorf("job %q: script is required", n)
 		}
+		// TTL precedence: job timeout > YAML default.timeout > server default.
+		timeoutSec, err := parseTimeout(fmt.Sprintf("job %q", n), spec.Timeout)
+		if err != nil {
+			return nil, err
+		}
+		if timeoutSec == 0 {
+			if timeoutSec, err = parseTimeout("default", cfg.Default.Timeout); err != nil {
+				return nil, err
+			}
+		}
 
 		needs := spec.Needs
 		if needs == nil {
@@ -193,6 +220,7 @@ func Compile(yml, ref string) ([]CompiledJob, error) {
 			Needs:         needs,
 			Tags:          spec.Tags,
 			ArtifactPaths: spec.Artifacts.Paths,
+			TimeoutSec:    timeoutSec,
 		})
 	}
 	return out, nil

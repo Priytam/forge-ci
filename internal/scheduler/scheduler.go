@@ -42,6 +42,8 @@ func (sc *Scheduler) step(ctx context.Context) {
 		{"cancel_dead", sc.store.CancelDeadJobs},
 		{"promote_ready", sc.store.PromoteReadyJobs},
 		{"expire_blocked", sc.store.ExpireBlockedJobs},
+		{"fail_overdue", sc.store.FailOverdueJobs},
+		{"fail_stuck_pending", sc.store.FailStuckPending},
 		{"fail_stale", func(ctx context.Context) (int64, error) {
 			return sc.store.FailStaleJobs(ctx, sc.staleAfter)
 		}},

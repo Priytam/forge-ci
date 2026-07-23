@@ -9,6 +9,7 @@ import {
 import { usePoll } from "../hooks/usePoll";
 import StatusBadge from "../components/StatusBadge";
 import StageDots from "../components/StageDots";
+import Dashboard from "../components/Dashboard";
 
 const MAX_REF_CHIPS = 3;
 
@@ -108,6 +109,8 @@ export default function Repos() {
 
   return (
     <div>
+      <Dashboard />
+
       <div className="page-head">
         <h1>Repositories</h1>
         <div className="page-head-actions">
