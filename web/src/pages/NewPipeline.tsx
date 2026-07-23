@@ -164,7 +164,10 @@ export default function NewPipeline() {
         <h1>Run pipeline</h1>
       </div>
 
-      <form className="card form" onSubmit={(e) => void onSubmit(e)}>
+      <form
+        className="card form glow glow-neutral"
+        onSubmit={(e) => void onSubmit(e)}
+      >
         <div className="form-row">
           <label className="field">
             <span>Repo</span>

@@ -33,9 +33,19 @@ function RepoCard({
   const shownRefs = refs.slice(0, MAX_REF_CHIPS);
   const extraRefs = refs.length - shownRefs.length;
 
+  const lastStatus = last?.status;
+  const tint =
+    lastStatus === "success"
+      ? "green"
+      : lastStatus === "failed"
+        ? "red"
+        : lastStatus === "blocked"
+          ? "orange"
+          : "neutral";
+
   return (
     <div
-      className="card repo-card"
+      className={`card repo-card glow glow-${tint}`}
       onClick={() => navigate(`/repos/${encodeURIComponent(summary.repo)}`)}
     >
       <div className="repo-card-top">

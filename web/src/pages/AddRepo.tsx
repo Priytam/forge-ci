@@ -93,7 +93,10 @@ export default function AddRepo() {
         <h1>Add repository</h1>
       </div>
 
-      <form className="card form" onSubmit={(e) => void onSubmit(e)}>
+      <form
+        className="card form glow glow-neutral"
+        onSubmit={(e) => void onSubmit(e)}
+      >
         <h3 className="form-section-title">Connect</h3>
         <div className="form-row">
           <label className="field">

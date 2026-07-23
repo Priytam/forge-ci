@@ -22,7 +22,7 @@ export default function Login() {
 
   return (
     <div className="login-wrap">
-      <div className="card login-card">
+      <div className="card login-card glow glow-neutral">
         <div className="login-brand">
           <span className="brand-mark">⚙</span> Forge CI
         </div>

@@ -116,7 +116,7 @@ export default function JobLog() {
       )}
 
       {job && job.status === "blocked" && (
-        <div className="card blocked-card">
+        <div className="card blocked-card glow glow-orange">
           <ApprovalButtons jobId={job.id} onDone={refreshPipeline} />
         </div>
       )}

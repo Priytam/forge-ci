@@ -18,15 +18,21 @@ function StatTile({
   sublabel,
   valueClass,
   dot,
+  accent = "#8b949e",
 }: {
   value: ReactNode;
   label: string;
   sublabel?: string;
   valueClass?: string;
   dot?: boolean;
+  /** hue for the smoky glow + value text-shadow */
+  accent?: string;
 }) {
   return (
-    <div className="stat-tile">
+    <div
+      className="stat-tile"
+      style={{ "--accent": accent } as React.CSSProperties}
+    >
       <div className={`stat-value ${valueClass ?? ""}`}>
         {value}
         {dot && <span className="stat-pulse-dot" />}
@@ -316,23 +322,39 @@ export default function Dashboard() {
           value={now.running_jobs}
           label="Jobs running"
           dot={now.running_jobs > 0}
+          accent="#58a6ff"
         />
-        <StatTile value={now.pending_jobs} label="Queued" />
+        <StatTile value={now.pending_jobs} label="Queued" accent="#8b949e" />
         <StatTile
           value={now.blocked_jobs}
           label="Awaiting approval"
           valueClass={now.blocked_jobs > 0 ? "stat-blocked" : ""}
+          accent="#d29922"
         />
-        <StatTile value={now.online_runners} label="Runners online" />
+        <StatTile
+          value={now.online_runners}
+          label="Runners online"
+          accent="#3fb950"
+        />
         <StatTile
           value={now.active_executors}
           label="Executors in flight"
           sublabel="forked runners/pods"
+          accent="#bc8cff"
         />
         <StatTile
           value={rate < 0 ? "—" : `${rate}%`}
           label="Success rate 24h"
           valueClass={rateClass}
+          accent={
+            rate < 0
+              ? "#8b949e"
+              : rate >= 90
+                ? "#3fb950"
+                : rate >= 70
+                  ? "#d29922"
+                  : "#f85149"
+          }
         />
       </div>
 

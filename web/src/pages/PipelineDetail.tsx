@@ -281,7 +281,7 @@ export default function PipelineDetail() {
                   <div key={job.id} className="job-node">
                     <div
                       ref={(el) => setCardRef(job.id, el)}
-                      className="job-pill"
+                      className={`job-pill pill-${job.status}`}
                       title={tooltip}
                       onClick={() =>
                         navigate(`/jobs/${job.id}?pipeline=${pipeline.id}`)
@@ -291,7 +291,7 @@ export default function PipelineDetail() {
                       <span className="job-pill-name">{job.name}</span>
                     </div>
                     {job.status === "blocked" && (
-                      <div className="card job-approval-panel">
+                      <div className="card job-approval-panel glow glow-orange">
                         <ApprovalButtons jobId={job.id} onDone={refresh} />
                       </div>
                     )}
