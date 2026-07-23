@@ -1,0 +1,26 @@
+stages: [build, test, deploy]
+jobs:
+  build-app:
+    stage: build
+    script:
+      - echo "compiling..."
+      - sleep 2
+      - echo "build done"
+  unit-tests:
+    stage: test
+    script:
+      - echo "running unit tests"
+      - sleep 2
+      - echo "all 42 tests passed"
+  lint:
+    stage: test
+    script:
+      - echo "linting"
+      - echo "no issues"
+  deploy-prod:
+    stage: deploy
+    environment: production   # protected -> requires approval
+    script:
+      - echo "deploying to production"
+      - sleep 1
+      - echo "deployed"

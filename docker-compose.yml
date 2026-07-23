@@ -1,0 +1,52 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: forge
+      POSTGRES_PASSWORD: forge
+      POSTGRES_DB: forge
+    ports:
+      - "5433:5432" # host 5433 to avoid clashing with a local Postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U forge"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  server:
+    profiles: [full]
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.server
+    environment:
+      DATABASE_URL: postgres://forge:forge@postgres:5432/forge?sslmode=disable
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  runner:
+    profiles: [full]
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.runner
+    environment:
+      SERVER_URL: http://server:8080
+      EXECUTOR: shell # inside the runner container; use docker + socket mount for container jobs
+    depends_on:
+      - server
+
+  web:
+    profiles: [full]
+    build:
+      context: ./web
+    ports:
+      - "3000:80"
+    depends_on:
+      - server
+
+volumes:
+  pgdata:
