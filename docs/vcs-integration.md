@@ -60,5 +60,13 @@ connect it to your VCS:
   feature branches compile different DAGs from the same registered YAML.
 - Non-push events (GitHub) and empty change lists (Bitbucket) are acknowledged
   with **202** and ignored.
+- **Delivery dedup:** providers redeliver events (retries, manual redelivery).
+  Each delivery is recorded by id — GitHub `X-GitHub-Delivery`, Bitbucket
+  `X-Request-UUID`, or a SHA-256 of the body when no header is present — so a
+  duplicate returns **200** (`{"status":"duplicate delivery ignored"}`) without
+  creating a second pipeline. Records are bounded by `RETENTION_DAYS`.
+- **Auto-cancel:** a new pipeline for the same repo+ref cancels older
+  non-terminal ones (unless the YAML sets `auto_cancel: false`). Pushing twice
+  in quick succession leaves only the newest pipeline running.
 - Commit status write-back (green tick on the commit) is on the roadmap — see
   the feature comparison doc.

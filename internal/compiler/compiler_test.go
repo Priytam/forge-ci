@@ -106,3 +106,79 @@ jobs:
 		t.Fatal("expected error: explicit need on ref-excluded job")
 	}
 }
+
+func TestRetryPrecedenceAndBounds(t *testing.T) {
+	yml := `
+stages: [build, test]
+default:
+  retry: 1
+jobs:
+  build-app:
+    stage: build
+    retry: 3
+    script: [make]
+  unit-tests:
+    stage: test
+    script: [make test]
+`
+	jobs, err := Compile(yml, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := jobNames(jobs)
+	if got := m["build-app"].Retry; got != 3 {
+		t.Errorf("build-app retry: want job-level 3, got %d", got)
+	}
+	if got := m["unit-tests"].Retry; got != 1 {
+		t.Errorf("unit-tests retry: want default 1, got %d", got)
+	}
+
+	// Out-of-bounds retry is rejected.
+	bad := `
+stages: [build]
+jobs:
+  b:
+    stage: build
+    retry: 11
+    script: [make]
+`
+	if _, err := Compile(bad, "main"); err == nil {
+		t.Fatal("expected error for retry > 10")
+	}
+	neg := `
+stages: [build]
+jobs:
+  b:
+    stage: build
+    retry: -1
+    script: [make]
+`
+	if _, err := Compile(neg, "main"); err == nil {
+		t.Fatal("expected error for negative retry")
+	}
+}
+
+func TestAutoCancelOption(t *testing.T) {
+	base := "stages: [b]\njobs:\n  j:\n    stage: b\n    script: [echo hi]\n"
+	// Default (absent) => true.
+	opts, err := Options(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !opts.AutoCancel {
+		t.Error("auto_cancel should default to true when absent")
+	}
+	// Explicit false.
+	opts, err = Options("auto_cancel: false\n" + base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.AutoCancel {
+		t.Error("auto_cancel: false should be honored")
+	}
+	// Explicit true.
+	opts, err = Options("auto_cancel: true\n" + base)
+	if err != nil || !opts.AutoCancel {
+		t.Errorf("auto_cancel: true should parse, got %v err=%v", opts.AutoCancel, err)
+	}
+}

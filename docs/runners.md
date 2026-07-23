@@ -171,3 +171,22 @@ Deployment:
 - A runner that dies mid-job stops heartbeating; the scheduler fails the job
   after 90s and the runner registry shows it offline after 30s.
 - Give every long-lived runner a stable `--id`; ephemeral pods use pod names.
+
+### Graceful shutdown (drain)
+
+On `SIGINT`/`SIGTERM` a runner stops acquiring new jobs and gives in-flight
+jobs up to `RUNNER_DRAIN_GRACE` (default `30s`) to finish. Any job still
+running when the grace period elapses is killed and **requeued** (its executor
+context is canceled first, so it never double-runs) — the job returns to
+`pending` and another runner picks it up, rather than being left for the 90s
+stale-timeout to fail. Set `RUNNER_DRAIN_GRACE=0` to requeue in-flight jobs
+immediately on signal. Set it comfortably above your typical job length (and
+below your orchestrator's termination grace period, e.g. Kubernetes
+`terminationGracePeriodSeconds`) to let most jobs finish in place on rollout.
+
+### Cancellation
+
+Cancelling a running job (`POST /api/v1/jobs/{id}/cancel` or a whole pipeline)
+is delivered to the runner through the heartbeat response: the next heartbeat
+(≤10s) returns `{cancel:true}`, the runner kills the job's process group /
+container / pod exactly like a timeout, and reports the job as `canceled`.

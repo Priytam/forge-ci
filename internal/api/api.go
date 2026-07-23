@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/priytamjeepandey/forge-ci/internal/blob"
@@ -24,6 +25,9 @@ const (
 
 	defaultMaxJobLogBytes  = 10 << 20  // MAX_JOB_LOG_BYTES  (10 MiB)
 	defaultMaxArtifactByte = 500 << 20 // MAX_ARTIFACT_BYTES (500 MiB)
+
+	defaultPageLimit = 50  // GET list endpoints default page size
+	maxPageLimit     = 200 // hard cap on ?limit=
 )
 
 type Server struct {
@@ -35,6 +39,12 @@ type Server struct {
 	runnerAuth       string // RUNNER_AUTH: "on" | "off"
 	maxJobLogBytes   int64  // MAX_JOB_LOG_BYTES
 	maxArtifactBytes int64  // MAX_ARTIFACT_BYTES
+
+	// Per-job carry-over tail for chunk-boundary secret masking. Holds the
+	// trailing raw bytes of the last log chunk that could still be the prefix
+	// of a masked value completed by the next chunk.
+	maskMu  sync.Mutex
+	maskBuf map[int64]string
 }
 
 func New(s *store.Store, blobs blob.Store) *Server {
@@ -45,6 +55,7 @@ func New(s *store.Store, blobs blob.Store) *Server {
 		runnerAuth:       runnerAuthMode(),
 		maxJobLogBytes:   envBytes("MAX_JOB_LOG_BYTES", defaultMaxJobLogBytes),
 		maxArtifactBytes: envBytes("MAX_ARTIFACT_BYTES", defaultMaxArtifactByte),
+		maskBuf:          map[int64]string{},
 	}
 	srv.initRunnerAuth()
 	m := srv.mux
@@ -53,10 +64,12 @@ func New(s *store.Store, blobs blob.Store) *Server {
 	m.HandleFunc("POST /api/v1/pipelines", srv.createPipeline)
 	m.HandleFunc("GET /api/v1/pipelines", srv.listPipelines)
 	m.HandleFunc("GET /api/v1/pipelines/{id}", srv.getPipeline)
+	m.HandleFunc("POST /api/v1/pipelines/{id}/cancel", srv.cancelPipeline)
 	m.HandleFunc("GET /api/v1/repos", srv.listRepos)
 	m.HandleFunc("GET /api/v1/stats", srv.dashboardStats)
 	m.HandleFunc("GET /api/v1/jobs/{id}/logs", srv.getLogs)
 	m.HandleFunc("POST /api/v1/jobs/{id}/approvals", srv.approve)
+	m.HandleFunc("POST /api/v1/jobs/{id}/cancel", srv.cancelJob)
 	m.HandleFunc("GET /api/v1/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -142,6 +155,11 @@ func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	opts, err := compiler.Options(req.Config)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	// Stamp the config version when the submitted YAML matches the current
 	// registered config; otherwise it's recorded as a one-off custom run.
 	var configVersion *int
@@ -150,7 +168,7 @@ func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
 			configVersion = &v
 		}
 	}
-	p, err := s.store.CreatePipeline(r.Context(), req, jobs, configVersion)
+	p, err := s.store.CreatePipeline(r.Context(), req, jobs, configVersion, opts.AutoCancel)
 	if err != nil {
 		slog.Error("create pipeline", "err", err)
 		writeErr(w, http.StatusInternalServerError, "failed to create pipeline")
@@ -179,14 +197,41 @@ func (s *Server) dashboardStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, stats)
 }
 
+// listPipelines returns a page of pipelines as a JSON array (newest first).
+// Pagination is controlled by ?limit (default 50, capped at 200) and ?offset.
+// The total count and whether more pages exist are returned in the
+// X-Total-Count and X-Has-More response headers so the array body stays
+// compatible with existing clients.
 func (s *Server) listPipelines(w http.ResponseWriter, r *http.Request) {
-	ps, err := s.store.ListPipelines(r.Context(), r.URL.Query().Get("repo"))
+	limit, offset := pageParams(r)
+	ps, total, err := s.store.ListPipelinesPage(r.Context(), r.URL.Query().Get("repo"), limit, offset)
 	if err != nil {
 		slog.Error("list pipelines", "err", err)
 		writeErr(w, http.StatusInternalServerError, "failed to list pipelines")
 		return
 	}
+	w.Header().Set("X-Total-Count", strconv.Itoa(total))
+	w.Header().Set("X-Has-More", strconv.FormatBool(offset+len(ps) < total))
 	writeJSON(w, http.StatusOK, ps)
+}
+
+// pageParams parses ?limit / ?offset with a default page size and a hard cap.
+func pageParams(r *http.Request) (limit, offset int) {
+	limit = defaultPageLimit
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > maxPageLimit {
+		limit = maxPageLimit
+	}
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			offset = n
+		}
+	}
+	return limit, offset
 }
 
 func (s *Server) getPipeline(w http.ResponseWriter, r *http.Request) {
@@ -268,6 +313,56 @@ func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// cancelPipeline cancels every non-terminal job in a pipeline. Idempotent: a
+// finished pipeline is a clean no-op returning its current state.
+func (s *Server) cancelPipeline(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid pipeline id")
+		return
+	}
+	p, jobs, err := s.store.CancelPipeline(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "pipeline not found")
+		return
+	}
+	if err != nil {
+		slog.Error("cancel pipeline", "err", err)
+		writeErr(w, http.StatusInternalServerError, "failed to cancel pipeline")
+		return
+	}
+	slog.Info("pipeline cancel requested", "pipeline", id)
+	writeJSON(w, http.StatusOK, map[string]any{"pipeline": p, "jobs": jobs})
+}
+
+// cancelJob cancels a single job by its current state. Idempotent for terminal
+// jobs. A running job is signaled to stop via its next heartbeat.
+func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+	job, err := s.store.CancelJob(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "job not found")
+		return
+	}
+	if err != nil {
+		slog.Error("cancel job", "err", err)
+		writeErr(w, http.StatusInternalServerError, "failed to cancel job")
+		return
+	}
+	slog.Info("job cancel requested", "job", id, "status", job.Status)
+	writeJSON(w, http.StatusOK, map[string]any{"job": job})
+}
+
 // ---- runner handlers ----
 
 // acquire long-polls for up to 25s waiting for a pending job; 204 when none.
@@ -321,13 +416,17 @@ func (s *Server) pushLogs(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "empty log chunk")
 		return
 	}
-	// Redact masked variable values before the chunk is persisted. (Values
-	// split across chunk boundaries can escape this — documented limitation.)
-	chunk := string(body)
-	if masked, err := s.store.MaskedValuesForJob(r.Context(), id); err == nil {
-		for _, v := range masked {
-			chunk = strings.ReplaceAll(chunk, v, "[MASKED]")
-		}
+	// Redact masked variable values before the chunk is persisted. A secret can
+	// be split across chunk boundaries, so we carry the trailing bytes that
+	// could still be a partial match into the next chunk (see maskChunk). The
+	// GetLogs read path re-masks as a final backstop.
+	masked, _ := s.store.MaskedValuesForJob(r.Context(), id)
+	chunk := s.maskChunk(id, string(body), masked)
+	if chunk == "" {
+		// Entire chunk was held back as a possible partial match; nothing to
+		// store yet. It will flush with the next chunk or at completion.
+		w.WriteHeader(http.StatusAccepted)
+		return
 	}
 	if err := s.store.AppendLogCapped(r.Context(), id, chunk, s.maxJobLogBytes); err != nil {
 		slog.Error("push logs", "err", err)
@@ -337,6 +436,103 @@ func (s *Server) pushLogs(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 }
 
+// maxMaskedLen returns the length of the longest masked value.
+func maxMaskedLen(masked []string) int {
+	n := 0
+	for _, v := range masked {
+		if len(v) > n {
+			n = len(v)
+		}
+	}
+	return n
+}
+
+// maskChunk masks masked values across chunk boundaries. It prepends the tail
+// carried from the previous chunk, masks the combined text, then holds back a
+// trailing window (up to maxLen-1 bytes) that could be the start of a masked
+// value completed by the next chunk. The held-back window is chosen so that no
+// masked value straddles the emitted/held boundary. Returns the text to store
+// now (possibly empty when everything is still uncertain).
+func (s *Server) maskChunk(jobID int64, chunk string, masked []string) string {
+	maxLen := maxMaskedLen(masked)
+	if maxLen == 0 {
+		return chunk // nothing to mask
+	}
+	s.maskMu.Lock()
+	combined := s.maskBuf[jobID] + chunk
+	keep := maxLen - 1
+	if len(combined) <= keep {
+		s.maskBuf[jobID] = combined
+		s.maskMu.Unlock()
+		return ""
+	}
+	split := len(combined) - keep
+	// Extend the split point rightward past any masked value that straddles it,
+	// so the emitted prefix never cuts through a match. Iterate to a fixpoint
+	// (an extension can pull in a further straddling match).
+	for {
+		moved := false
+		for _, v := range masked {
+			if v == "" {
+				continue
+			}
+			from := split - len(v) + 1
+			if from < 0 {
+				from = 0
+			}
+			// A match straddles `split` if it starts before split and ends after.
+			if idx := strings.Index(combined[from:], v); idx >= 0 {
+				start := from + idx
+				end := start + len(v)
+				if start < split && end > split {
+					split = end
+					moved = true
+				}
+			}
+		}
+		if !moved || split >= len(combined) {
+			break
+		}
+	}
+	if split > len(combined) {
+		split = len(combined)
+	}
+	emit := maskAll(combined[:split], masked)
+	s.maskBuf[jobID] = combined[split:]
+	s.maskMu.Unlock()
+	return emit
+}
+
+// flushMaskTail masks and stores any bytes still held for a job, then drops its
+// buffer. Called when the job leaves 'running' (complete/cancel/requeue) so no
+// trailing output is lost.
+func (s *Server) flushMaskTail(ctx context.Context, jobID int64) {
+	s.maskMu.Lock()
+	tail := s.maskBuf[jobID]
+	delete(s.maskBuf, jobID)
+	s.maskMu.Unlock()
+	if tail == "" {
+		return
+	}
+	masked, _ := s.store.MaskedValuesForJob(ctx, jobID)
+	if err := s.store.AppendLogCapped(ctx, jobID, maskAll(tail, masked), s.maxJobLogBytes); err != nil {
+		slog.Error("flush log tail", "err", err, "job", jobID)
+	}
+}
+
+// maskAll replaces every masked value in text with [MASKED].
+func maskAll(text string, masked []string) string {
+	for _, v := range masked {
+		if v != "" {
+			text = strings.ReplaceAll(text, v, "[MASKED]")
+		}
+	}
+	return text
+}
+
+// heartbeat stamps liveness and tells the runner whether the job has been
+// marked for cancellation. The runner acts on {cancel:true} by killing the job
+// and reporting completion as 'canceled'.
 func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 	if !s.requireRunnerAuth(w, r) {
 		return
@@ -346,11 +542,12 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid job id")
 		return
 	}
-	if err := s.store.Heartbeat(r.Context(), id); err != nil {
+	cancel, err := s.store.Heartbeat(r.Context(), id)
+	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "heartbeat failed")
 		return
 	}
-	w.WriteHeader(http.StatusOK)
+	writeJSON(w, http.StatusOK, proto.HeartbeatResponse{Cancel: cancel})
 }
 
 func (s *Server) complete(w http.ResponseWriter, r *http.Request) {
@@ -367,11 +564,15 @@ func (s *Server) complete(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if req.Status != "success" && req.Status != "failed" {
-		writeErr(w, http.StatusBadRequest, `status must be "success" or "failed"`)
+	switch req.Status {
+	case "success", "failed", "canceled", "requeue":
+	default:
+		writeErr(w, http.StatusBadRequest, `status must be "success", "failed", "canceled" or "requeue"`)
 		return
 	}
-	err := s.store.CompleteJob(r.Context(), id, req.Status, req.ExitCode)
+	// Flush any carried-over log tail for this job before it leaves 'running'.
+	s.flushMaskTail(r.Context(), id)
+	final, err := s.store.CompleteJob(r.Context(), id, req.Status, req.ExitCode)
 	if errors.Is(err, store.ErrNotFound) {
 		// Job already transitioned (e.g. failed as stale) — not the runner's problem.
 		w.WriteHeader(http.StatusConflict)
@@ -382,6 +583,6 @@ func (s *Server) complete(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "failed to complete job")
 		return
 	}
-	slog.Info("job completed", "job", id, "status", req.Status, "exit_code", req.ExitCode)
+	slog.Info("job completed", "job", id, "reported", req.Status, "final", final, "exit_code", req.ExitCode)
 	w.WriteHeader(http.StatusOK)
 }

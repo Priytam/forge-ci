@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -27,6 +28,7 @@ const (
 	logFlushEvery     = 700 * time.Millisecond
 	heartbeatEvery    = 10 * time.Second
 	acquireRetryPause = 2 * time.Second
+	defaultDrainGrace = 30 * time.Second
 )
 
 type client struct {
@@ -85,12 +87,34 @@ func main() {
 		os.Exit(1)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	// drainCtx is canceled on SIGINT/SIGTERM and stops acquisition of NEW jobs.
+	// execCtx stays alive through a grace period so in-flight jobs can finish;
+	// after the grace elapses it is canceled to kill (and requeue) the rest.
+	drainCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	execCtx, cancelExec := context.WithCancel(context.Background())
+	defer cancelExec()
+
+	grace := drainGraceFromEnv()
+	jobsDone := make(chan struct{})
+	go func() {
+		select {
+		case <-drainCtx.Done():
+		case <-jobsDone:
+			return
+		}
+		slog.Info("drain: signal received; not acquiring new jobs; finishing in-flight", "grace", grace)
+		select {
+		case <-time.After(grace):
+			slog.Warn("drain: grace elapsed; requeuing remaining in-flight jobs")
+			cancelExec()
+		case <-jobsDone:
+		}
+	}()
 
 	c := &client{base: *server, http: &http.Client{Timeout: 60 * time.Second}, token: *token}
 	slog.Info("forge-runner started", "id", *runnerID, "server", *server,
-		"executor", exec.Name(), "tags", tags, "concurrency", *conc)
+		"executor", exec.Name(), "tags", tags, "concurrency", *conc, "drain_grace", grace)
 
 	// The manager stays resident; each slot forks work per acquired job
 	// (with the kubernetes executor, that fork is an ephemeral pod).
@@ -100,23 +124,33 @@ func main() {
 		go func() {
 			defer wg.Done()
 			req := proto.AcquireRequest{RunnerID: *runnerID, Executor: exec.Name(), Tags: tags}
-			for ctx.Err() == nil {
-				job, err := acquire(ctx, c, req)
+			for drainCtx.Err() == nil {
+				job, err := acquire(drainCtx, c, req)
 				if err != nil {
-					if ctx.Err() == nil {
+					if drainCtx.Err() == nil {
 						slog.Warn("acquire failed, retrying", "err", err)
-						sleep(ctx, acquireRetryPause)
+						sleep(drainCtx, acquireRetryPause)
 					}
 					continue
 				}
 				if job == nil {
 					continue // long-poll timed out, poll again
 				}
-				runJob(ctx, c, exec, job)
+				runJob(execCtx, drainCtx, c, exec, job)
 			}
 		}()
 	}
 	wg.Wait()
+	close(jobsDone)
+}
+
+func drainGraceFromEnv() time.Duration {
+	if v := os.Getenv("RUNNER_DRAIN_GRACE"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d >= 0 {
+			return d
+		}
+	}
+	return defaultDrainGrace
 }
 
 func concFromEnv() int {
@@ -149,12 +183,32 @@ func acquire(ctx context.Context, c *client, req proto.AcquireRequest) (*proto.R
 	}
 }
 
-func runJob(ctx context.Context, c *client, exec executor.Executor, job *proto.RunnerJob) {
+// runJob executes one job. execCtx is the execution context (canceled on drain
+// only after the grace period); drainCtx signals that the runner is shutting
+// down. A job killed because cancel was requested via heartbeat reports
+// 'canceled'; a job killed by drain reports 'requeue' so another runner repicks
+// it; a timeout reports 'failed' exit 124.
+func runJob(execCtx, drainCtx context.Context, c *client, exec executor.Executor, job *proto.RunnerJob) {
 	slog.Info("job started", "job", job.ID, "name", job.Name)
 	logs := newLogStreamer(c, job.ID, job.RedactValues)
 	logs.printf("Running job #%d %q on %s executor\n", job.ID, job.Name, exec.Name())
 
-	hbCtx, stopHB := context.WithCancel(ctx)
+	// Execution timeout: the context deadline kills the process (or the
+	// kubectl exec driving the pod) when it elapses. Derived from execCtx so a
+	// post-grace drain also kills it.
+	timeout := time.Duration(job.TimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = time.Hour
+	}
+	jobCtx, cancelJob := context.WithTimeout(execCtx, timeout)
+	defer cancelJob()
+
+	// canceledByRequest is set when the server signals cancellation through a
+	// heartbeat response; it distinguishes a requested cancel (report
+	// 'canceled') from a drain kill (report 'requeue') or a timeout.
+	var canceledByRequest atomic.Bool
+
+	hbCtx, stopHB := context.WithCancel(context.Background())
 	var hbWG sync.WaitGroup
 	hbWG.Add(1)
 	go func() {
@@ -167,8 +221,16 @@ func runJob(ctx context.Context, c *client, exec executor.Executor, job *proto.R
 				return
 			case <-t.C:
 				resp, err := c.postJSON(hbCtx, fmt.Sprintf("/api/v1/runner/jobs/%d/heartbeat", job.ID), nil)
-				if err == nil {
-					resp.Body.Close()
+				if err != nil {
+					continue
+				}
+				var hb proto.HeartbeatResponse
+				_ = json.NewDecoder(resp.Body).Decode(&hb)
+				resp.Body.Close()
+				if hb.Cancel && canceledByRequest.CompareAndSwap(false, true) {
+					logs.printf("\nJob canceled by request; stopping\n")
+					slog.Info("job cancel signaled by server", "job", job.ID)
+					cancelJob()
 				}
 			}
 		}
@@ -178,7 +240,7 @@ func runJob(ctx context.Context, c *client, exec executor.Executor, job *proto.R
 		stopHB()
 		hbWG.Wait()
 		logs.close()
-		// Fresh context: ctx may be canceled on shutdown.
+		// Fresh context: execCtx/drainCtx may be canceled on shutdown.
 		rctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		resp, err := c.postJSON(rctx, fmt.Sprintf("/api/v1/runner/jobs/%d/complete", job.ID),
@@ -191,6 +253,21 @@ func runJob(ctx context.Context, c *client, exec executor.Executor, job *proto.R
 		slog.Info("job finished", "job", job.ID, "status", status, "exit_code", exitCode)
 	}
 
+	// resolveInterruption maps a killed/failed execution to the right terminal
+	// status: requested-cancel > timeout > drain-requeue > plain failure.
+	resolveInterruption := func(status string, exitCode int) (string, int) {
+		switch {
+		case canceledByRequest.Load():
+			return "canceled", exitCode
+		case jobCtx.Err() == context.DeadlineExceeded:
+			return "failed", 124
+		case execCtx.Err() != nil:
+			return "requeue", exitCode
+		default:
+			return status, exitCode
+		}
+	}
+
 	status, exitCode := "success", 0
 	workdir, err := os.MkdirTemp("", "forge-job-*")
 	if err != nil {
@@ -200,9 +277,10 @@ func runJob(ctx context.Context, c *client, exec executor.Executor, job *proto.R
 	}
 
 	if job.CloneURL != "" {
-		if err := cloneSource(ctx, logs, job, workdir); err != nil {
+		if err := cloneSource(jobCtx, logs, job, workdir); err != nil {
 			logs.printf("checkout failed: %v\n", err)
-			finish("failed", 1)
+			st, code := resolveInterruption("failed", 1)
+			finish(st, code)
 			return
 		}
 	}
@@ -210,27 +288,21 @@ func runJob(ctx context.Context, c *client, exec executor.Executor, job *proto.R
 	// GitLab-style artifact passing: restore upstream jobs' artifacts into
 	// the workspace before the script runs.
 	for _, dep := range job.Dependencies {
-		if err := restoreDependency(ctx, c, logs, dep, workdir); err != nil {
+		if err := restoreDependency(jobCtx, c, logs, dep, workdir); err != nil {
 			logs.printf("restoring artifacts of %q failed: %v\n", dep.JobName, err)
-			finish("failed", 1)
+			st, code := resolveInterruption("failed", 1)
+			finish(st, code)
 			return
 		}
 	}
 
-	// Execution timeout: the context deadline kills the process (or the
-	// kubectl exec driving the pod) when it elapses.
-	timeout := time.Duration(job.TimeoutSeconds) * time.Second
-	if timeout <= 0 {
-		timeout = time.Hour
-	}
-	jobCtx, cancelJob := context.WithTimeout(ctx, timeout)
-	defer cancelJob()
-
 	logs.printf("$ %s\n", job.Script)
 	out, wait, err := exec.Start(jobCtx, job, workdir)
 	if err != nil {
-		status, exitCode = "failed", 1
-		logs.printf("executor error: %v\n", err)
+		status, exitCode = resolveInterruption("failed", 1)
+		if status == "failed" {
+			logs.printf("executor error: %v\n", err)
+		}
 	} else {
 		buf := make([]byte, 32*1024)
 		for {
@@ -246,10 +318,16 @@ func runJob(ctx context.Context, c *client, exec executor.Executor, job *proto.R
 		if exitCode != 0 {
 			status = "failed"
 		}
-		if jobCtx.Err() == context.DeadlineExceeded {
+		switch {
+		case canceledByRequest.Load():
+			status = "canceled"
+		case jobCtx.Err() == context.DeadlineExceeded:
 			status, exitCode = "failed", 124
 			logs.printf("\nERROR: job timed out after %s and was killed\n", timeout)
-		} else {
+		case execCtx.Err() != nil:
+			status = "requeue"
+			logs.printf("\nRunner draining; job requeued for another runner\n")
+		default:
 			logs.printf("\nJob exited with code %d\n", exitCode)
 		}
 	}

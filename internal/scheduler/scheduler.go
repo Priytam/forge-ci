@@ -81,6 +81,12 @@ func (sc *Scheduler) gc(ctx context.Context) {
 		return // retention disabled — keep pipelines/artifacts forever
 	}
 
+	if n, err := sc.store.DeleteExpiredWebhookDeliveries(ctx, sc.retention); err != nil {
+		slog.Error("gc: delete expired webhook deliveries", "err", err)
+	} else if n > 0 {
+		slog.Info("gc: deleted expired webhook deliveries", "rows", n)
+	}
+
 	// Delete artifact blobs first (we still have the DB rows to find them),
 	// then cascade-delete the pipeline rows.
 	keys, err := sc.store.ExpiredArtifactBlobKeys(ctx, sc.retention)

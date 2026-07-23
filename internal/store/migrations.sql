@@ -241,3 +241,32 @@ CREATE TABLE IF NOT EXISTS job_approvals (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (job_id, approver)
 );
+
+-- Cancellation: a running job cannot be stopped synchronously (the runner owns
+-- the process). Setting cancel_requested asks the runner — via the heartbeat
+-- response — to kill the job and report status='canceled'. Crash-safe and
+-- idempotent: the flag is a durable request, re-read on every heartbeat.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cancel_requested BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- Job retries: attempt is the current (1-based) try; max_attempts = retry+1.
+-- On a non-timeout, non-cancel failure with attempt < max_attempts the job is
+-- requeued (pending) for another try instead of failing the pipeline.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS attempt      INT NOT NULL DEFAULT 1;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS max_attempts INT NOT NULL DEFAULT 1;
+
+-- Webhook delivery dedup: providers redeliver the same event (retries, manual
+-- redelivery). Recording each delivery id makes pipeline creation idempotent
+-- per (provider, delivery_id). Old rows are GC'd by the retention sweep.
+CREATE TABLE IF NOT EXISTS webhook_deliveries (
+    provider    TEXT        NOT NULL,
+    delivery_id TEXT        NOT NULL,
+    received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (provider, delivery_id)
+);
+CREATE INDEX IF NOT EXISTS webhook_deliveries_received_idx ON webhook_deliveries (received_at);
+
+-- Pagination / list-scan support: the pipelines list is filtered by repo and
+-- ordered newest-first (id DESC). This composite index serves both the
+-- all-repos and repo-filtered list queries without a full scan.
+CREATE INDEX IF NOT EXISTS pipelines_repo_id_idx ON pipelines (repo, id DESC);
+CREATE INDEX IF NOT EXISTS pipelines_created_idx ON pipelines (created_at);

@@ -133,25 +133,33 @@ func (s *Server) listRegisteredRepos(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, repos)
 }
 
-func (s *Server) triggerFromWebhook(w http.ResponseWriter, r *http.Request, repo, ref, sha, author string) {
+// triggerFromWebhook compiles the repo's registered config and creates a
+// pipeline. It returns false (having written an error response) when nothing
+// was created, so the caller can roll back a recorded webhook delivery.
+func (s *Server) triggerFromWebhook(w http.ResponseWriter, r *http.Request, repo, ref, sha, author string) bool {
 	if repo == "" || ref == "" || sha == "" {
 		writeErr(w, http.StatusBadRequest, "payload missing repo/ref/sha")
-		return
+		return false
 	}
 	config, err := s.store.GetRepoConfig(r.Context(), repo)
 	if errors.Is(err, store.ErrNotFound) {
 		writeErr(w, http.StatusNotFound,
 			"no pipeline config registered for "+repo+" — PUT /api/v1/repo-configs first")
-		return
+		return false
 	}
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "failed to load repo config")
-		return
+		return false
 	}
 	jobs, err := compiler.Compile(config, ref)
 	if err != nil {
 		writeErr(w, http.StatusUnprocessableEntity, "pipeline config error: "+err.Error())
-		return
+		return false
+	}
+	opts, err := compiler.Options(config)
+	if err != nil {
+		writeErr(w, http.StatusUnprocessableEntity, "pipeline config error: "+err.Error())
+		return false
 	}
 	var configVersion *int
 	if v, verr := s.store.CurrentConfigVersion(r.Context(), repo); verr == nil && v > 0 {
@@ -159,14 +167,36 @@ func (s *Server) triggerFromWebhook(w http.ResponseWriter, r *http.Request, repo
 	}
 	p, err := s.store.CreatePipeline(r.Context(),
 		proto.CreatePipelineRequest{Repo: repo, Ref: ref, SHA: sha, Config: config, TriggeredBy: author},
-		jobs, configVersion)
+		jobs, configVersion, opts.AutoCancel)
 	if err != nil {
 		slog.Error("webhook pipeline create", "err", err)
 		writeErr(w, http.StatusInternalServerError, "failed to create pipeline")
-		return
+		return false
 	}
 	slog.Info("pipeline triggered via webhook", "repo", repo, "ref", ref, "pipeline", p.ID)
 	writeJSON(w, http.StatusCreated, map[string]any{"pipeline": p})
+	return true
+}
+
+// dedupDelivery records this webhook delivery and reports whether processing
+// should continue. On a duplicate it writes a 200 no-op and returns false. The
+// returned finish func must be deferred: it rolls back the delivery record if
+// the handler ends up creating nothing, so a genuine redelivery can retry.
+func (s *Server) dedupDelivery(w http.ResponseWriter, r *http.Request, provider, deliveryID string) (proceed bool, created *bool) {
+	isNew, err := s.store.RecordWebhookDelivery(r.Context(), provider, deliveryID)
+	if err != nil {
+		slog.Error("webhook dedup", "err", err)
+		writeErr(w, http.StatusInternalServerError, "delivery dedup failed")
+		return false, nil
+	}
+	if !isNew {
+		slog.Info("webhook delivery is a duplicate, ignoring", "provider", provider, "delivery", deliveryID)
+		writeJSON(w, http.StatusOK, map[string]string{"status": "duplicate delivery ignored"})
+		return false, nil
+	}
+	var ok bool
+	created = &ok
+	return true, created
 }
 
 // githubWebhook handles push events. If WEBHOOK_SECRET is set, the
@@ -204,13 +234,39 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid JSON payload")
 		return
 	}
+	// Dedup: GitHub sends X-GitHub-Delivery; fall back to a hash of the body so
+	// identical redeliveries without the header still dedup.
+	deliveryID := r.Header.Get("X-GitHub-Delivery")
+	if deliveryID == "" {
+		deliveryID = bodyHash(body)
+	}
+	proceed, created := s.dedupDelivery(w, r, "github", deliveryID)
+	if !proceed {
+		return
+	}
+	defer func() {
+		if !*created {
+			_ = s.store.ForgetWebhookDelivery(r.Context(), "github", deliveryID)
+		}
+	}()
 	ref := strings.TrimPrefix(payload.Ref, "refs/heads/")
 	ref = strings.TrimPrefix(ref, "refs/tags/")
-	s.triggerFromWebhook(w, r, payload.Repository.FullName, ref, payload.After, payload.Pusher.Name)
+	*created = s.triggerFromWebhook(w, r, payload.Repository.FullName, ref, payload.After, payload.Pusher.Name)
+}
+
+// bodyHash is the fallback delivery id when a provider sends no delivery header.
+func bodyHash(body []byte) string {
+	sum := sha256.Sum256(body)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // bitbucketWebhook handles repo:push events (Bitbucket Cloud payload shape).
 func (s *Server) bitbucketWebhook(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "unreadable body")
+		return
+	}
 	var payload struct {
 		Repository struct {
 			FullName string `json:"full_name"`
@@ -230,7 +286,7 @@ func (s *Server) bitbucketWebhook(w http.ResponseWriter, r *http.Request) {
 			} `json:"changes"`
 		} `json:"push"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&payload); err != nil {
+	if err := json.Unmarshal(body, &payload); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON payload")
 		return
 	}
@@ -238,12 +294,26 @@ func (s *Server) bitbucketWebhook(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
+	// Dedup: Bitbucket sends X-Request-UUID; fall back to a hash of the body.
+	deliveryID := r.Header.Get("X-Request-UUID")
+	if deliveryID == "" {
+		deliveryID = bodyHash(body)
+	}
+	proceed, created := s.dedupDelivery(w, r, "bitbucket", deliveryID)
+	if !proceed {
+		return
+	}
+	defer func() {
+		if !*created {
+			_ = s.store.ForgetWebhookDelivery(r.Context(), "bitbucket", deliveryID)
+		}
+	}()
 	change := payload.Push.Changes[0].New
 	author := payload.Actor.Nickname
 	if author == "" {
 		author = payload.Actor.DisplayName
 	}
-	s.triggerFromWebhook(w, r, payload.Repository.FullName, change.Name, change.Target.Hash, author)
+	*created = s.triggerFromWebhook(w, r, payload.Repository.FullName, change.Name, change.Target.Hash, author)
 }
 
 // ---- registered pipeline configs ----

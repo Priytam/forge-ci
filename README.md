@@ -44,6 +44,11 @@ editing pipeline YAML in a PR cannot weaken the gate. Votes are append-only in
 ## Pipeline DSL
 
 ```yaml
+auto_cancel: true            # optional (default true): a newer pipeline for the
+                             # same repo+ref cancels this one's non-terminal jobs
+default:
+  timeout: 1h                # per-job TTL for jobs without their own
+  retry: 0                   # per-job retry count for jobs without their own
 stages: [build, test, deploy]
 jobs:
   build-app:
@@ -53,6 +58,7 @@ jobs:
       - echo "compiling..."
   unit-tests:
     stage: test              # no explicit needs -> depends on previous stage
+    retry: 2                 # retry on failure up to N times (0..10)
     script: [echo testing]
   deploy-dev:
     stage: deploy
@@ -71,6 +77,17 @@ jobs:
 time, so the same YAML yields different DAGs for dev branches vs main —
 excluded jobs never enter the pipeline. Implicit needs skip over stages left
 empty for a ref; an explicit `needs` on a ref-excluded job is a compile error.
+
+`retry: N` (0..10, job-level overrides `default.retry`) requeues a failed job
+for another attempt instead of failing the pipeline. Cancellations, approval
+rejections, and **timeout kills (exit 124) are not retried** — a job that keeps
+hitting its `timeout` fails without consuming retries. Logs from every attempt
+are preserved with an `attempt N/M` separator.
+
+`auto_cancel` (default `true`) is GitLab-style redundant-pipeline cancellation:
+creating a new pipeline for the same repo **and ref** (via API or webhook)
+cancels older non-terminal pipelines for that same repo+ref. Different refs are
+never affected. Set `auto_cancel: false` to let redundant pipelines run.
 
 ## Quickstart (local dev)
 
@@ -95,16 +112,27 @@ Public:
 
 - `POST /api/v1/pipelines` `{repo, ref, sha, config}` — compile YAML (for that ref) and enqueue
 - `GET  /api/v1/repos` — per-repo rollup cards (counts, refs, recent statuses, last pipeline)
-- `GET  /api/v1/pipelines[?repo=name]` / `GET /api/v1/pipelines/{id}` — both include per-stage statuses
-- `GET  /api/v1/jobs/{id}/logs` (plain text)
+- `GET  /api/v1/pipelines[?repo=name][&limit=&offset=]` — newest first; array body plus
+  `X-Total-Count` / `X-Has-More` headers. `limit` defaults to 50, capped at 200.
+- `GET  /api/v1/pipelines/{id}` — includes per-stage statuses and jobs
+- `POST /api/v1/pipelines/{id}/cancel` — cancel the whole pipeline (all non-terminal jobs); idempotent
+- `POST /api/v1/jobs/{id}/cancel` — cancel a single job (created/pending/blocked → canceled; running → stopped via heartbeat); idempotent
+- `GET  /api/v1/jobs/{id}/logs` (plain text; masked values re-masked on read)
 - `POST /api/v1/jobs/{id}/approvals` `{approver, verdict: approved|rejected, comment}`
+
+Cancel and other mutating routes use the same authz as the rest of the API:
+open in bootstrap mode, admin session required once SSO is enforced.
 
 Runner protocol:
 
 - `POST /api/v1/runner/acquire` — long-poll, atomic claim via `SKIP LOCKED`
-- `POST /api/v1/runner/jobs/{id}/logs` — text chunks
-- `POST /api/v1/runner/jobs/{id}/heartbeat`
-- `POST /api/v1/runner/jobs/{id}/complete` `{status, exit_code}`
+- `POST /api/v1/runner/jobs/{id}/logs` — text chunks (masked across chunk boundaries)
+- `POST /api/v1/runner/jobs/{id}/heartbeat` — response `{cancel: bool}`; `true` tells the runner to stop the job
+- `POST /api/v1/runner/jobs/{id}/complete` `{status, exit_code}` — status `success | failed | canceled | requeue`
+
+Webhooks are deduplicated by delivery id (GitHub `X-GitHub-Delivery`, Bitbucket
+`X-Request-UUID`, else a body hash): a redelivered event returns `200` without
+creating a second pipeline.
 
 ## Security & operations
 
@@ -121,7 +149,8 @@ the dev experience):
 | `FRONTEND_URL` | dashboard origin (post-login redirect + CSRF allow-list) | `http://localhost:5173` |
 | `MAX_JOB_LOG_BYTES` | per-job cumulative log cap; excess truncated with a notice | `10485760` (10 MiB) |
 | `MAX_ARTIFACT_BYTES` | per-upload artifact cap (`413` + cleanup on overflow); `0` disables | `524288000` (500 MiB) |
-| `RETENTION_DAYS` | delete pipelines + artifact blobs older than this; `0` = keep forever | `30` |
+| `RETENTION_DAYS` | delete pipelines, artifact blobs and webhook-dedup rows older than this; `0` = keep forever | `30` |
+| `RUNNER_DRAIN_GRACE` | (runner) on SIGINT/SIGTERM, how long to let in-flight jobs finish before requeuing them | `30s` |
 
 - **Runner auth** — see [docs/runners.md](docs/runners.md). In `on` mode with no
   tokens, the server auto-generates and logs a bootstrap token. Manage tokens
@@ -144,6 +173,7 @@ the dev experience):
 - [Artifact storage (local, MinIO, S3, GCS)](docs/artifact-storage.md)
 - [Roles, membership & approval rules](docs/rbac-approvals.md)
 - [SSO setup: Google, Microsoft, GitHub](docs/sso.md)
+- [Cloud deployment (Helm chart + Terraform/OpenTofu for AWS & GCP)](docs/cloud-deployment.md)
 - [Feature comparison vs GitLab CI + roadmap](docs/feature-comparison.md)
 
 ## What's here beyond the core
@@ -151,7 +181,11 @@ the dev experience):
 - **CI/CD variables** per repo — protected (only on protected refs), masked
   (redacted in job logs at ingestion), environment-scoped.
 - **Runner registry** — self-registration, online/offline, tag-based job
-  routing (`tags:` on jobs), pause/drain.
+  routing (`tags:` on jobs), pause, and graceful drain (SIGTERM finishes
+  in-flight jobs within `RUNNER_DRAIN_GRACE`, then requeues the rest).
+- **Cancellation & retries** — cancel a job or whole pipeline at any state
+  (running jobs stopped via the heartbeat channel); per-job `retry:` and
+  redundant-pipeline `auto_cancel`.
 - **Artifacts** — `artifacts.paths` archived per job; local disk or any
   S3-compatible store (S3/MinIO/GCS).
 - **RBAC approvals** — repo members (admin/owner/developer), per-repo
@@ -164,8 +198,8 @@ the dev experience):
 
 - Identity comes from SSO sessions; with SSO in open mode there is no authz
   (bootstrap). Enable a provider and set `ADMIN_EMAILS` before real use.
-- Logs live in Postgres; masked values split across log chunks can escape
-  redaction.
+- Logs live in Postgres. Masked values are redacted per chunk, across chunk
+  boundaries (a carry-over tail per job), and re-masked on read as a backstop.
 - Secret encryption uses a single `FORGE_SECRET_KEY` (no per-key rotation or
   external KMS/Vault yet); rotating the key requires re-encrypting rows.
 - No caching, `rules:`, includes, matrix, retries, or scheduled pipelines yet.

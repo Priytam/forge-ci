@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -182,8 +183,10 @@ func (s *Store) Close() { s.pool.Close() }
 // ---- pipelines ----
 
 // CreatePipeline records the run. configVersion links it to the registered
-// config version it was compiled from (nil = one-off custom config).
-func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequest, jobs []compiler.CompiledJob, configVersion *int) (*proto.Pipeline, error) {
+// config version it was compiled from (nil = one-off custom config). When
+// autoCancel is true, older non-terminal pipelines for the same repo+ref are
+// canceled in the same transaction (GitLab-style redundant-pipeline cancel).
+func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequest, jobs []compiler.CompiledJob, configVersion *int, autoCancel bool) (*proto.Pipeline, error) {
 	// Repo-level runner-group selection: jobs without explicit tags inherit
 	// the repo's default runner tags (job-level tags: overrides).
 	defaultTags, err := s.GetRepoDefaultTags(ctx, req.Repo)
@@ -230,9 +233,9 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 		}
 		var id int64
 		err = tx.QueryRow(ctx,
-			`INSERT INTO jobs (pipeline_id, name, stage, stage_idx, image, script, env, environment, tags, artifact_paths, timeout_seconds)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
-			p.ID, j.Name, j.Stage, j.StageIdx, image, j.Script, env, environment, tags, artifacts, timeoutSec).Scan(&id)
+			`INSERT INTO jobs (pipeline_id, name, stage, stage_idx, image, script, env, environment, tags, artifact_paths, timeout_seconds, max_attempts)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
+			p.ID, j.Name, j.Stage, j.StageIdx, image, j.Script, env, environment, tags, artifacts, timeoutSec, j.Retry+1).Scan(&id)
 		if err != nil {
 			return nil, err
 		}
@@ -245,6 +248,29 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 				ids[j.Name], ids[dep]); err != nil {
 				return nil, err
 			}
+		}
+	}
+
+	// Auto-cancel superseded pipelines: older, non-terminal pipelines for the
+	// exact same repo+ref (never across refs). Non-running jobs go straight to
+	// canceled; running jobs are flagged cancel_requested so their runner stops
+	// them on the next heartbeat.
+	if autoCancel {
+		if _, err := tx.Exec(ctx,
+			`UPDATE jobs j SET status='canceled', finished_at=now()
+			 FROM pipelines op
+			 WHERE j.pipeline_id = op.id AND op.repo=$1 AND op.ref=$2 AND op.id < $3
+			   AND j.status IN ('created','pending','blocked')`,
+			p.Repo, p.Ref, p.ID); err != nil {
+			return nil, err
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE jobs j SET cancel_requested=TRUE
+			 FROM pipelines op
+			 WHERE j.pipeline_id = op.id AND op.repo=$1 AND op.ref=$2 AND op.id < $3
+			   AND j.status='running'`,
+			p.Repo, p.Ref, p.ID); err != nil {
+			return nil, err
 		}
 	}
 	return &p, tx.Commit(ctx)
@@ -343,6 +369,50 @@ func (s *Store) ListPipelines(ctx context.Context, repo string) ([]proto.Pipelin
 		out = append(out, p)
 	}
 	return out, rows.Err()
+}
+
+// ListPipelinesPage returns one page of pipelines (optionally filtered by repo),
+// newest first, plus the total count for the filter so the UI can paginate.
+// limit/offset are assumed already clamped by the caller.
+func (s *Store) ListPipelinesPage(ctx context.Context, repo string, limit, offset int) ([]proto.Pipeline, int, error) {
+	var total int
+	if err := s.pool.QueryRow(ctx,
+		`SELECT count(*) FROM pipelines WHERE ($1 = '' OR repo = $1)`, repo).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT p.id, p.repo, p.ref, p.sha, p.config_version, p.created_at,
+		        COALESCE(json_agg(json_build_object(
+		            'stage', j.stage, 'idx', j.stage_idx, 'status', j.status
+		        ) ORDER BY j.stage_idx) FILTER (WHERE j.id IS NOT NULL), '[]')
+		 FROM pipelines p LEFT JOIN jobs j ON j.pipeline_id = p.id
+		 WHERE ($1 = '' OR p.repo = $1)
+		 GROUP BY p.id ORDER BY p.id DESC LIMIT $2 OFFSET $3`, repo, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	out := []proto.Pipeline{}
+	for rows.Next() {
+		var p proto.Pipeline
+		var raw []byte
+		if err := rows.Scan(&p.ID, &p.Repo, &p.Ref, &p.SHA, &p.ConfigVersion, &p.CreatedAt, &raw); err != nil {
+			return nil, 0, err
+		}
+		var sjs []stageJob
+		if err := json.Unmarshal(raw, &sjs); err != nil {
+			return nil, 0, err
+		}
+		statuses := make([]string, len(sjs))
+		for i, sj := range sjs {
+			statuses[i] = sj.Status
+		}
+		p.Status = deriveStatus(statuses)
+		p.Stages = deriveStages(sjs)
+		out = append(out, p)
+	}
+	return out, total, rows.Err()
 }
 
 // ListRepos aggregates pipelines into one summary card per repo, most
@@ -575,12 +645,60 @@ func (s *Store) DeleteExpiredPipelines(ctx context.Context, olderThan time.Durat
 	return tag.RowsAffected(), err
 }
 
+// DeleteExpiredWebhookDeliveries bounds the dedup table by dropping delivery
+// records older than the retention window (providers never redeliver that far
+// back).
+func (s *Store) DeleteExpiredWebhookDeliveries(ctx context.Context, olderThan time.Duration) (int64, error) {
+	tag, err := s.pool.Exec(ctx,
+		`DELETE FROM webhook_deliveries WHERE received_at < now() - $1::interval`, olderThan.String())
+	return tag.RowsAffected(), err
+}
+
+// ---- webhook delivery dedup ----
+
+// RecordWebhookDelivery records a (provider, delivery_id) and reports whether it
+// was newly inserted. A false return means this delivery was already seen — the
+// caller must NOT create a second pipeline for it.
+func (s *Store) RecordWebhookDelivery(ctx context.Context, provider, deliveryID string) (isNew bool, err error) {
+	tag, err := s.pool.Exec(ctx,
+		`INSERT INTO webhook_deliveries (provider, delivery_id) VALUES ($1,$2)
+		 ON CONFLICT (provider, delivery_id) DO NOTHING`, provider, deliveryID)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// ForgetWebhookDelivery removes a delivery record, letting a redelivery be
+// retried. Used to roll back the dedup gate when pipeline creation fails after
+// the delivery was recorded.
+func (s *Store) ForgetWebhookDelivery(ctx context.Context, provider, deliveryID string) error {
+	_, err := s.pool.Exec(ctx,
+		`DELETE FROM webhook_deliveries WHERE provider=$1 AND delivery_id=$2`, provider, deliveryID)
+	return err
+}
+
 func (s *Store) GetLogs(ctx context.Context, jobID int64) (string, error) {
 	var logs string
 	err := s.pool.QueryRow(ctx,
 		`SELECT COALESCE(string_agg(chunk, '' ORDER BY id), '') FROM job_logs WHERE job_id=$1`,
 		jobID).Scan(&logs)
-	return logs, err
+	if err != nil {
+		return "", err
+	}
+	// Backstop masking: mask again over the fully-reassembled log. This catches
+	// a secret that was split across chunk boundaries (each chunk individually
+	// unmatched) or one stored unmasked for any other reason. Cheap: masked
+	// values are few and short.
+	masked, merr := s.MaskedValuesForJob(ctx, jobID)
+	if merr == nil {
+		for _, v := range masked {
+			if v != "" {
+				logs = strings.ReplaceAll(logs, v, "[MASKED]")
+			}
+		}
+	}
+	return logs, nil
 }
 
 // ---- approvals ----
@@ -783,23 +901,185 @@ func (s *Store) AcquireJob(ctx context.Context, req proto.AcquireRequest) (*prot
 	return &j, nil
 }
 
-func (s *Store) Heartbeat(ctx context.Context, jobID int64) error {
-	_, err := s.pool.Exec(ctx,
-		`UPDATE jobs SET heartbeat_at=now() WHERE id=$1 AND status='running'`, jobID)
-	return err
+// Heartbeat stamps the job's liveness and returns whether a cancellation has
+// been requested for it. The runner uses the returned flag to stop a running
+// job (killing the process group / container / pod) and report 'canceled'.
+func (s *Store) Heartbeat(ctx context.Context, jobID int64) (cancel bool, err error) {
+	err = s.pool.QueryRow(ctx,
+		`UPDATE jobs SET heartbeat_at=now()
+		 WHERE id=$1 AND status='running' RETURNING cancel_requested`, jobID).Scan(&cancel)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Job is no longer running (already finished/canceled). Not an error
+		// for the runner; it will learn the outcome at complete time.
+		return false, nil
+	}
+	return cancel, err
 }
 
-func (s *Store) CompleteJob(ctx context.Context, jobID int64, status string, exitCode int) error {
-	tag, err := s.pool.Exec(ctx,
-		`UPDATE jobs SET status=$2, exit_code=$3, finished_at=now()
-		 WHERE id=$1 AND status='running'`, jobID, status, exitCode)
+// CompleteJob transitions a running job to its terminal (or requeued) state and
+// returns the resulting status. It centralizes three cross-cutting behaviors:
+//
+//   - cancellation: a job whose cancel was requested ends 'canceled' (whether
+//     the runner reported 'canceled' or 'failed' after the kill); never retried.
+//   - graceful drain: status 'requeue' returns the job to 'pending' for another
+//     runner, preserving the attempt count (not a retry).
+//   - retries: a plain failure (non-timeout: exit != 124) with attempts left is
+//     requeued as the next attempt instead of failing the pipeline.
+//
+// It is idempotent: a job that already left 'running' yields ErrNotFound so a
+// late/duplicate report from the runner is a no-op.
+func (s *Store) CompleteJob(ctx context.Context, jobID int64, status string, exitCode int) (string, error) {
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return err
+		return "", err
 	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
+	defer tx.Rollback(ctx)
+
+	var attempt, maxAttempts int
+	var cancelReq bool
+	err = tx.QueryRow(ctx,
+		`SELECT attempt, max_attempts, cancel_requested FROM jobs
+		 WHERE id=$1 AND status='running' FOR UPDATE`, jobID).
+		Scan(&attempt, &maxAttempts, &cancelReq)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrNotFound
 	}
-	return nil
+	if err != nil {
+		return "", err
+	}
+
+	// requeue for graceful drain: back to the queue, same attempt.
+	if status == "requeue" {
+		if _, err := tx.Exec(ctx,
+			`UPDATE jobs SET status='pending', started_at=NULL, heartbeat_at=NULL,
+			        runner_id=NULL, exit_code=NULL WHERE id=$1`, jobID); err != nil {
+			return "", err
+		}
+		return "pending", tx.Commit(ctx)
+	}
+
+	// Cancellation wins over the reported status: a killed job may surface as
+	// 'failed' or 'canceled' — either way it ends canceled and is not retried.
+	if status == "canceled" || cancelReq {
+		if _, err := tx.Exec(ctx,
+			`UPDATE jobs SET status='canceled', exit_code=$2, finished_at=now(),
+			        cancel_requested=FALSE WHERE id=$1`, jobID, exitCode); err != nil {
+			return "", err
+		}
+		return "canceled", tx.Commit(ctx)
+	}
+
+	// Retry a plain failure (not a timeout-kill: exit 124) while attempts remain.
+	if status == "failed" && exitCode != 124 && attempt < maxAttempts {
+		if _, err := tx.Exec(ctx,
+			`UPDATE jobs SET status='pending', attempt=attempt+1, started_at=NULL,
+			        heartbeat_at=NULL, runner_id=NULL, exit_code=NULL WHERE id=$1`, jobID); err != nil {
+			return "", err
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO job_logs (job_id, chunk) VALUES ($1,$2)`, jobID,
+			fmt.Sprintf("\n[forge] attempt %d/%d failed (exit %d); retrying (attempt %d/%d)\n",
+				attempt, maxAttempts, exitCode, attempt+1, maxAttempts)); err != nil {
+			return "", err
+		}
+		return "pending", tx.Commit(ctx)
+	}
+
+	if _, err := tx.Exec(ctx,
+		`UPDATE jobs SET status=$2, exit_code=$3, finished_at=now()
+		 WHERE id=$1`, jobID, status, exitCode); err != nil {
+		return "", err
+	}
+	return status, tx.Commit(ctx)
+}
+
+// ---- cancellation ----
+
+var terminalStatuses = []string{"success", "failed", "canceled"}
+
+func isTerminal(status string) bool {
+	for _, t := range terminalStatuses {
+		if status == t {
+			return true
+		}
+	}
+	return false
+}
+
+// CancelJob cancels a single job by its current state and returns the job.
+// created/pending/blocked -> canceled immediately; running -> cancel_requested
+// (the runner stops it and reports 'canceled'); terminal states are a no-op
+// (idempotent). Dependents of a canceled job are cascaded by the scheduler
+// (CancelDeadJobs). Returns ErrNotFound if the job does not exist.
+func (s *Store) CancelJob(ctx context.Context, jobID int64) (*proto.Job, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	var status string
+	err = tx.QueryRow(ctx,
+		`SELECT status FROM jobs WHERE id=$1 FOR UPDATE`, jobID).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case isTerminal(status):
+		// no-op, return current state
+	case status == "running":
+		if _, err := tx.Exec(ctx,
+			`UPDATE jobs SET cancel_requested=TRUE WHERE id=$1`, jobID); err != nil {
+			return nil, err
+		}
+	default: // created, pending, blocked
+		if _, err := tx.Exec(ctx,
+			`UPDATE jobs SET status='canceled', finished_at=now() WHERE id=$1`, jobID); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return s.GetJob(ctx, jobID)
+}
+
+// CancelPipeline cancels every non-terminal job in a pipeline (and thereby its
+// dependents). Running jobs are flagged for the runner to stop; others go
+// straight to canceled. Idempotent: an already-finished pipeline is a clean
+// no-op. Returns ErrNotFound if the pipeline does not exist.
+func (s *Store) CancelPipeline(ctx context.Context, pipelineID int64) (*proto.Pipeline, []proto.Job, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	var exists bool
+	err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pipelines WHERE id=$1)`, pipelineID).Scan(&exists)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !exists {
+		return nil, nil, ErrNotFound
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE jobs SET status='canceled', finished_at=now()
+		 WHERE pipeline_id=$1 AND status IN ('created','pending','blocked')`, pipelineID); err != nil {
+		return nil, nil, err
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE jobs SET cancel_requested=TRUE
+		 WHERE pipeline_id=$1 AND status='running'`, pipelineID); err != nil {
+		return nil, nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, nil, err
+	}
+	return s.GetPipeline(ctx, pipelineID)
 }
 
 // ---- scheduler transitions (each idempotent; called every tick) ----

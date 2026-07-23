@@ -14,6 +14,17 @@
 //	    variables: {KEY: value}  # optional env vars
 //	    only: [main, release-*]  # optional; include job only for matching refs
 //	    except: [main]           # optional; exclude job for matching refs
+//	    retry: 2                 # optional; retry on failure up to N times (0..10)
+//
+// Top-level keys:
+//
+//	auto_cancel: true            # optional (default true); when a newer pipeline
+//	                             # is created for the same repo+ref, cancel this
+//	                             # (older) one's non-terminal jobs. Set false to
+//	                             # let redundant pipelines run to completion.
+//	default:
+//	  timeout: 30m               # per-job TTL for jobs without their own
+//	  retry: 1                   # per-job retry count for jobs without their own
 //
 // only/except patterns are shell globs matched against the pipeline ref, so
 // the same YAML compiles to different DAGs for different refs (dev vs prod).
@@ -43,6 +54,7 @@ type jobSpec struct {
 	Tags        []string          `yaml:"tags"`
 	Artifacts   artifactSpec      `yaml:"artifacts"`
 	Timeout     string            `yaml:"timeout"` // Go duration, e.g. "30m", "2h"
+	Retry       *int              `yaml:"retry"`   // 0..10; nil = inherit default
 }
 
 type artifactSpec struct {
@@ -72,11 +84,45 @@ func (s jobSpec) includedFor(ref string) bool {
 }
 
 type config struct {
-	Stages  []string           `yaml:"stages"`
-	Jobs    map[string]jobSpec `yaml:"jobs"`
-	Default struct {
+	Stages     []string           `yaml:"stages"`
+	Jobs       map[string]jobSpec `yaml:"jobs"`
+	AutoCancel *bool              `yaml:"auto_cancel"` // nil = default true
+	Default    struct {
 		Timeout string `yaml:"timeout"` // pipeline-wide TTL for jobs without their own
+		Retry   *int   `yaml:"retry"`   // pipeline-wide retry for jobs without their own
 	} `yaml:"default"`
+}
+
+const maxRetry = 10
+
+func validateRetry(where string, v *int) (int, error) {
+	if v == nil {
+		return 0, nil
+	}
+	if *v < 0 || *v > maxRetry {
+		return 0, fmt.Errorf("%s: retry must be between 0 and %d", where, maxRetry)
+	}
+	return *v, nil
+}
+
+// PipelineOptions carries pipeline-level (non-job) settings parsed from the
+// YAML that the store needs at creation time.
+type PipelineOptions struct {
+	AutoCancel bool // cancel older non-terminal pipelines for the same repo+ref
+}
+
+// Options parses just the pipeline-level settings from the YAML. AutoCancel
+// defaults to true when the key is absent.
+func Options(yml string) (PipelineOptions, error) {
+	var cfg config
+	if err := yaml.Unmarshal([]byte(yml), &cfg); err != nil {
+		return PipelineOptions{}, fmt.Errorf("invalid YAML: %w", err)
+	}
+	autoCancel := true
+	if cfg.AutoCancel != nil {
+		autoCancel = *cfg.AutoCancel
+	}
+	return PipelineOptions{AutoCancel: autoCancel}, nil
 }
 
 func parseTimeout(where, v string) (int, error) {
@@ -102,6 +148,7 @@ type CompiledJob struct {
 	Tags          []string // runner routing: job runs only on runners with all these tags
 	ArtifactPaths []string // workspace paths archived after success
 	TimeoutSec    int      // 0 = server default
+	Retry         int      // additional attempts on failure (0..10); 0 = no retry
 }
 
 // Compile builds the job DAG for one specific ref: jobs whose only/except
@@ -174,6 +221,17 @@ func Compile(yml, ref string) ([]CompiledJob, error) {
 			}
 		}
 
+		// Retry precedence: job retry > YAML default.retry > 0 (no retry).
+		retry, err := validateRetry(fmt.Sprintf("job %q", n), spec.Retry)
+		if err != nil {
+			return nil, err
+		}
+		if spec.Retry == nil {
+			if retry, err = validateRetry("default", cfg.Default.Retry); err != nil {
+				return nil, err
+			}
+		}
+
 		needs := spec.Needs
 		if needs == nil {
 			// Implicit needs: all included jobs of the nearest earlier
@@ -221,6 +279,7 @@ func Compile(yml, ref string) ([]CompiledJob, error) {
 			Tags:          spec.Tags,
 			ArtifactPaths: spec.Artifacts.Paths,
 			TimeoutSec:    timeoutSec,
+			Retry:         retry,
 		})
 	}
 	return out, nil

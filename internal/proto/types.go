@@ -153,8 +153,14 @@ type AcquireRequest struct {
 }
 
 type CompleteRequest struct {
-	Status   string `json:"status"` // success | failed
+	Status   string `json:"status"` // success | failed | canceled | requeue
 	ExitCode int    `json:"exit_code"`
+}
+
+// HeartbeatResponse is returned to the runner on every heartbeat. Cancel=true
+// tells the runner to stop the job and report completion as 'canceled'.
+type HeartbeatResponse struct {
+	Cancel bool `json:"cancel"`
 }
 
 type ApprovalRequest struct {
