@@ -21,6 +21,9 @@ import (
 const (
 	acquireLongPoll = 25 * time.Second
 	maxLogChunk     = 1 << 20 // 1 MiB per POST
+
+	defaultMaxJobLogBytes  = 10 << 20  // MAX_JOB_LOG_BYTES  (10 MiB)
+	defaultMaxArtifactByte = 500 << 20 // MAX_ARTIFACT_BYTES (500 MiB)
 )
 
 type Server struct {
@@ -28,10 +31,22 @@ type Server struct {
 	blobs blob.Store
 	mux   *http.ServeMux
 	sso   ssoCache
+
+	runnerAuth       string // RUNNER_AUTH: "on" | "off"
+	maxJobLogBytes   int64  // MAX_JOB_LOG_BYTES
+	maxArtifactBytes int64  // MAX_ARTIFACT_BYTES
 }
 
 func New(s *store.Store, blobs blob.Store) *Server {
-	srv := &Server{store: s, blobs: blobs, mux: http.NewServeMux()}
+	srv := &Server{
+		store:            s,
+		blobs:            blobs,
+		mux:              http.NewServeMux(),
+		runnerAuth:       runnerAuthMode(),
+		maxJobLogBytes:   envBytes("MAX_JOB_LOG_BYTES", defaultMaxJobLogBytes),
+		maxArtifactBytes: envBytes("MAX_ARTIFACT_BYTES", defaultMaxArtifactByte),
+	}
+	srv.initRunnerAuth()
 	m := srv.mux
 
 	// Public API.
@@ -55,6 +70,7 @@ func New(s *store.Store, blobs blob.Store) *Server {
 	srv.registerSettingsRoutes()
 	srv.registerWebhookRoutes()
 	srv.registerAuthRoutes()
+	srv.registerRunnerTokenRoutes()
 
 	return srv
 }
@@ -66,6 +82,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	// CSRF: cookie-authenticated state-changing requests must be same-origin.
+	if !s.checkCSRF(w, r) {
 		return
 	}
 	// Session enforcement: active once any SSO provider is enabled.
@@ -252,6 +272,9 @@ func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
 
 // acquire long-polls for up to 25s waiting for a pending job; 204 when none.
 func (s *Server) acquire(w http.ResponseWriter, r *http.Request) {
+	if !s.requireRunnerAuth(w, r) {
+		return
+	}
 	var req proto.AcquireRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.RunnerID == "" {
 		writeErr(w, http.StatusBadRequest, "runner_id is required")
@@ -285,6 +308,9 @@ func (s *Server) acquire(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) pushLogs(w http.ResponseWriter, r *http.Request) {
+	if !s.requireRunnerAuth(w, r) {
+		return
+	}
 	id, ok := pathID(r)
 	if !ok {
 		writeErr(w, http.StatusBadRequest, "invalid job id")
@@ -303,7 +329,7 @@ func (s *Server) pushLogs(w http.ResponseWriter, r *http.Request) {
 			chunk = strings.ReplaceAll(chunk, v, "[MASKED]")
 		}
 	}
-	if err := s.store.AppendLog(r.Context(), id, chunk); err != nil {
+	if err := s.store.AppendLogCapped(r.Context(), id, chunk, s.maxJobLogBytes); err != nil {
 		slog.Error("push logs", "err", err)
 		writeErr(w, http.StatusInternalServerError, "failed to store logs")
 		return
@@ -312,6 +338,9 @@ func (s *Server) pushLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
+	if !s.requireRunnerAuth(w, r) {
+		return
+	}
 	id, ok := pathID(r)
 	if !ok {
 		writeErr(w, http.StatusBadRequest, "invalid job id")
@@ -325,6 +354,9 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) complete(w http.ResponseWriter, r *http.Request) {
+	if !s.requireRunnerAuth(w, r) {
+		return
+	}
 	id, ok := pathID(r)
 	if !ok {
 		writeErr(w, http.StatusBadRequest, "invalid job id")

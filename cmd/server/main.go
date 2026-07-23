@@ -44,7 +44,7 @@ func main() {
 	}
 	slog.Info("artifact store configured", "backend", blobs.Kind())
 
-	go scheduler.New(st).Run(ctx)
+	go scheduler.New(st, blobs).Run(ctx)
 
 	srv := &http.Server{Addr: addr, Handler: api.New(st, blobs)}
 	go func() {

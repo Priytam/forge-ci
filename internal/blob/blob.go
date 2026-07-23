@@ -25,6 +25,8 @@ type Store interface {
 	Put(ctx context.Context, key string, r io.Reader) (int64, error)
 	// Get opens the blob at key for reading.
 	Get(ctx context.Context, key string) (io.ReadCloser, error)
+	// Delete removes the blob at key. Deleting a missing key is not an error.
+	Delete(ctx context.Context, key string) error
 	// Kind names the backend ("local" or "s3") for logs/UI.
 	Kind() string
 }
@@ -101,6 +103,19 @@ func (l *localStore) Get(_ context.Context, key string) (io.ReadCloser, error) {
 	return os.Open(p)
 }
 
+func (l *localStore) Delete(_ context.Context, key string) error {
+	p, err := l.path(key)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	// Best-effort prune of the now-empty per-job directory.
+	_ = os.Remove(filepath.Dir(p))
+	return nil
+}
+
 // ---- s3-compatible ----
 
 type s3Store struct {
@@ -130,4 +145,8 @@ func (s *s3Store) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 		return nil, err
 	}
 	return obj, nil
+}
+
+func (s *s3Store) Delete(ctx context.Context, key string) error {
+	return s.client.RemoveObject(ctx, s.bucket, key, minio.RemoveObjectOptions{})
 }

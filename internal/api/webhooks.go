@@ -40,6 +40,9 @@ func (s *Server) registerWebhookRoutes() {
 // registerRepo connects a Forge repo to a real GitHub/Bitbucket repository.
 // Access is verified with git ls-remote before saving (skip with ?validate=0).
 func (s *Server) registerRepo(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	var req proto.RepoRegistration
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
@@ -248,6 +251,9 @@ func (s *Server) bitbucketWebhook(w http.ResponseWriter, r *http.Request) {
 // putRepoConfig pushes a NEW config version (append-only history) and moves
 // the current pointer. Run-form edits never hit this endpoint.
 func (s *Server) putRepoConfig(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	var req struct {
 		Repo    string `json:"repo"`
 		Config  string `json:"config"`
@@ -326,6 +332,9 @@ func (s *Server) listConfigVersions(w http.ResponseWriter, r *http.Request) {
 // revertRepoConfig copies an old version forward as a brand-new version —
 // history is never rewritten, so the revert itself is auditable.
 func (s *Server) revertRepoConfig(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	var req struct {
 		Repo    string `json:"repo"`
 		Version int    `json:"version"`

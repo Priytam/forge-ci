@@ -27,7 +27,13 @@ func (s *Store) UpsertSSOProvider(ctx context.Context, p SSOProvider) error {
 	if p.Tenant == "" {
 		p.Tenant = "common"
 	}
-	_, err := s.pool.Exec(ctx,
+	// Empty secret is preserved (Encrypt is a no-op on "") so the ON CONFLICT
+	// "keep existing secret" branch still fires when editing without a new one.
+	encSecret, err := s.cipher.Encrypt(p.ClientSecret)
+	if err != nil {
+		return err
+	}
+	_, err = s.pool.Exec(ctx,
 		`INSERT INTO sso_providers (provider, enabled, client_id, client_secret, tenant, allowed_domain)
 		 VALUES ($1,$2,$3,$4,$5,$6)
 		 ON CONFLICT (provider) DO UPDATE SET
@@ -39,7 +45,7 @@ func (s *Store) UpsertSSOProvider(ctx context.Context, p SSOProvider) error {
 		   tenant = EXCLUDED.tenant,
 		   allowed_domain = EXCLUDED.allowed_domain,
 		   updated_at = now()`,
-		p.Provider, p.Enabled, p.ClientID, p.ClientSecret, p.Tenant, p.AllowedDomain)
+		p.Provider, p.Enabled, p.ClientID, encSecret, p.Tenant, p.AllowedDomain)
 	return err
 }
 
@@ -77,6 +83,11 @@ func (s *Store) GetEnabledSSOProvider(ctx context.Context, provider string) (*SS
 	if err != nil {
 		return nil, err
 	}
+	plain, err := s.cipher.Decrypt(p.ClientSecret)
+	if err != nil {
+		return nil, err
+	}
+	p.ClientSecret = plain
 	p.HasSecret = p.ClientSecret != ""
 	return &p, nil
 }

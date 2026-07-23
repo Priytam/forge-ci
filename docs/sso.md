@@ -13,6 +13,35 @@ provider console — it's derived from the server's `EXTERNAL_URL` env var
 (set that to your real https URL in production; also set `FRONTEND_URL` to
 where the dashboard lives so post-login redirects land correctly).
 
+## Platform administrators (authorization)
+
+Read endpoints are open to any authenticated user; **mutating admin endpoints**
+(SSO config, variables, members, protected environments, repo registry, repo
+configs, repo settings, runner tokens, runner pause) require a *platform
+admin*. Admin is determined by:
+
+- **Open mode** (no SSO provider enabled): every caller is treated as admin
+  (bootstrap — there is no authz until you enable SSO).
+- **Enforced mode** (SSO enabled): the caller must have a session whose email
+  is listed in **`ADMIN_EMAILS`** (comma-separated), e.g.
+  `ADMIN_EMAILS="alice@meesho.com,bob@meesho.com"`. Non-admins get `403`;
+  unauthenticated callers get `401`.
+
+`GET /api/v1/auth/me` returns an `is_admin` boolean so the UI can hide
+admin-only navigation.
+
+> Footgun: enabling SSO with an empty `ADMIN_EMAILS` locks everyone out of
+> admin mutations. Set `ADMIN_EMAILS` **before** enabling a provider.
+
+## CSRF protection
+
+Cookie-authenticated state-changing requests (POST/PUT/DELETE carrying the
+`forge_session` cookie) must be same-origin: the `Origin` header (or `Referer`
+fallback) must match `EXTERNAL_URL` or `FRONTEND_URL`, otherwise the request is
+rejected with `403`. Safe methods (GET/HEAD), the runner protocol, webhooks,
+and bearer-token (runner) requests are exempt. This is defense-in-depth on top
+of the cookie's `SameSite=Lax`.
+
 ## Google — step by step
 
 1. Open https://console.cloud.google.com → select/create a project.

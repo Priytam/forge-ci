@@ -13,6 +13,33 @@ Flags / env vars:
 | `--executor` | `EXECUTOR` | `shell` or `docker` |
 | `--id` | `RUNNER_ID` | stable unique name (defaults to host-pid) |
 | `--tags` | `RUNNER_TAGS` | comma-separated capabilities, e.g. `gpu,linux` |
+| `--token` | `RUNNER_TOKEN` | runner auth token (required when the server runs `RUNNER_AUTH=on`) |
+
+## Runner authentication
+
+The runner protocol (`/api/v1/runner/*`) and artifact upload are gated by the
+server env var **`RUNNER_AUTH`**:
+
+| `RUNNER_AUTH` | Behaviour |
+|---|---|
+| `off` (default) | **Unauthenticated** — any client can acquire jobs, push logs and upload artifacts. Backward-compatible; the server logs a warning that this is insecure. Runners work with or without a token. |
+| `on` | Every `/runner/*` call and artifact upload must carry `Authorization: Bearer <token>` matching a non-revoked row in `runner_tokens`. Missing/invalid/revoked tokens get `401`. |
+
+When `RUNNER_AUTH=on` is set with **zero tokens** in the table, the server
+auto-generates one on startup and prints it (once) to the log so an operator
+can configure runners:
+
+```
+WARN RUNNER_AUTH=on with no tokens — generated a bootstrap runner token. ... runner_token=<hex>
+```
+
+Configure each runner with that value via `--token` / `RUNNER_TOKEN`.
+
+**Token admin API** (mutations require platform admin — see docs/sso.md):
+
+- `POST /api/v1/runner-tokens {"description": "..."}` → returns the raw `token` **once**.
+- `GET  /api/v1/runner-tokens` → masked list (last-4 suffix, `revoked`, `last_used_at`); never returns the raw token.
+- `POST /api/v1/runner-tokens/{id-or-token}/revoke` → revokes; the token then gets `401`.
 
 **Runner groups via tags.** Runners are deployed independently of repos —
 the fleet is global, and tags are how work is routed to it:

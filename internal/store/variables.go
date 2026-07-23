@@ -31,6 +31,11 @@ func (s *Store) ListVariables(ctx context.Context, repo string, reveal bool) ([]
 			&v.Masked, &v.EnvironmentScope, &v.CreatedAt); err != nil {
 			return nil, err
 		}
+		plain, err := s.cipher.Decrypt(v.Value)
+		if err != nil {
+			return nil, err
+		}
+		v.Value = plain
 		if v.Masked && !reveal {
 			v.Value = ""
 		}
@@ -40,33 +45,49 @@ func (s *Store) ListVariables(ctx context.Context, repo string, reveal bool) ([]
 }
 
 func (s *Store) CreateVariable(ctx context.Context, req proto.VariableRequest) (*proto.Variable, error) {
+	encVal, err := s.cipher.Encrypt(req.Value)
+	if err != nil {
+		return nil, err
+	}
 	var v proto.Variable
-	err := s.pool.QueryRow(ctx,
+	err = s.pool.QueryRow(ctx,
 		`INSERT INTO repo_variables (repo, key, value, protected, masked, environment_scope)
 		 VALUES ($1,$2,$3,$4,$5,$6)
 		 RETURNING id, repo, key, value, protected, masked, environment_scope, created_at`,
-		req.Repo, req.Key, req.Value, req.Protected, req.Masked, req.EnvironmentScope).
+		req.Repo, req.Key, encVal, req.Protected, req.Masked, req.EnvironmentScope).
 		Scan(&v.ID, &v.Repo, &v.Key, &v.Value, &v.Protected, &v.Masked, &v.EnvironmentScope, &v.CreatedAt)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 		return nil, ErrDuplicateVariable
 	}
-	return &v, err
+	if err != nil {
+		return nil, err
+	}
+	v.Value = req.Value // return plaintext to the caller
+	return &v, nil
 }
 
 func (s *Store) UpdateVariable(ctx context.Context, id int64, req proto.VariableRequest) (*proto.Variable, error) {
+	encVal, err := s.cipher.Encrypt(req.Value)
+	if err != nil {
+		return nil, err
+	}
 	var v proto.Variable
-	err := s.pool.QueryRow(ctx,
+	err = s.pool.QueryRow(ctx,
 		`UPDATE repo_variables
 		 SET value=$2, protected=$3, masked=$4, environment_scope=$5
 		 WHERE id=$1
 		 RETURNING id, repo, key, value, protected, masked, environment_scope, created_at`,
-		id, req.Value, req.Protected, req.Masked, req.EnvironmentScope).
+		id, encVal, req.Protected, req.Masked, req.EnvironmentScope).
 		Scan(&v.ID, &v.Repo, &v.Key, &v.Value, &v.Protected, &v.Masked, &v.EnvironmentScope, &v.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
-	return &v, err
+	if err != nil {
+		return nil, err
+	}
+	v.Value = req.Value // return plaintext to the caller
+	return &v, nil
 }
 
 func (s *Store) DeleteVariable(ctx context.Context, id int64) error {
@@ -147,9 +168,13 @@ func (s *Store) ResolveVariables(ctx context.Context, repo, ref, environment str
 		if !scopeMatches(scope, environment) {
 			continue
 		}
+		plain, err := s.cipher.Decrypt(value)
+		if err != nil {
+			return nil, err
+		}
 		// Scoped variables override '*' ones for the same key: '*' sorts
 		// before named scopes, so later rows win.
-		out[key] = value
+		out[key] = plain
 	}
 	return out, rows.Err()
 }
@@ -196,7 +221,11 @@ func (s *Store) MaskedValuesForJob(ctx context.Context, jobID int64) ([]string, 
 			continue
 		}
 		if scopeMatches(scope, env) {
-			out = append(out, value)
+			plain, err := s.cipher.Decrypt(value)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, plain)
 		}
 	}
 	return out, rows.Err()

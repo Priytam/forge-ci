@@ -18,7 +18,13 @@ import (
 // RegisterRepo stores/updates the VCS connection for a repo. An empty token
 // on update keeps the existing token (so edits don't require re-entering it).
 func (s *Store) RegisterRepo(ctx context.Context, r proto.RepoRegistration) error {
-	_, err := s.pool.Exec(ctx,
+	// Empty token is preserved (Encrypt is a no-op on "") so the ON CONFLICT
+	// "keep existing token" branch still fires on edits without a new token.
+	encToken, err := s.cipher.Encrypt(r.Token)
+	if err != nil {
+		return err
+	}
+	_, err = s.pool.Exec(ctx,
 		`INSERT INTO repo_registry (repo, provider, clone_url, token, default_branch)
 		 VALUES ($1,$2,$3,$4,$5)
 		 ON CONFLICT (repo) DO UPDATE SET
@@ -26,7 +32,7 @@ func (s *Store) RegisterRepo(ctx context.Context, r proto.RepoRegistration) erro
 		   clone_url = EXCLUDED.clone_url,
 		   token = CASE WHEN EXCLUDED.token = '' THEN repo_registry.token ELSE EXCLUDED.token END,
 		   default_branch = EXCLUDED.default_branch`,
-		r.Repo, r.Provider, r.CloneURL, r.Token, r.DefaultBranch)
+		r.Repo, r.Provider, r.CloneURL, encToken, r.DefaultBranch)
 	return err
 }
 
@@ -87,13 +93,17 @@ func (s *Store) ResolveRef(ctx context.Context, repo, ref string) (string, error
 // cloneAuth returns the clone URL with credentials embedded (or "" when the
 // repo isn't registered) plus the raw token for log redaction.
 func (s *Store) cloneAuth(ctx context.Context, repo string) (cloneURL, token string, err error) {
-	var provider, raw string
+	var provider, raw, stored string
 	err = s.pool.QueryRow(ctx,
 		`SELECT provider, clone_url, token FROM repo_registry WHERE repo=$1`, repo).
-		Scan(&provider, &raw, &token)
+		Scan(&provider, &raw, &stored)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", "", nil
 	}
+	if err != nil {
+		return "", "", err
+	}
+	token, err = s.cipher.Decrypt(stored)
 	if err != nil {
 		return "", "", err
 	}

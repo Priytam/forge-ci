@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"sort"
 	"time"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/priytamjeepandey/forge-ci/internal/compiler"
 	"github.com/priytamjeepandey/forge-ci/internal/proto"
+	"github.com/priytamjeepandey/forge-ci/internal/secret"
 )
 
 //go:embed migrations.sql
@@ -33,7 +35,8 @@ var (
 )
 
 type Store struct {
-	pool *pgxpool.Pool
+	pool   *pgxpool.Pool
+	cipher *secret.Cipher // envelope encryption for secrets at rest
 
 	// Execution-timeout policy (env-configured, see New).
 	defaultJobTimeout time.Duration // DEFAULT_JOB_TIMEOUT, jobs without timeout:
@@ -61,12 +64,117 @@ func New(ctx context.Context, dsn string) (*Store, error) {
 	if _, err := pool.Exec(ctx, migrations); err != nil {
 		return nil, fmt.Errorf("migrations: %w", err)
 	}
-	return &Store{
+	cipher, err := secret.FromEnv()
+	if err != nil {
+		return nil, fmt.Errorf("secret cipher: %w", err)
+	}
+	s := &Store{
 		pool:              pool,
+		cipher:            cipher,
 		defaultJobTimeout: envDuration("DEFAULT_JOB_TIMEOUT", time.Hour),
 		maxJobTimeout:     envDuration("MAX_JOB_TIMEOUT", 4*time.Hour),
 		queueTimeout:      envDuration("QUEUE_TIMEOUT", 24*time.Hour),
-	}, nil
+	}
+	if err := s.initSecrets(ctx); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// initSecrets either re-encrypts any plaintext secret rows (when a key is
+// configured) or warns loudly that secrets are stored in the clear (when it is
+// not). Encryption is idempotent: already-encrypted rows are skipped.
+func (s *Store) initSecrets(ctx context.Context) error {
+	if s.cipher.HasKey() {
+		n, err := s.MigrateSecrets(ctx)
+		if err != nil {
+			return fmt.Errorf("re-encrypt secrets: %w", err)
+		}
+		if n > 0 {
+			slog.Info("secrets: re-encrypted plaintext rows at rest", "rows", n)
+		}
+		return nil
+	}
+	plaintext, err := s.countPlaintextSecrets(ctx)
+	if err != nil {
+		return err
+	}
+	if plaintext > 0 {
+		slog.Warn("SECURITY: FORGE_SECRET_KEY is not set — "+
+			"CI/CD variables, VCS tokens and SSO client secrets are stored in PLAINTEXT. "+
+			"Set FORGE_SECRET_KEY (base64 32 bytes) to enable encryption at rest.",
+			"plaintext_secret_rows", plaintext)
+	}
+	return nil
+}
+
+// countPlaintextSecrets counts non-empty, unencrypted secret values across the
+// three secret-bearing tables.
+func (s *Store) countPlaintextSecrets(ctx context.Context) (int, error) {
+	var n int
+	err := s.pool.QueryRow(ctx, `
+		SELECT
+		  (SELECT count(*) FROM repo_variables WHERE value <> '' AND value NOT LIKE 'enc:v1:%') +
+		  (SELECT count(*) FROM repo_registry  WHERE token <> '' AND token NOT LIKE 'enc:v1:%') +
+		  (SELECT count(*) FROM sso_providers  WHERE client_secret <> '' AND client_secret NOT LIKE 'enc:v1:%')`).
+		Scan(&n)
+	return n, err
+}
+
+// MigrateSecrets re-encrypts every plaintext secret value in place. It is a
+// no-op in passthrough mode and idempotent (enc:v1: rows are skipped by the
+// WHERE clause), so it is safe to run on every start.
+func (s *Store) MigrateSecrets(ctx context.Context) (int, error) {
+	if !s.cipher.HasKey() {
+		return 0, nil
+	}
+	total := 0
+	type target struct {
+		table, keyCol, valCol string
+	}
+	for _, t := range []target{
+		{"repo_variables", "id", "value"},
+		{"repo_registry", "repo", "token"},
+		{"sso_providers", "provider", "client_secret"},
+	} {
+		rows, err := s.pool.Query(ctx, fmt.Sprintf(
+			`SELECT %s, %s FROM %s WHERE %s <> '' AND %s NOT LIKE 'enc:v1:%%'`,
+			t.keyCol, t.valCol, t.table, t.valCol, t.valCol))
+		if err != nil {
+			return total, err
+		}
+		type row struct {
+			key any
+			val string
+		}
+		var pending []row
+		for rows.Next() {
+			var k any
+			var v string
+			if err := rows.Scan(&k, &v); err != nil {
+				rows.Close()
+				return total, err
+			}
+			pending = append(pending, row{k, v})
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return total, err
+		}
+		for _, p := range pending {
+			enc, err := s.cipher.Encrypt(p.val)
+			if err != nil {
+				return total, err
+			}
+			if _, err := s.pool.Exec(ctx, fmt.Sprintf(
+				`UPDATE %s SET %s=$1 WHERE %s=$2`, t.table, t.valCol, t.keyCol),
+				enc, p.key); err != nil {
+				return total, err
+			}
+			total++
+		}
+	}
+	return total, nil
 }
 
 func (s *Store) Close() { s.pool.Close() }
@@ -366,6 +474,105 @@ func (s *Store) AppendLog(ctx context.Context, jobID int64, chunk string) error 
 	_, err := s.pool.Exec(ctx,
 		`INSERT INTO job_logs (job_id, chunk) VALUES ($1,$2)`, jobID, chunk)
 	return err
+}
+
+// AppendLogCapped appends a log chunk while enforcing a cumulative per-job
+// byte cap. capBytes <= 0 disables the cap. Once the cap is crossed it writes a
+// single truncation notice, sets jobs.log_truncated, and silently drops all
+// further chunks. Returns ErrNotFound if the job does not exist.
+func (s *Store) AppendLogCapped(ctx context.Context, jobID int64, chunk string, capBytes int64) error {
+	if capBytes <= 0 {
+		return s.AppendLog(ctx, jobID, chunk)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var truncated bool
+	var used int64
+	err = tx.QueryRow(ctx,
+		`SELECT j.log_truncated,
+		        COALESCE((SELECT sum(octet_length(chunk)) FROM job_logs WHERE job_id=j.id), 0)
+		 FROM jobs j WHERE j.id=$1`, jobID).Scan(&truncated, &used)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if truncated {
+		return tx.Commit(ctx) // already capped — drop
+	}
+	if used+int64(len(chunk)) > capBytes {
+		// Store the portion that still fits under the cap, then a single
+		// truncation notice, and mark the job so further chunks are dropped.
+		if remaining := capBytes - used; remaining > 0 {
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO job_logs (job_id, chunk) VALUES ($1,$2)`,
+				jobID, chunk[:remaining]); err != nil {
+				return err
+			}
+		}
+		notice := fmt.Sprintf(
+			"\n[forge] log truncated: job exceeded MAX_JOB_LOG_BYTES (%d bytes); further output dropped\n",
+			capBytes)
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO job_logs (job_id, chunk) VALUES ($1,$2)`, jobID, notice); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE jobs SET log_truncated=TRUE WHERE id=$1`, jobID); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO job_logs (job_id, chunk) VALUES ($1,$2)`, jobID, chunk); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// ---- retention GC ----
+
+// DeleteExpiredSessions removes login sessions past their expiry.
+func (s *Store) DeleteExpiredSessions(ctx context.Context) (int64, error) {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM sessions WHERE expires_at < now()`)
+	return tag.RowsAffected(), err
+}
+
+// ExpiredArtifactBlobKeys returns the blob keys (artifacts.path) of artifacts
+// belonging to pipelines older than the retention window, so the caller can
+// delete them from the blob store before the DB rows cascade away.
+func (s *Store) ExpiredArtifactBlobKeys(ctx context.Context, olderThan time.Duration) ([]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT a.path FROM artifacts a
+		 JOIN jobs j ON j.id = a.job_id
+		 JOIN pipelines p ON p.id = j.pipeline_id
+		 WHERE p.created_at < now() - $1::interval`, olderThan.String())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var keys []string
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			return nil, err
+		}
+		keys = append(keys, k)
+	}
+	return keys, rows.Err()
+}
+
+// DeleteExpiredPipelines removes pipelines older than the retention window.
+// Deletion cascades to jobs, job_logs, job_needs, artifacts and job_approvals.
+func (s *Store) DeleteExpiredPipelines(ctx context.Context, olderThan time.Duration) (int64, error) {
+	tag, err := s.pool.Exec(ctx,
+		`DELETE FROM pipelines WHERE created_at < now() - $1::interval`, olderThan.String())
+	return tag.RowsAffected(), err
 }
 
 func (s *Store) GetLogs(ctx context.Context, jobID int64) (string, error) {

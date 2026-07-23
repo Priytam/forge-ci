@@ -213,6 +213,24 @@ CREATE TABLE IF NOT EXISTS protected_refs (
 INSERT INTO protected_refs (repo, pattern) VALUES ('', 'main')
 ON CONFLICT DO NOTHING;
 
+-- Runner authentication tokens. Runners present `Authorization: Bearer <token>`
+-- on every /runner/* call (and artifact upload) when RUNNER_AUTH=on. token is
+-- the raw secret (PK); the API never returns it after creation — lists show
+-- the last 4 chars only. id gives a stable handle for revoke-by-id.
+CREATE TABLE IF NOT EXISTS runner_tokens (
+    id           BIGSERIAL   UNIQUE,
+    token        TEXT        PRIMARY KEY,
+    description  TEXT        NOT NULL DEFAULT '',
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_used_at TIMESTAMPTZ,
+    revoked      BOOLEAN     NOT NULL DEFAULT FALSE
+);
+
+-- Per-job log-byte cap bookkeeping: once a job's cumulative log bytes exceed
+-- MAX_JOB_LOG_BYTES the server writes a single truncation notice and sets this
+-- flag so further chunks are dropped without re-noticing.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS log_truncated BOOLEAN NOT NULL DEFAULT FALSE;
+
 -- Append-only audit trail of approval decisions.
 CREATE TABLE IF NOT EXISTS job_approvals (
     id         BIGSERIAL PRIMARY KEY,

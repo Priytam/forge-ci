@@ -272,7 +272,14 @@ func (s *Server) authMe(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "not signed in")
 		return
 	}
-	writeJSON(w, http.StatusOK, sess)
+	// is_admin lets the UI hide admin-only navigation.
+	writeJSON(w, http.StatusOK, map[string]any{
+		"email":      sess.Email,
+		"name":       sess.Name,
+		"provider":   sess.Provider,
+		"expires_at": sess.Expires,
+		"is_admin":   s.isAdmin(r),
+	})
 }
 
 func (s *Server) authLogout(w http.ResponseWriter, r *http.Request) {
@@ -301,6 +308,9 @@ func (s *Server) listSSO(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) upsertSSO(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	var p store.SSOProvider
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")

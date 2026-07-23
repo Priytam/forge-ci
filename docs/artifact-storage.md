@@ -14,9 +14,23 @@ runners need no storage credentials (they never talk to the store directly).
 | `S3_ACCESS_KEY` / `S3_SECRET_KEY` | credentials | — |
 | `S3_USE_SSL` | `true`/`false` | `true` |
 | `S3_REGION` | optional region | `""` |
+| `MAX_ARTIFACT_BYTES` | reject uploads larger than this (`413`); `0` disables | `524288000` (500 MiB) |
 
 The `s3` backend speaks the S3 API and therefore covers AWS S3, MinIO, and
 Google Cloud Storage (interoperability mode) with the same configuration.
+
+## Size cap and retention GC
+
+- **`MAX_ARTIFACT_BYTES`** caps a single artifact upload. Oversize uploads are
+  rejected with `413` and the partial blob is deleted, so a runaway job cannot
+  fill the store.
+- **`MAX_JOB_LOG_BYTES`** (default `10485760`, 10 MiB) caps cumulative job log
+  bytes: once exceeded, a single truncation notice is written and further log
+  chunks are dropped.
+- **`RETENTION_DAYS`** (default `30`, `0` = keep forever) drives an hourly
+  retention GC on the server: expired login sessions are always collected, and
+  pipelines older than the window are deleted (cascading their jobs, logs and
+  artifact rows) **and their artifact blobs are removed from the blob store**.
 
 ## Option A — local disk (default, dev)
 

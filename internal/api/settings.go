@@ -86,6 +86,9 @@ func (s *Server) listVariables(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createVariable(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	var req proto.VariableRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
@@ -109,6 +112,9 @@ func (s *Server) createVariable(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) updateVariable(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	id, ok := pathID(r)
 	if !ok {
 		writeErr(w, http.StatusBadRequest, "invalid variable id")
@@ -138,6 +144,9 @@ func (s *Server) updateVariable(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteVariable(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	id, ok := pathID(r)
 	if !ok {
 		writeErr(w, http.StatusBadRequest, "invalid variable id")
@@ -168,6 +177,9 @@ func (s *Server) listRunners(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) pauseRunner(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	var req struct {
 		Paused bool `json:"paused"`
 	}
@@ -190,6 +202,9 @@ func (s *Server) pauseRunner(w http.ResponseWriter, r *http.Request) {
 // ---- artifacts ----
 
 func (s *Server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
+	if !s.requireRunnerAuth(w, r) {
+		return
+	}
 	id, ok := pathID(r)
 	if !ok {
 		writeErr(w, http.StatusBadRequest, "invalid job id")
@@ -200,10 +215,25 @@ func (s *Server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 		name = "artifacts.tar.gz"
 	}
 	key := fmt.Sprintf("job-%d/%s", id, name)
-	size, err := s.blobs.Put(r.Context(), key, r.Body)
+	// Enforce MAX_ARTIFACT_BYTES: read one byte past the cap so an oversize
+	// upload can be detected, then reject with 413 and clean up the partial
+	// blob. A cap of 0 disables the limit.
+	body := r.Body
+	if s.maxArtifactBytes > 0 {
+		body = io.NopCloser(io.LimitReader(r.Body, s.maxArtifactBytes+1))
+	}
+	size, err := s.blobs.Put(r.Context(), key, body)
 	if err != nil {
 		slog.Error("store artifact blob", "err", err)
 		writeErr(w, http.StatusInternalServerError, "failed to store artifact")
+		return
+	}
+	if s.maxArtifactBytes > 0 && size > s.maxArtifactBytes {
+		if derr := s.blobs.Delete(r.Context(), key); derr != nil {
+			slog.Error("cleanup oversize artifact blob", "err", derr, "key", key)
+		}
+		writeErr(w, http.StatusRequestEntityTooLarge,
+			fmt.Sprintf("artifact exceeds MAX_ARTIFACT_BYTES (%d bytes)", s.maxArtifactBytes))
 		return
 	}
 	a, err := s.store.SaveArtifact(r.Context(), id, name, key, size)
@@ -273,6 +303,9 @@ func (s *Server) getRepoSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) putRepoSettings(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	var req struct {
 		Repo              string   `json:"repo"`
 		DefaultRunnerTags []string `json:"default_runner_tags"`
@@ -311,6 +344,9 @@ func (s *Server) listMembers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) addMember(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	var req proto.Member
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
@@ -334,6 +370,9 @@ func (s *Server) addMember(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) removeMember(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	id, ok := pathID(r)
 	if !ok {
 		writeErr(w, http.StatusBadRequest, "invalid member id")
@@ -362,6 +401,9 @@ func (s *Server) listProtectedEnvs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) upsertProtectedEnv(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	var pe proto.ProtectedEnvironment
 	if err := json.NewDecoder(r.Body).Decode(&pe); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")

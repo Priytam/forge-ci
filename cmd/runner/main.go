@@ -30,8 +30,17 @@ const (
 )
 
 type client struct {
-	base string
-	http *http.Client
+	base  string
+	http  *http.Client
+	token string // runner bearer token (empty when RUNNER_AUTH=off)
+}
+
+// do sends req, attaching the runner bearer token when one is configured.
+func (c *client) do(req *http.Request) (*http.Response, error) {
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	return c.http.Do(req)
 }
 
 func (c *client) post(ctx context.Context, path string, body []byte, contentType string) (*http.Response, error) {
@@ -40,7 +49,7 @@ func (c *client) post(ctx context.Context, path string, body []byte, contentType
 		return nil, err
 	}
 	req.Header.Set("Content-Type", contentType)
-	return c.http.Do(req)
+	return c.do(req)
 }
 
 func (c *client) postJSON(ctx context.Context, path string, v any) (*http.Response, error) {
@@ -55,6 +64,7 @@ func main() {
 		execKind = flag.String("executor", envOr("EXECUTOR", "shell"), "executor: shell | docker")
 		runnerID = flag.String("id", envOr("RUNNER_ID", fmt.Sprintf("%s-%d", host, os.Getpid())), "runner id")
 		tagsFlag = flag.String("tags", envOr("RUNNER_TAGS", ""), "comma-separated runner tags (jobs route by tag)")
+		token    = flag.String("token", envOr("RUNNER_TOKEN", ""), "runner auth token (required when the server runs RUNNER_AUTH=on)")
 		conc     = flag.Int("concurrency", concFromEnv(), "jobs to run in parallel (each forks its own executor)")
 	)
 	flag.Parse()
@@ -78,7 +88,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	c := &client{base: *server, http: &http.Client{Timeout: 60 * time.Second}}
+	c := &client{base: *server, http: &http.Client{Timeout: 60 * time.Second}, token: *token}
 	slog.Info("forge-runner started", "id", *runnerID, "server", *server,
 		"executor", exec.Name(), "tags", tags, "concurrency", *conc)
 
@@ -306,7 +316,7 @@ func restoreDependency(ctx context.Context, c *client, logs *logStreamer, dep pr
 	if err != nil {
 		return err
 	}
-	resp, err := c.http.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return err
 	}
@@ -373,7 +383,7 @@ func uploadArtifacts(c *client, logs *logStreamer, job *proto.RunnerJob, workdir
 		return
 	}
 	req.Header.Set("Content-Type", "application/gzip")
-	resp, err := c.http.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		logs.printf("artifacts: upload failed: %v\n", err)
 		return

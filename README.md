@@ -106,6 +106,36 @@ Runner protocol:
 - `POST /api/v1/runner/jobs/{id}/heartbeat`
 - `POST /api/v1/runner/jobs/{id}/complete` `{status, exit_code}`
 
+## Security & operations
+
+Hardening is env-driven on **forge-server** (all optional; defaults preserve
+the dev experience):
+
+| Env var | Purpose | Default |
+|---|---|---|
+| `RUNNER_AUTH` | `off` \| `on` — require a bearer token on the runner protocol + artifact upload | `off` |
+| `RUNNER_TOKEN` | (runner) token sent to an `RUNNER_AUTH=on` server | — |
+| `FORGE_SECRET_KEY` | base64 32-byte AES-256-GCM key; encrypts variables, VCS tokens and SSO secrets at rest | — (passthrough) |
+| `ADMIN_EMAILS` | comma-separated platform-admin emails (enforced once SSO is on) | — |
+| `EXTERNAL_URL` | server's public origin (SSO redirect + CSRF allow-list) | `http://localhost:8080` |
+| `FRONTEND_URL` | dashboard origin (post-login redirect + CSRF allow-list) | `http://localhost:5173` |
+| `MAX_JOB_LOG_BYTES` | per-job cumulative log cap; excess truncated with a notice | `10485760` (10 MiB) |
+| `MAX_ARTIFACT_BYTES` | per-upload artifact cap (`413` + cleanup on overflow); `0` disables | `524288000` (500 MiB) |
+| `RETENTION_DAYS` | delete pipelines + artifact blobs older than this; `0` = keep forever | `30` |
+
+- **Runner auth** — see [docs/runners.md](docs/runners.md). In `on` mode with no
+  tokens, the server auto-generates and logs a bootstrap token. Manage tokens
+  via `POST/GET /api/v1/runner-tokens` and `.../{id}/revoke`.
+- **Admin authorization & CSRF** — see [docs/sso.md](docs/sso.md). Mutating
+  admin endpoints require a platform admin; cookie-authenticated mutations must
+  be same-origin.
+- **Secrets at rest** — set `FORGE_SECRET_KEY` to encrypt `repo_variables.value`,
+  `repo_registry.token` and `sso_providers.client_secret` with envelope
+  encryption (`enc:v1:` prefix). Pre-existing plaintext still reads, and any
+  plaintext rows are re-encrypted on startup once a key is present. Without a key
+  the server runs in plaintext passthrough and logs a loud warning if secrets
+  exist. Generate a key with `head -c 32 /dev/urandom | base64`.
+
 ## Docs
 
 - [VCS integration (GitHub/Bitbucket webhooks)](docs/vcs-integration.md)
@@ -132,10 +162,10 @@ Runner protocol:
 
 ## Known limitations (see docs/feature-comparison.md for the full roadmap)
 
-- No authn — RBAC is enforced server-side but identity is client-asserted;
-  front with OIDC before real use.
-- No git clone step yet: scripts operate on an empty workspace.
+- Identity comes from SSO sessions; with SSO in open mode there is no authz
+  (bootstrap). Enable a provider and set `ADMIN_EMAILS` before real use.
 - Logs live in Postgres; masked values split across log chunks can escape
   redaction.
-- Variable values are plaintext in the DB (envelope encryption/Vault next).
+- Secret encryption uses a single `FORGE_SECRET_KEY` (no per-key rotation or
+  external KMS/Vault yet); rotating the key requires re-encrypting rows.
 - No caching, `rules:`, includes, matrix, retries, or scheduled pipelines yet.
