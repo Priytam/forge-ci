@@ -1,12 +1,31 @@
 import { Link, useNavigate } from "react-router-dom";
-import { listRepos, relativeTime, shortSha, type RepoSummary } from "../api";
+import {
+  listRegistry,
+  listRepos,
+  relativeTime,
+  shortSha,
+  type RepoSummary,
+} from "../api";
 import { usePoll } from "../hooks/usePoll";
 import StatusBadge from "../components/StatusBadge";
 import StageDots from "../components/StageDots";
 
 const MAX_REF_CHIPS = 3;
 
-function RepoCard({ summary }: { summary: RepoSummary }) {
+export function ProviderChip({ provider }: { provider: string | null }) {
+  if (!provider) return null;
+  const label =
+    provider === "github" ? "GitHub" : provider === "bitbucket" ? "Bitbucket" : "Git";
+  return <span className={`provider-chip provider-${provider}`}>{label}</span>;
+}
+
+function RepoCard({
+  summary,
+  provider,
+}: {
+  summary: RepoSummary;
+  provider: string | null;
+}) {
   const navigate = useNavigate();
   const { last_pipeline: last } = summary;
   const refs = summary.refs ?? [];
@@ -19,11 +38,15 @@ function RepoCard({ summary }: { summary: RepoSummary }) {
       onClick={() => navigate(`/repos/${encodeURIComponent(summary.repo)}`)}
     >
       <div className="repo-card-top">
-        <span className="repo-name">{summary.repo}</span>
+        <span className="repo-name">
+          {summary.repo} <ProviderChip provider={provider} />
+        </span>
         <span className="repo-card-side">
-          <span className="muted repo-activity">
-            {relativeTime(summary.last_activity_at)}
-          </span>
+          {summary.last_activity_at && (
+            <span className="muted repo-activity">
+              {relativeTime(summary.last_activity_at)}
+            </span>
+          )}
           <Link
             to={`/repos/${encodeURIComponent(summary.repo)}/settings`}
             className="repo-settings-link"
@@ -78,24 +101,36 @@ function RepoCard({ summary }: { summary: RepoSummary }) {
 
 export default function Repos() {
   const { data: repos, error, loading } = usePoll(listRepos, 5000);
+  const { data: registry } = usePoll(listRegistry, 0, false);
+
+  const providerOf = (repo: string): string | null =>
+    registry?.find((r) => r.repo === repo)?.provider ?? null;
 
   return (
     <div>
       <div className="page-head">
         <h1>Repositories</h1>
+        <div className="page-head-actions">
+          <Link to="/repos/new" className="btn btn-primary">
+            Add repository
+          </Link>
+        </div>
       </div>
 
       {error && <div className="error-banner">Failed to load repos: {error}</div>}
       {loading && !repos && <div className="muted">Loading repositories…</div>}
 
       {repos && repos.length === 0 && (
-        <div className="empty card">No repositories yet — run a pipeline first.</div>
+        <div className="empty card">
+          No repositories yet — <Link to="/repos/new">connect one</Link> to get
+          started.
+        </div>
       )}
 
       {repos && repos.length > 0 && (
         <div className="repo-grid">
           {repos.map((r) => (
-            <RepoCard key={r.repo} summary={r} />
+            <RepoCard key={r.repo} summary={r} provider={providerOf(r.repo)} />
           ))}
         </div>
       )}

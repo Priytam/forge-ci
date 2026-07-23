@@ -30,8 +30,10 @@ func New(kind string) (Executor, error) {
 		return shellExecutor{}, nil
 	case "docker":
 		return dockerExecutor{}, nil
+	case "kubernetes":
+		return newKubeExecutor()
 	default:
-		return nil, fmt.Errorf("unknown executor %q (want shell or docker)", kind)
+		return nil, fmt.Errorf("unknown executor %q (want shell, docker or kubernetes)", kind)
 	}
 }
 

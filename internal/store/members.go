@@ -21,6 +21,30 @@ func (s *Store) SetRepoConfig(ctx context.Context, repo, config string) error {
 	return err
 }
 
+// SetRepoDefaultTags stores the repo's runner-group selection.
+func (s *Store) SetRepoDefaultTags(ctx context.Context, repo string, tags []string) error {
+	if tags == nil {
+		tags = []string{}
+	}
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO repo_settings (repo, default_runner_tags) VALUES ($1,$2)
+		 ON CONFLICT (repo) DO UPDATE
+		   SET default_runner_tags = EXCLUDED.default_runner_tags, updated_at = now()`,
+		repo, tags)
+	return err
+}
+
+// GetRepoDefaultTags returns the repo's default runner tags ([] if unset).
+func (s *Store) GetRepoDefaultTags(ctx context.Context, repo string) ([]string, error) {
+	var tags []string
+	err := s.pool.QueryRow(ctx,
+		`SELECT default_runner_tags FROM repo_settings WHERE repo=$1`, repo).Scan(&tags)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return []string{}, nil
+	}
+	return tags, err
+}
+
 func (s *Store) GetRepoConfig(ctx context.Context, repo string) (string, error) {
 	var config string
 	err := s.pool.QueryRow(ctx,

@@ -14,10 +14,21 @@ Flags / env vars:
 | `--id` | `RUNNER_ID` | stable unique name (defaults to host-pid) |
 | `--tags` | `RUNNER_TAGS` | comma-separated capabilities, e.g. `gpu,linux` |
 
-**Tag routing:** a job with `tags: [gpu]` runs only on runners advertising
-`gpu`. Untagged jobs run on any runner. **Pausing:** `POST
-/api/v1/runners/{id}/pause {"paused": true}` (or the UI toggle) drains a
-runner without killing it.
+**Runner groups via tags.** Runners are deployed independently of repos —
+the fleet is global, and tags are how work is routed to it:
+
+1. Deploy runners with capability tags: `--tags=gpu`, `--tags=docker,linux`,
+   `--tags=prod-deploy` — a set of same-tagged runners is a "group".
+2. A repo selects its group with **default runner tags** (repo Settings →
+   Runner tags, or `PUT /api/v1/repo-settings {"repo": "...",
+   "default_runner_tags": ["gpu"]}`). Every job of that repo without its own
+   `tags:` inherits them.
+3. A job-level `tags:` list overrides the repo default for that job.
+4. A job runs only on a runner advertising **all** of its effective tags;
+   a job with no effective tags runs on any runner.
+
+**Pausing:** `POST /api/v1/runners/{id}/pause {"paused": true}` (or the UI
+toggle on the top-level Runners page) drains a runner without killing it.
 
 ## 1. Shell runner on a VM / bare metal
 
@@ -66,10 +77,30 @@ with the workspace bind-mounted and networking disabled.
      script: [go test ./...]
    ```
 
-## 3. Kubernetes (runner fleet as a Deployment)
+## 3. Kubernetes executor (ephemeral pod per job — GitLab-style)
 
-Until a native `kubernetes` executor lands (jobs as ephemeral Pods), run a
-fleet of shell/docker runners *on* Kubernetes:
+Nothing fixed runs per job: one resident **manager** process acquires jobs and
+forks each one into its own ephemeral Pod (created on acquire, deleted after).
+
+1. The manager machine/pod needs `kubectl` with access to the target cluster.
+2. Start the manager — `KUBE_CONTEXT` is **required** (it refuses the
+   kubeconfig current-context to protect shared kubeconfigs):
+   ```sh
+   KUBE_CONTEXT=my-ci-cluster KUBE_NAMESPACE=ci \
+   ./forge-runner --executor=kubernetes --id=k8s-manager-1 --tags=k8s \
+     --concurrency=4    # up to 4 pods in flight from one manager
+   ```
+3. Per job the manager: creates `forge-job-<id>` from the job's `image:`,
+   ships the prepared workspace in (clone + restored upstream artifacts),
+   execs the script (logs stream live, exit code propagates), copies declared
+   artifact paths back out, deletes the pod. Orphaned pods self-terminate
+   within 2h; all job pods carry the `app=forge-ci-job` label.
+4. Job images need `sh` and `tar` (alpine and typical build images do).
+
+## 3b. Alternative: fleet of shell/docker runners on Kubernetes
+
+When per-job pod overhead isn't wanted, run N resident runners as a
+Deployment:
 
 1. Build and push the runner image:
    ```sh

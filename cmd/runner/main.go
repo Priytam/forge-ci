@@ -55,8 +55,12 @@ func main() {
 		execKind = flag.String("executor", envOr("EXECUTOR", "shell"), "executor: shell | docker")
 		runnerID = flag.String("id", envOr("RUNNER_ID", fmt.Sprintf("%s-%d", host, os.Getpid())), "runner id")
 		tagsFlag = flag.String("tags", envOr("RUNNER_TAGS", ""), "comma-separated runner tags (jobs route by tag)")
+		conc     = flag.Int("concurrency", concFromEnv(), "jobs to run in parallel (each forks its own executor)")
 	)
 	flag.Parse()
+	if *conc < 1 {
+		*conc = 1
+	}
 
 	var tags []string
 	for _, t := range strings.Split(*tagsFlag, ",") {
@@ -76,23 +80,43 @@ func main() {
 
 	c := &client{base: *server, http: &http.Client{Timeout: 60 * time.Second}}
 	slog.Info("forge-runner started", "id", *runnerID, "server", *server,
-		"executor", exec.Name(), "tags", tags)
+		"executor", exec.Name(), "tags", tags, "concurrency", *conc)
 
-	req := proto.AcquireRequest{RunnerID: *runnerID, Executor: exec.Name(), Tags: tags}
-	for ctx.Err() == nil {
-		job, err := acquire(ctx, c, req)
-		if err != nil {
-			if ctx.Err() == nil {
-				slog.Warn("acquire failed, retrying", "err", err)
-				sleep(ctx, acquireRetryPause)
+	// The manager stays resident; each slot forks work per acquired job
+	// (with the kubernetes executor, that fork is an ephemeral pod).
+	var wg sync.WaitGroup
+	for slot := 0; slot < *conc; slot++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req := proto.AcquireRequest{RunnerID: *runnerID, Executor: exec.Name(), Tags: tags}
+			for ctx.Err() == nil {
+				job, err := acquire(ctx, c, req)
+				if err != nil {
+					if ctx.Err() == nil {
+						slog.Warn("acquire failed, retrying", "err", err)
+						sleep(ctx, acquireRetryPause)
+					}
+					continue
+				}
+				if job == nil {
+					continue // long-poll timed out, poll again
+				}
+				runJob(ctx, c, exec, job)
 			}
-			continue
-		}
-		if job == nil {
-			continue // long-poll timed out, poll again
-		}
-		runJob(ctx, c, exec, job)
+		}()
 	}
+	wg.Wait()
+}
+
+func concFromEnv() int {
+	if v := os.Getenv("RUNNER_CONCURRENCY"); v != "" {
+		var n int
+		if _, err := fmt.Sscanf(v, "%d", &n); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 1
 }
 
 func acquire(ctx context.Context, c *client, req proto.AcquireRequest) (*proto.RunnerJob, error) {
@@ -117,8 +141,8 @@ func acquire(ctx context.Context, c *client, req proto.AcquireRequest) (*proto.R
 
 func runJob(ctx context.Context, c *client, exec executor.Executor, job *proto.RunnerJob) {
 	slog.Info("job started", "job", job.ID, "name", job.Name)
-	logs := newLogStreamer(c, job.ID)
-	logs.printf("Running job #%d %q on %s executor\n$ %s\n", job.ID, job.Name, exec.Name(), job.Script)
+	logs := newLogStreamer(c, job.ID, job.RedactValues)
+	logs.printf("Running job #%d %q on %s executor\n", job.ID, job.Name, exec.Name())
 
 	hbCtx, stopHB := context.WithCancel(ctx)
 	var hbWG sync.WaitGroup
@@ -140,6 +164,23 @@ func runJob(ctx context.Context, c *client, exec executor.Executor, job *proto.R
 		}
 	}()
 
+	finish := func(status string, exitCode int) {
+		stopHB()
+		hbWG.Wait()
+		logs.close()
+		// Fresh context: ctx may be canceled on shutdown.
+		rctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		resp, err := c.postJSON(rctx, fmt.Sprintf("/api/v1/runner/jobs/%d/complete", job.ID),
+			proto.CompleteRequest{Status: status, ExitCode: exitCode})
+		if err != nil {
+			slog.Error("failed to report completion", "job", job.ID, "err", err)
+			return
+		}
+		resp.Body.Close()
+		slog.Info("job finished", "job", job.ID, "status", status, "exit_code", exitCode)
+	}
+
 	status, exitCode := "success", 0
 	workdir, err := os.MkdirTemp("", "forge-job-*")
 	if err != nil {
@@ -147,6 +188,26 @@ func runJob(ctx context.Context, c *client, exec executor.Executor, job *proto.R
 	} else {
 		defer os.RemoveAll(workdir)
 	}
+
+	if job.CloneURL != "" {
+		if err := cloneSource(ctx, logs, job, workdir); err != nil {
+			logs.printf("checkout failed: %v\n", err)
+			finish("failed", 1)
+			return
+		}
+	}
+
+	// GitLab-style artifact passing: restore upstream jobs' artifacts into
+	// the workspace before the script runs.
+	for _, dep := range job.Dependencies {
+		if err := restoreDependency(ctx, c, logs, dep, workdir); err != nil {
+			logs.printf("restoring artifacts of %q failed: %v\n", dep.JobName, err)
+			finish("failed", 1)
+			return
+		}
+	}
+
+	logs.printf("$ %s\n", job.Script)
 	out, wait, err := exec.Start(ctx, job, workdir)
 	if err != nil {
 		status, exitCode = "failed", 1
@@ -172,22 +233,80 @@ func runJob(ctx context.Context, c *client, exec executor.Executor, job *proto.R
 	if status == "success" && len(job.ArtifactPaths) > 0 {
 		uploadArtifacts(c, logs, job, workdir)
 	}
+	finish(status, exitCode)
+}
 
-	stopHB()
-	hbWG.Wait()
-	logs.close()
-
-	// Report completion with a fresh context: ctx may be canceled on shutdown.
-	rctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	resp, err := c.postJSON(rctx, fmt.Sprintf("/api/v1/runner/jobs/%d/complete", job.ID),
-		proto.CompleteRequest{Status: status, ExitCode: exitCode})
-	if err != nil {
-		slog.Error("failed to report completion", "job", job.ID, "err", err)
-		return
+// cloneSource checks out the pipeline's SHA into the workspace via a shallow
+// fetch. The clone URL (which may embed a token) is passed to git but never
+// printed; the streamer additionally redacts RedactValues.
+func cloneSource(ctx context.Context, logs *logStreamer, job *proto.RunnerJob, workdir string) error {
+	short := job.SHA
+	if len(short) > 8 {
+		short = short[:8]
 	}
-	resp.Body.Close()
-	slog.Info("job finished", "job", job.ID, "status", status, "exit_code", exitCode)
+	logs.printf("Checking out %s @ %s (%s)\n", job.RepoName, short, job.Ref)
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	run := func(args ...string) error {
+		cmd := osexec.CommandContext(cctx, "git", args...)
+		cmd.Dir = workdir
+		cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			msg := string(out)
+			for _, v := range job.RedactValues {
+				msg = strings.ReplaceAll(msg, v, "[REDACTED]")
+			}
+			return fmt.Errorf("git %s: %s", args[0], strings.TrimSpace(msg))
+		}
+		return nil
+	}
+	if err := run("init", "-q"); err != nil {
+		return err
+	}
+	if err := run("remote", "add", "origin", job.CloneURL); err != nil {
+		return err
+	}
+	// Prefer the exact SHA; fall back to the ref tip (some servers refuse
+	// direct SHA fetches).
+	if err := run("fetch", "-q", "--depth", "1", "origin", job.SHA); err != nil {
+		logs.printf("direct SHA fetch unavailable, fetching ref %s\n", job.Ref)
+		if err := run("fetch", "-q", "--depth", "1", "origin", job.Ref); err != nil {
+			return err
+		}
+	}
+	if err := run("checkout", "-q", "FETCH_HEAD"); err != nil {
+		return err
+	}
+	logs.printf("Checkout complete\n")
+	return nil
+}
+
+// restoreDependency downloads an upstream job's artifact archive and unpacks
+// it into the workspace.
+func restoreDependency(ctx context.Context, c *client, logs *logStreamer, dep proto.DependencyArtifact, workdir string) error {
+	rctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	req, err := http.NewRequestWithContext(rctx, http.MethodGet,
+		fmt.Sprintf("%s/api/v1/artifacts/%d/download", c.base, dep.ArtifactID), nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("download returned status %d", resp.StatusCode)
+	}
+	cmd := osexec.CommandContext(rctx, "tar", "-xzf", "-", "-C", workdir)
+	cmd.Stdin = resp.Body
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("untar: %s", strings.TrimSpace(string(out)))
+	}
+	logs.printf("Restored artifacts of job %q (%s)\n", dep.JobName, dep.Name)
+	return nil
 }
 
 // uploadArtifacts archives the declared workspace paths with tar and streams
@@ -255,16 +374,17 @@ func uploadArtifacts(c *client, logs *logStreamer, job *proto.RunnerJob, workdir
 
 // logStreamer batches log bytes and flushes them to the server periodically.
 type logStreamer struct {
-	c     *client
-	jobID int64
-	mu    sync.Mutex
-	buf   bytes.Buffer
-	done  chan struct{}
-	wg    sync.WaitGroup
+	c      *client
+	jobID  int64
+	redact []string
+	mu     sync.Mutex
+	buf    bytes.Buffer
+	done   chan struct{}
+	wg     sync.WaitGroup
 }
 
-func newLogStreamer(c *client, jobID int64) *logStreamer {
-	ls := &logStreamer{c: c, jobID: jobID, done: make(chan struct{})}
+func newLogStreamer(c *client, jobID int64, redact []string) *logStreamer {
+	ls := &logStreamer{c: c, jobID: jobID, redact: redact, done: make(chan struct{})}
 	ls.wg.Add(1)
 	go func() {
 		defer ls.wg.Done()
@@ -301,6 +421,9 @@ func (ls *logStreamer) flush() {
 	chunk := ls.buf.String()
 	ls.buf.Reset()
 	ls.mu.Unlock()
+	for _, v := range ls.redact {
+		chunk = strings.ReplaceAll(chunk, v, "[REDACTED]")
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

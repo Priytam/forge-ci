@@ -87,6 +87,27 @@ CREATE TABLE IF NOT EXISTS repo_configs (
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- First-class repo registry: the connection to the real VCS repo. token is
+-- used to build authenticated clone URLs for runners (never returned by the
+-- API, never logged). Plaintext at rest for now — same caveat as variables.
+CREATE TABLE IF NOT EXISTS repo_registry (
+    repo           TEXT PRIMARY KEY,
+    provider       TEXT NOT NULL CHECK (provider IN ('github','bitbucket','other')),
+    clone_url      TEXT NOT NULL,
+    token          TEXT NOT NULL DEFAULT '',
+    default_branch TEXT NOT NULL DEFAULT 'main',
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Per-repo defaults. Runners are deployed independently (global fleet,
+-- selected by tags); a repo picks its runner group here. Jobs without an
+-- explicit tags: list inherit these.
+CREATE TABLE IF NOT EXISTS repo_settings (
+    repo                TEXT PRIMARY KEY,
+    default_runner_tags TEXT[] NOT NULL DEFAULT '{}',
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- Job routing tags and artifact declarations.
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS tags TEXT[] NOT NULL DEFAULT '{}';
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS artifact_paths JSONB NOT NULL DEFAULT '[]';

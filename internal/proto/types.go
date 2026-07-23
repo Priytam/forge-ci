@@ -59,6 +59,37 @@ type RunnerJob struct {
 	Env        map[string]string `json:"env"`
 
 	ArtifactPaths []string `json:"artifact_paths"`
+
+	// Source checkout: when CloneURL is set (repo is registered) the runner
+	// clones SHA into the workspace before running. RedactValues must never
+	// appear in logs (embedded tokens).
+	CloneURL     string   `json:"clone_url,omitempty"`
+	SHA          string   `json:"sha,omitempty"`
+	Ref          string   `json:"ref,omitempty"`
+	RepoName     string   `json:"repo_name,omitempty"`
+	RedactValues []string `json:"redact_values,omitempty"`
+
+	// Artifacts of the jobs this job needs — restored into the workspace
+	// before the script runs (GitLab-style artifact passing).
+	Dependencies []DependencyArtifact `json:"dependencies,omitempty"`
+}
+
+// DependencyArtifact points a runner at an upstream job's artifact archive.
+type DependencyArtifact struct {
+	ArtifactID int64  `json:"artifact_id"`
+	JobName    string `json:"job_name"`
+	Name       string `json:"name"`
+}
+
+// RepoRegistration connects a Forge repo to its real VCS repository.
+type RepoRegistration struct {
+	Repo          string    `json:"repo"`
+	Provider      string    `json:"provider"` // github | bitbucket | other
+	CloneURL      string    `json:"clone_url"`
+	Token         string    `json:"token,omitempty"` // write-only; never returned
+	HasToken      bool      `json:"has_token"`
+	DefaultBranch string    `json:"default_branch"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 // Runner is a registered build agent as seen by the control plane.

@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useState,
   type FormEvent,
   type ReactNode,
@@ -14,6 +15,7 @@ import {
   deleteMember,
   deleteVariable,
   getRepoConfig,
+  getRepoSettings,
   humanSize,
   listArtifacts,
   listMembers,
@@ -21,8 +23,8 @@ import {
   listRunners,
   listVariables,
   putRepoConfig,
+  putRepoSettings,
   relativeTime,
-  setRunnerPaused,
   updateVariable,
   upsertProtectedEnvironment,
   type Variable,
@@ -297,86 +299,144 @@ function VariablesSection({ repo }: { repo: string }) {
   );
 }
 
-/* ---------------- Runners ---------------- */
+/* ---------------- Runner tags ---------------- */
 
-function RunnersSection() {
-  const { data: runners, error, refresh } = usePoll(listRunners, 5000, true);
-  const [actionError, setActionError] = useState<string | null>(null);
+function RunnerTagsSection({ repo }: { repo: string }) {
+  const settingsFetcher = useCallback(() => getRepoSettings(repo), [repo]);
+  const { data, error, loading } = usePoll(settingsFetcher, 0, false);
 
-  const togglePause = async (id: number | string, paused: boolean) => {
-    setActionError(null);
+  const { data: runners } = usePoll(listRunners, 0, false);
+
+  const [tags, setTags] = useState<string[]>([]);
+  const [initialized, setInitialized] = useState(false);
+  const [input, setInput] = useState("");
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!initialized && !loading && data) {
+      setTags(data.default_runner_tags ?? []);
+      setInitialized(true);
+    }
+  }, [data, loading, initialized]);
+
+  const fleetTags = useMemo(() => {
+    const set = new Set<string>();
+    for (const r of runners ?? []) {
+      for (const t of r.tags ?? []) set.add(t);
+    }
+    return [...set].sort();
+  }, [runners]);
+
+  const addTag = (raw: string) => {
+    const parts = raw
+      .split(",")
+      .map((t) => t.trim())
+      .filter(Boolean);
+    if (parts.length === 0) return;
+    setTags((prev) => {
+      const next = [...prev];
+      for (const p of parts) {
+        if (!next.includes(p)) next.push(p);
+      }
+      return next;
+    });
+    setSaved(false);
+  };
+
+  const removeTag = (tag: string) => {
+    setTags((prev) => prev.filter((t) => t !== tag));
+    setSaved(false);
+  };
+
+  const onSave = async () => {
+    setBusy(true);
+    setSaveError(null);
+    setSaved(false);
     try {
-      await setRunnerPaused(id, paused);
-      refresh();
+      await putRepoSettings(repo, tags);
+      setSaved(true);
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : String(err));
+      setSaveError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
     }
   };
 
   return (
     <div>
       {error && <div className="error-banner">{error}</div>}
-      {actionError && <div className="error-banner">{actionError}</div>}
-      {runners && runners.length > 0 ? (
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>ID</th>
-                <th>Executor</th>
-                <th>Tags</th>
-                <th>Description</th>
-                <th>Status</th>
-                <th>Last contact</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {runners.map((r) => (
-                <tr key={r.id}>
-                  <td className="mono">#{r.id}</td>
-                  <td>
-                    <span className={`exec-badge exec-${r.executor}`}>
-                      {r.executor}
-                    </span>
-                  </td>
-                  <td>
-                    <span className="tag-chips">
-                      {r.tags.map((t) => (
-                        <span key={t} className="ref-tag">
-                          {t}
-                        </span>
-                      ))}
-                    </span>
-                  </td>
-                  <td>{r.description}</td>
-                  <td>
-                    <span className="runner-status">
-                      <span
-                        className={r.online ? "mini-dot mini-success" : "mini-dot"}
-                      />
-                      {r.online ? "online" : "offline"}
-                      {r.paused && <span className="muted"> (paused)</span>}
-                    </span>
-                  </td>
-                  <td className="muted">{relativeTime(r.last_contact_at)}</td>
-                  <td>
-                    <button
-                      type="button"
-                      className="btn"
-                      onClick={() => void togglePause(r.id, !r.paused)}
-                    >
-                      {r.paused ? "Resume" : "Pause"}
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+
+      <div className="tag-editor">
+        {tags.length > 0 ? (
+          tags.map((t) => (
+            <span key={t} className="tag-edit-chip">
+              <span className="mono">{t}</span>
+              <button
+                type="button"
+                className="tag-remove"
+                title={`Remove ${t}`}
+                onClick={() => removeTag(t)}
+              >
+                ✕
+              </button>
+            </span>
+          ))
+        ) : (
+          <span className="muted">No tags — jobs run on any runner.</span>
+        )}
+      </div>
+
+      <div className="tag-input-row">
+        <input
+          className="mono"
+          placeholder="Add tags (comma or Enter)"
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === ",") {
+              e.preventDefault();
+              addTag(input);
+              setInput("");
+            }
+          }}
+        />
+        <button
+          type="button"
+          className="btn btn-primary"
+          disabled={busy}
+          onClick={() => {
+            if (input.trim()) {
+              addTag(input);
+              setInput("");
+            }
+            void onSave();
+          }}
+        >
+          Save
+        </button>
+      </div>
+
+      {fleetTags.length > 0 && (
+        <div className="tag-suggestions">
+          <span className="muted">Tags in the fleet:</span>
+          {fleetTags.map((t) => (
+            <button
+              key={t}
+              type="button"
+              className="tag-suggestion"
+              disabled={tags.includes(t)}
+              onClick={() => addTag(t)}
+            >
+              {t}
+            </button>
+          ))}
         </div>
-      ) : (
-        <div className="muted">No runners registered.</div>
       )}
+
+      {saveError && <div className="error-banner">{saveError}</div>}
+      {saved && <div className="saved-note">Runner tags saved.</div>}
     </div>
   );
 }
@@ -783,38 +843,62 @@ export default function RepoSettings() {
 
       <Section
         title="Variables"
-        description="Key/value pairs injected into job environments. Protected variables are only exposed to protected refs; masked values are hidden in job logs."
+        description={
+          <>
+            Key/value pairs injected into job environments. Protected
+            variables are only exposed to protected refs; masked values are
+            hidden in job logs.{" "}
+            <Link to="/docs/variables-secrets" className="guide-link">
+              Guide →
+            </Link>
+          </>
+        }
       >
         <VariablesSection repo={repo} />
       </Section>
 
       <Section
-        title="Runners"
+        title="Runner tags"
         description={
           <>
-            Runners are pull-based agents (this list is global, not per-repo).
-            Register one with:{" "}
-            <code>
-              ./forge-runner --server=&lt;url&gt; --executor=shell|docker
-              --tags=a,b
-            </code>{" "}
-            — see docs/runners.md.
+            Jobs in this repo run only on runners advertising ALL of these
+            tags, unless a job sets its own <code>tags:</code> in YAML. Leave
+            empty to run on any runner.{" "}
+            <Link to="/docs/runner-groups" className="guide-link">
+              Guide →
+            </Link>
           </>
         }
       >
-        <RunnersSection />
+        <RunnerTagsSection repo={repo} />
       </Section>
 
       <Section
         title="Artifacts"
-        description="Files uploaded by finished jobs for this repo. Downloads stream a .tar.gz."
+        description={
+          <>
+            Files uploaded by finished jobs for this repo. Downloads stream a
+            .tar.gz.{" "}
+            <Link to="/docs/artifacts" className="guide-link">
+              Guide →
+            </Link>
+          </>
+        }
       >
         <ArtifactsSection repo={repo} />
       </Section>
 
       <Section
         title="Members & approval rules"
-        description="Who belongs to this repo and which roles can approve blocked deployments to protected environments."
+        description={
+          <>
+            Who belongs to this repo and which roles can approve blocked
+            deployments to protected environments.{" "}
+            <Link to="/docs/approvals" className="guide-link">
+              Guide →
+            </Link>
+          </>
+        }
       >
         <MembersSection repo={repo} />
       </Section>
@@ -826,7 +910,10 @@ export default function RepoSettings() {
             This YAML runs when GitHub/Bitbucket push webhooks arrive (Forge
             does not host the repo). Webhook URLs:{" "}
             <code>/api/v1/webhooks/github</code> and{" "}
-            <code>/api/v1/webhooks/bitbucket</code>.
+            <code>/api/v1/webhooks/bitbucket</code>.{" "}
+            <Link to="/docs/add-a-repo" className="guide-link">
+              Guide →
+            </Link>
           </>
         }
       >

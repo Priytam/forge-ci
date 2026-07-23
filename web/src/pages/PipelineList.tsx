@@ -1,9 +1,16 @@
 import { useCallback } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { decodeRepoParam, listPipelines, relativeTime, shortSha } from "../api";
+import {
+  decodeRepoParam,
+  listPipelines,
+  listRegistry,
+  relativeTime,
+  shortSha,
+} from "../api";
 import { usePoll } from "../hooks/usePoll";
 import StatusBadge from "../components/StatusBadge";
 import StageDots from "../components/StageDots";
+import { ProviderChip } from "./Repos";
 
 export default function PipelineList() {
   const navigate = useNavigate();
@@ -12,6 +19,8 @@ export default function PipelineList() {
 
   const fetchPipelines = useCallback(() => listPipelines(repo), [repo]);
   const { data: pipelines, error, loading } = usePoll(fetchPipelines, 2000);
+  const { data: registry } = usePoll(listRegistry, 0, false);
+  const provider = registry?.find((r) => r.repo === repo)?.provider ?? null;
 
   return (
     <div>
@@ -21,7 +30,9 @@ export default function PipelineList() {
       </div>
 
       <div className="page-head">
-        <h1>{repo}</h1>
+        <h1>
+          {repo} <ProviderChip provider={provider} />
+        </h1>
         <div className="page-head-actions">
           <Link
             to={`/repos/${encodeURIComponent(repo)}/settings`}

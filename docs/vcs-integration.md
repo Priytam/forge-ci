@@ -1,7 +1,21 @@
 # GitHub / Bitbucket integration
 
-Forge is a standalone CI system — it does not host repositories. Two things
+Forge is a standalone CI system — it does not host repositories. Three things
 connect it to your VCS:
+
+0. **A connected repository** (UI: Repos → Add repository, or the API) — so
+   runners can clone the source at the pipeline's SHA before running jobs:
+   ```sh
+   curl -X POST $FORGE/api/v1/repo-registry -d '{
+     "repo": "acme/checkout-service", "provider": "github",
+     "token": "<fine-grained PAT with repo read access — omit for public repos>",
+     "default_branch": "main"
+   }'
+   ```
+   Access is verified with `git ls-remote` before saving. The token is
+   write-only (never returned by the API), embedded only in the clone URL
+   handed to runners, and redacted from all job logs. Without a connected
+   repo, jobs still run — but in an empty workspace.
 
 1. **A registered pipeline config** — Forge stores the pipeline YAML per repo
    (it can't read `.forge-ci.yml` out of a repo it doesn't host):

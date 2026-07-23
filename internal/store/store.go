@@ -52,6 +52,13 @@ func (s *Store) Close() { s.pool.Close() }
 // ---- pipelines ----
 
 func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequest, jobs []compiler.CompiledJob) (*proto.Pipeline, error) {
+	// Repo-level runner-group selection: jobs without explicit tags inherit
+	// the repo's default runner tags (job-level tags: overrides).
+	defaultTags, err := s.GetRepoDefaultTags(ctx, req.Repo)
+	if err != nil {
+		return nil, err
+	}
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -74,8 +81,8 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 		env, _ := json.Marshal(j.Env)
 		artifacts, _ := json.Marshal(j.ArtifactPaths)
 		tags := j.Tags
-		if tags == nil {
-			tags = []string{}
+		if len(tags) == 0 {
+			tags = defaultTags
 		}
 		var image, environment *string
 		if j.Image != "" {
@@ -244,6 +251,21 @@ func (s *Store) ListRepos(ctx context.Context) ([]proto.RepoSummary, error) {
 	out := make([]proto.RepoSummary, 0, len(order))
 	for _, name := range order {
 		out = append(out, *byRepo[name])
+	}
+	// Registered repos with no pipelines yet still get a card.
+	registered, err := s.ListRegisteredRepos(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range registered {
+		if _, seen := byRepo[r.Repo]; !seen {
+			out = append(out, proto.RepoSummary{
+				Repo:           r.Repo,
+				Refs:           []string{},
+				RecentStatuses: []string{},
+				LastActivityAt: r.CreatedAt,
+			})
+		}
 	}
 	return out, nil
 }
@@ -444,7 +466,7 @@ func (s *Store) AcquireJob(ctx context.Context, req proto.AcquireRequest) (*prot
 	var j proto.RunnerJob
 	var image, environment *string
 	var envRaw, artifactsRaw []byte
-	var repo, ref string
+	var repo, ref, sha string
 	err = s.pool.QueryRow(ctx,
 		`UPDATE jobs j
 		 SET status='running', started_at=now(), heartbeat_at=now(), runner_id=$1
@@ -455,10 +477,10 @@ func (s *Store) AcquireJob(ctx context.Context, req proto.AcquireRequest) (*prot
 		      pipelines p
 		 WHERE j.id = next.id AND p.id = j.pipeline_id
 		 RETURNING j.id, j.pipeline_id, j.name, j.image, j.script, j.env,
-		           j.artifact_paths, j.environment, p.repo, p.ref`,
+		           j.artifact_paths, j.environment, p.repo, p.ref, p.sha`,
 		req.RunnerID, runnerTags).
 		Scan(&j.ID, &j.PipelineID, &j.Name, &image, &j.Script, &envRaw,
-			&artifactsRaw, &environment, &repo, &ref)
+			&artifactsRaw, &environment, &repo, &ref, &sha)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -484,6 +506,40 @@ func (s *Store) AcquireJob(ctx context.Context, req proto.AcquireRequest) (*prot
 	j.Env = resolved
 	j.ArtifactPaths = []string{}
 	_ = json.Unmarshal(artifactsRaw, &j.ArtifactPaths)
+
+	// Source checkout info when the repo is registered against a real VCS.
+	cloneURL, token, err := s.cloneAuth(ctx, repo)
+	if err != nil {
+		return nil, err
+	}
+	if cloneURL != "" {
+		j.CloneURL, j.SHA, j.Ref, j.RepoName = cloneURL, sha, ref, repo
+		if token != "" {
+			j.RedactValues = append(j.RedactValues, token)
+		}
+	}
+
+	// Artifact passing: archives uploaded by the jobs this job needs.
+	deps, err := s.pool.Query(ctx,
+		`SELECT a.id, d.name, a.name
+		 FROM job_needs n
+		 JOIN jobs d ON d.id = n.needs_job_id
+		 JOIN artifacts a ON a.job_id = d.id
+		 WHERE n.job_id = $1 ORDER BY a.id`, j.ID)
+	if err != nil {
+		return nil, err
+	}
+	defer deps.Close()
+	for deps.Next() {
+		var da proto.DependencyArtifact
+		if err := deps.Scan(&da.ArtifactID, &da.JobName, &da.Name); err != nil {
+			return nil, err
+		}
+		j.Dependencies = append(j.Dependencies, da)
+	}
+	if err := deps.Err(); err != nil {
+		return nil, err
+	}
 	return &j, nil
 }
 

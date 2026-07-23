@@ -108,6 +108,30 @@ export interface RepoConfig {
   config: string;
 }
 
+export interface RepoSettings {
+  repo: string;
+  default_runner_tags: string[];
+}
+
+export type RepoProvider = "github" | "bitbucket" | "other";
+
+export interface RegisteredRepo {
+  repo: string;
+  provider: string;
+  clone_url: string;
+  has_token: boolean;
+  default_branch: string;
+  created_at: string;
+}
+
+export interface RepoRegistryInput {
+  repo: string;
+  provider: RepoProvider;
+  clone_url?: string;
+  token?: string;
+  default_branch?: string;
+}
+
 export interface RepoSummary {
   repo: string;
   pipeline_count: number;
@@ -325,6 +349,25 @@ export async function getRepoConfig(repo: string): Promise<RepoConfig | null> {
 
 export function putRepoConfig(repo: string, config: string): Promise<void> {
   return requestVoid("PUT", "/repo-configs", { repo, config });
+}
+
+export function listRegistry(): Promise<RegisteredRepo[]> {
+  return getJSON<RegisteredRepo[]>("/repo-registry");
+}
+
+export function registerRepo(input: RepoRegistryInput): Promise<void> {
+  return requestVoid("POST", "/repo-registry", input);
+}
+
+export function getRepoSettings(repo: string): Promise<RepoSettings> {
+  return getJSON<RepoSettings>(`/repo-settings?repo=${encodeURIComponent(repo)}`);
+}
+
+export function putRepoSettings(
+  repo: string,
+  default_runner_tags: string[]
+): Promise<void> {
+  return requestVoid("PUT", "/repo-settings", { repo, default_runner_tags });
 }
 
 /** Human-readable byte size, e.g. "1.4 MB". */

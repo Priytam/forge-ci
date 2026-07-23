@@ -34,6 +34,10 @@ func (s *Server) registerSettingsRoutes() {
 	m.HandleFunc("GET /api/v1/artifacts/{id}/download", s.downloadArtifact)
 	m.HandleFunc("POST /api/v1/runner/jobs/{id}/artifacts", s.uploadArtifact)
 
+	// Repo settings (runner-group selection by tags).
+	m.HandleFunc("GET /api/v1/repo-settings", s.getRepoSettings)
+	m.HandleFunc("PUT /api/v1/repo-settings", s.putRepoSettings)
+
 	// Members & approval rules (RBAC).
 	m.HandleFunc("GET /api/v1/members", s.listMembers)
 	m.HandleFunc("POST /api/v1/members", s.addMember)
@@ -250,6 +254,44 @@ func (s *Server) downloadArtifact(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/gzip")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name))
 	_, _ = io.Copy(w, rc)
+}
+
+// ---- repo settings ----
+
+func (s *Server) getRepoSettings(w http.ResponseWriter, r *http.Request) {
+	repo := r.URL.Query().Get("repo")
+	if repo == "" {
+		writeErr(w, http.StatusBadRequest, "repo query param is required")
+		return
+	}
+	tags, err := s.store.GetRepoDefaultTags(r.Context(), repo)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to load repo settings")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"repo": repo, "default_runner_tags": tags})
+}
+
+func (s *Server) putRepoSettings(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Repo              string   `json:"repo"`
+		DefaultRunnerTags []string `json:"default_runner_tags"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Repo == "" {
+		writeErr(w, http.StatusBadRequest, "repo is required")
+		return
+	}
+	for _, t := range req.DefaultRunnerTags {
+		if strings.TrimSpace(t) == "" {
+			writeErr(w, http.StatusBadRequest, "tags must be non-empty strings")
+			return
+		}
+	}
+	if err := s.store.SetRepoDefaultTags(r.Context(), req.Repo, req.DefaultRunnerTags); err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to save repo settings")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // ---- members & approval rules ----

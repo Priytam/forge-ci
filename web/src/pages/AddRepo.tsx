@@ -1,0 +1,181 @@
+import { useState, type FormEvent } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import { registerRepo, type RepoProvider } from "../api";
+
+function derivedCloneUrl(provider: RepoProvider, repo: string): string {
+  const name = repo.trim();
+  if (!name) return "";
+  if (provider === "github") return `https://github.com/${name}.git`;
+  if (provider === "bitbucket") return `https://bitbucket.org/${name}.git`;
+  return "";
+}
+
+export default function AddRepo() {
+  const navigate = useNavigate();
+  const [provider, setProvider] = useState<RepoProvider>("github");
+  const [repo, setRepo] = useState("");
+  const [cloneUrl, setCloneUrl] = useState("");
+  const [token, setToken] = useState("");
+  const [branch, setBranch] = useState("main");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [connected, setConnected] = useState<string | null>(null);
+
+  const autoUrl = provider !== "other";
+  const effectiveCloneUrl = autoUrl ? derivedCloneUrl(provider, repo) : cloneUrl;
+
+  const onSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      await registerRepo({
+        repo: repo.trim(),
+        provider,
+        clone_url: autoUrl ? undefined : cloneUrl.trim(),
+        token: token || undefined,
+        default_branch: branch.trim() || "main",
+      });
+      setConnected(repo.trim());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (connected) {
+    return (
+      <div>
+        <div className="breadcrumbs">
+          <Link to="/">Repos</Link> <span className="crumb-sep">/</span>{" "}
+          <span>add repository</span>
+        </div>
+        <div className="card connect-success">
+          <div className="connect-success-title">
+            ✓ Repository connected and verified
+          </div>
+          <p className="muted">
+            <span className="mono">{connected}</span> is registered — runners
+            will clone the source at the pipeline's SHA before running jobs.
+          </p>
+          <h3>Next steps</h3>
+          <ul className="next-steps">
+            <li>
+              <Link to={`/repos/${encodeURIComponent(connected)}/settings`}>
+                Register the pipeline YAML
+              </Link>{" "}
+              <span className="muted">(repo Settings → Pipeline config)</span>
+            </li>
+            <li>
+              <Link to="/docs/add-a-repo">Set up the push webhook</Link>{" "}
+              <span className="muted">(guide, incl. WEBHOOK_SECRET)</span>
+            </li>
+            <li>
+              <Link to={`/new?repo=${encodeURIComponent(connected)}`}>
+                Run first pipeline
+              </Link>
+            </li>
+          </ul>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="breadcrumbs">
+        <Link to="/">Repos</Link> <span className="crumb-sep">/</span>{" "}
+        <span>add repository</span>
+      </div>
+
+      <div className="page-head">
+        <h1>Add repository</h1>
+      </div>
+
+      <form className="card form" onSubmit={(e) => void onSubmit(e)}>
+        <h3 className="form-section-title">Connect</h3>
+        <div className="form-row">
+          <label className="field">
+            <span>Provider</span>
+            <select
+              value={provider}
+              onChange={(e) => setProvider(e.target.value as RepoProvider)}
+            >
+              <option value="github">GitHub</option>
+              <option value="bitbucket">Bitbucket</option>
+              <option value="other">Other</option>
+            </select>
+          </label>
+          <label className="field">
+            <span>Repository full name</span>
+            <input
+              className="mono"
+              placeholder="owner/name"
+              value={repo}
+              onChange={(e) => setRepo(e.target.value)}
+              required
+            />
+          </label>
+        </div>
+
+        <label className="field">
+          <span>Clone URL</span>
+          <input
+            className="mono"
+            value={effectiveCloneUrl}
+            onChange={(e) => setCloneUrl(e.target.value)}
+            disabled={autoUrl}
+            placeholder={autoUrl ? "" : "https://git.example.com/owner/name.git"}
+            required={!autoUrl}
+          />
+          {autoUrl && (
+            <span className="field-hint">
+              Derived from the repo full name for {provider === "github" ? "GitHub" : "Bitbucket"}.
+            </span>
+          )}
+        </label>
+
+        <div className="form-row">
+          <label className="field">
+            <span>Access token</span>
+            <input
+              type="password"
+              autoComplete="off"
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+            />
+            <span className="field-hint">
+              Optional for public repos. Use a fine-grained PAT (GitHub) or
+              repository access token (Bitbucket) with read access. Stored
+              server-side, never shown again.
+            </span>
+          </label>
+          <label className="field">
+            <span>Default branch</span>
+            <input
+              className="mono"
+              value={branch}
+              onChange={(e) => setBranch(e.target.value)}
+            />
+          </label>
+        </div>
+
+        {error && (
+          <div className="error-banner">
+            <strong>Could not verify repository access:</strong> {error}
+          </div>
+        )}
+
+        <div className="form-actions">
+          <button type="button" className="btn" onClick={() => navigate("/")}>
+            Cancel
+          </button>
+          <button type="submit" className="btn btn-primary" disabled={busy}>
+            {busy ? "Verifying access…" : "Connect repository"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}

@@ -30,7 +30,9 @@ Legend: ✅ shipped · 🟡 partial · ❌ not yet (roadmap).
 | Feature | GitLab CI | Forge | Notes |
 |---|---|---|---|
 | Pull-based runners, self-registration | ✅ | ✅ | no inbound ports |
-| Executors | shell, docker, k8s, custom, VM autoscaling | 🟡 shell, docker | native k8s executor (job = Pod) is the headline gap |
+| Executors | shell, docker, k8s, custom, VM autoscaling | ✅ shell, docker, kubernetes (ephemeral pod per job) | VM autoscaling not planned |
+| Artifact passing to dependent jobs | ✅ | ✅ | restored from `needs` before script |
+| Runner concurrency (one manager, N jobs) | ✅ | ✅ | `--concurrency` |
 | Tag-based routing | ✅ | ✅ | |
 | Pause/drain runners | ✅ | ✅ | |
 | Job logs: live streaming | ✅ | ✅ (poll) | move to WebSocket tail |

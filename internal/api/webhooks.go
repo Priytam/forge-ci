@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,8 +10,11 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
+	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/priytamjeepandey/forge-ci/internal/compiler"
 	"github.com/priytamjeepandey/forge-ci/internal/proto"
@@ -26,6 +30,101 @@ func (s *Server) registerWebhookRoutes() {
 	s.mux.HandleFunc("POST /api/v1/webhooks/bitbucket", s.bitbucketWebhook)
 	s.mux.HandleFunc("PUT /api/v1/repo-configs", s.putRepoConfig)
 	s.mux.HandleFunc("GET /api/v1/repo-configs", s.getRepoConfig)
+	s.mux.HandleFunc("POST /api/v1/repo-registry", s.registerRepo)
+	s.mux.HandleFunc("GET /api/v1/repo-registry", s.listRegisteredRepos)
+}
+
+// registerRepo connects a Forge repo to a real GitHub/Bitbucket repository.
+// Access is verified with git ls-remote before saving (skip with ?validate=0).
+func (s *Server) registerRepo(w http.ResponseWriter, r *http.Request) {
+	var req proto.RepoRegistration
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	req.Repo = strings.TrimSpace(req.Repo)
+	if req.Repo == "" {
+		writeErr(w, http.StatusBadRequest, "repo (e.g. owner/name) is required")
+		return
+	}
+	switch req.Provider {
+	case "github":
+		if req.CloneURL == "" {
+			req.CloneURL = "https://github.com/" + req.Repo + ".git"
+		}
+	case "bitbucket":
+		if req.CloneURL == "" {
+			req.CloneURL = "https://bitbucket.org/" + req.Repo + ".git"
+		}
+	case "other":
+		if req.CloneURL == "" {
+			writeErr(w, http.StatusBadRequest, `provider "other" requires clone_url`)
+			return
+		}
+	default:
+		writeErr(w, http.StatusBadRequest, "provider must be github, bitbucket or other")
+		return
+	}
+	if req.DefaultBranch == "" {
+		req.DefaultBranch = "main"
+	}
+
+	if r.URL.Query().Get("validate") != "0" {
+		if err := validateCloneAccess(r.Context(), req); err != nil {
+			writeErr(w, http.StatusBadRequest,
+				"could not reach the repository (check name, token and permissions): "+err.Error())
+			return
+		}
+	}
+	if err := s.store.RegisterRepo(r.Context(), req); err != nil {
+		slog.Error("register repo", "err", err)
+		writeErr(w, http.StatusInternalServerError, "failed to register repo")
+		return
+	}
+	slog.Info("repo registered", "repo", req.Repo, "provider", req.Provider)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// validateCloneAccess runs git ls-remote against the (possibly authenticated)
+// URL. Errors are sanitized so tokens never reach the response.
+func validateCloneAccess(ctx context.Context, req proto.RepoRegistration) error {
+	u := req.CloneURL
+	if req.Token != "" {
+		parsed, err := url.Parse(u)
+		if err == nil {
+			if req.Provider == "bitbucket" {
+				parsed.User = url.UserPassword("x-token-auth", req.Token)
+			} else {
+				parsed.User = url.UserPassword("x-access-token", req.Token)
+			}
+			u = parsed.String()
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--heads", u)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := string(out)
+		if req.Token != "" {
+			msg = strings.ReplaceAll(msg, req.Token, "[REDACTED]")
+		}
+		if len(msg) > 300 {
+			msg = msg[:300]
+		}
+		return errors.New(strings.TrimSpace(msg))
+	}
+	return nil
+}
+
+func (s *Server) listRegisteredRepos(w http.ResponseWriter, r *http.Request) {
+	repos, err := s.store.ListRegisteredRepos(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to list registered repos")
+		return
+	}
+	writeJSON(w, http.StatusOK, repos)
 }
 
 func (s *Server) triggerFromWebhook(w http.ResponseWriter, r *http.Request, repo, ref, sha, author string) {
