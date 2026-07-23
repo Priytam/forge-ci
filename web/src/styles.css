@@ -70,6 +70,14 @@ h1 {
   padding: 12px 20px;
   display: flex;
   align-items: center;
+  justify-content: space-between;
+}
+
+.header-action {
+  padding: 5px 12px;
+}
+.header-action:hover {
+  text-decoration: none;
 }
 
 .brand {
@@ -337,13 +345,250 @@ tbody tr:last-child td {
   padding: 1px 8px;
 }
 
+/* ---------- Stage mini-indicators (pipeline list) ---------- */
+
+.stage-dots {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+}
+
+.stage-dot {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 700;
+  border: 2px solid var(--gray);
+  color: var(--gray);
+  background: transparent;
+  flex: none;
+  cursor: default;
+}
+
+.stage-dot-link {
+  width: 8px;
+  height: 2px;
+  background: var(--border);
+  flex: none;
+}
+
+.dot-success {
+  border-color: var(--green);
+  color: #4ade80;
+  background: rgba(46, 164, 79, 0.18);
+}
+
+.dot-failed {
+  border-color: var(--red);
+  color: #f87171;
+  background: rgba(229, 83, 75, 0.18);
+}
+
+.dot-running {
+  border-color: var(--blue);
+  color: #60a5fa;
+  background: rgba(56, 139, 253, 0.18);
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+.dot-blocked {
+  border-color: var(--orange);
+  color: #fb923c;
+  background: rgba(232, 131, 58, 0.18);
+  font-size: 8px;
+}
+
+.dot-pending {
+  border-color: var(--yellow);
+  color: #fbbf24;
+  background: rgba(212, 167, 44, 0.18);
+}
+
+.dot-created {
+  border-color: var(--gray);
+  color: var(--gray);
+  background: transparent;
+}
+
+.dot-canceled {
+  border-color: var(--gray);
+  color: var(--text-muted);
+  background: rgba(110, 118, 129, 0.15);
+}
+
+/* ---------- Repo cards (landing page) ---------- */
+
+.repo-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 16px;
+}
+
+.repo-card {
+  padding: 16px 18px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.repo-card:hover {
+  border-color: var(--accent);
+  background: var(--bg-hover);
+}
+
+.repo-card-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.repo-name {
+  font-size: 17px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.repo-activity {
+  font-size: 12px;
+  flex: none;
+}
+
+.repo-last-run {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+
+.repo-recent {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.mini-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--gray);
+  flex: none;
+}
+.mini-success {
+  background: var(--green);
+}
+.mini-failed {
+  background: var(--red);
+}
+.mini-running {
+  background: var(--blue);
+  animation: pulse 1.6s ease-in-out infinite;
+}
+.mini-pending {
+  background: var(--yellow);
+}
+.mini-blocked {
+  background: var(--orange);
+}
+.mini-created,
+.mini-canceled {
+  background: var(--gray);
+}
+
+.repo-counts {
+  font-size: 12px;
+}
+
+.repo-refs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+/* ---------- Group-by toggle (pipeline detail) ---------- */
+
+.group-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.group-toggle-label {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  font-weight: 600;
+}
+
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.seg-btn {
+  background: var(--bg-raised);
+  color: var(--text-muted);
+  border: none;
+  padding: 5px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  font-family: var(--font);
+  cursor: pointer;
+}
+.seg-btn + .seg-btn {
+  border-left: 1px solid var(--border);
+}
+.seg-btn:hover {
+  color: var(--text);
+}
+.seg-active {
+  background: var(--accent);
+  color: #fff;
+}
+.seg-active:hover {
+  color: #fff;
+}
+
 /* ---------- Stages / job cards ---------- */
+
+.board {
+  position: relative;
+  overflow-x: auto;
+}
+
+.dag-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* Uniform light-gray connectors, GitLab-style. */
+.dag-edge {
+  fill: none;
+  stroke: #555;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
 
 .stages {
   display: flex;
   gap: 20px;
   align-items: flex-start;
-  overflow-x: auto;
   padding-bottom: 8px;
 }
 
@@ -352,7 +597,7 @@ tbody tr:last-child td {
   min-width: 220px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 14px;
 }
 
 .stage-title {
@@ -365,37 +610,64 @@ tbody tr:last-child td {
   border-bottom: 1px solid var(--border);
 }
 
-.job-card {
-  padding: 12px 14px;
+/* Pill-shaped job nodes (GitLab-style) */
+
+.job-node {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.job-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 7px 16px 7px 8px;
+  max-width: 100%;
   cursor: pointer;
+  position: relative;
+  z-index: 2;
   transition: border-color 0.15s ease, background 0.15s ease;
 }
-.job-card:hover {
+.job-pill:hover {
   border-color: var(--accent);
   background: var(--bg-hover);
 }
 
-.job-card-top {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.job-name {
+.job-pill-name {
   font-weight: 600;
+  font-size: 13px;
+  max-width: 180px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.job-card-meta {
+/* Spinner variant of the status circle for running jobs */
+.dot-spin {
+  animation: spin 1s linear infinite;
+  border-color: rgba(56, 139, 253, 0.3);
+  border-top-color: var(--blue);
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.job-approval-panel {
   margin-top: 6px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 12px;
-  min-height: 4px;
+  margin-left: 12px;
+  padding: 10px 14px;
+}
+.job-approval-panel .approval {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
 }
 
 /* ---------- Approvals ---------- */
@@ -495,6 +767,14 @@ tbody tr:last-child td {
   letter-spacing: 0.4px;
 }
 
+.field .field-hint {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-muted);
+  text-transform: none;
+  letter-spacing: normal;
+}
+
 input,
 textarea {
   background: var(--bg);
@@ -522,4 +802,268 @@ textarea:focus {
 .form-actions {
   display: flex;
   justify-content: flex-end;
+  gap: 8px;
+}
+
+select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 8px 10px;
+  font-size: 14px;
+  font-family: var(--font);
+}
+select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.page-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.repo-card-side {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+.repo-settings-link {
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+.repo-settings-link:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+  text-decoration: none;
+}
+
+/* ---------- Settings page ---------- */
+
+.settings-section {
+  margin-bottom: 16px;
+}
+
+.settings-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 20px;
+}
+
+.settings-head-text h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.settings-desc {
+  margin-top: 4px;
+  font-size: 13px;
+  max-width: 720px;
+}
+
+.settings-desc code,
+.settings-body code {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+
+.settings-body {
+  border-top: 1px solid var(--border);
+  padding: 16px 20px 20px;
+}
+
+.settings-body h3 {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-muted);
+}
+
+.subsection-title {
+  margin-top: 24px !important;
+}
+
+.section-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.var-value {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.actions-cell {
+  white-space: nowrap;
+}
+
+.btn-icon {
+  padding: 3px 8px;
+  font-size: 13px;
+}
+.btn-icon + .btn-icon {
+  margin-left: 6px;
+}
+
+.bool-yes {
+  color: #4ade80;
+  font-weight: 700;
+}
+.bool-no {
+  color: var(--text-muted);
+}
+
+.exec-badge {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  border-radius: 4px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+.exec-docker {
+  color: #60a5fa;
+  border-color: rgba(56, 139, 253, 0.4);
+}
+.exec-shell {
+  color: #a3e635;
+  border-color: rgba(163, 230, 53, 0.35);
+}
+
+.tag-chips {
+  display: inline-flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.runner-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.global-chip {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 8px;
+  margin-left: 6px;
+}
+
+.row-global td {
+  color: var(--text-muted);
+}
+
+.settings-form {
+  margin-top: 16px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.settings-form h3 {
+  margin: 0;
+}
+
+.inline-form {
+  flex-direction: row;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+.inline-form .field {
+  flex: 0 1 220px;
+}
+
+.check-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.check-row input[type="checkbox"] {
+  accent-color: var(--accent);
+  width: 15px;
+  height: 15px;
+  margin: 0;
+}
+
+.check-inline {
+  display: flex;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+
+.small-note {
+  font-size: 12px;
+  margin-top: 8px;
+}
+
+.saved-note {
+  color: #4ade80;
+  font-size: 13px;
+}
+
+.config-textarea {
+  width: 100%;
+}
+
+/* ---------- Artifacts box (job log) ---------- */
+
+.artifacts-box {
+  padding: 12px 16px;
+  margin-bottom: 16px;
+}
+
+.artifacts-title {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.artifact-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 4px 0;
 }

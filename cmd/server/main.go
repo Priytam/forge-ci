@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/priytamjeepandey/forge-ci/internal/api"
+	"github.com/priytamjeepandey/forge-ci/internal/blob"
 	"github.com/priytamjeepandey/forge-ci/internal/scheduler"
 	"github.com/priytamjeepandey/forge-ci/internal/store"
 )
@@ -36,9 +37,16 @@ func main() {
 	}
 	defer st.Close()
 
+	blobs, err := blob.FromEnv()
+	if err != nil {
+		slog.Error("artifact store init failed", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("artifact store configured", "backend", blobs.Kind())
+
 	go scheduler.New(st).Run(ctx)
 
-	srv := &http.Server{Addr: addr, Handler: api.New(st)}
+	srv := &http.Server{Addr: addr, Handler: api.New(st, blobs)}
 	go func() {
 		<-ctx.Done()
 		_ = srv.Shutdown(context.Background())

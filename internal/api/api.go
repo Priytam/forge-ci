@@ -9,8 +9,10 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/priytamjeepandey/forge-ci/internal/blob"
 	"github.com/priytamjeepandey/forge-ci/internal/compiler"
 	"github.com/priytamjeepandey/forge-ci/internal/proto"
 	"github.com/priytamjeepandey/forge-ci/internal/store"
@@ -23,17 +25,19 @@ const (
 
 type Server struct {
 	store *store.Store
+	blobs blob.Store
 	mux   *http.ServeMux
 }
 
-func New(s *store.Store) *Server {
-	srv := &Server{store: s, mux: http.NewServeMux()}
+func New(s *store.Store, blobs blob.Store) *Server {
+	srv := &Server{store: s, blobs: blobs, mux: http.NewServeMux()}
 	m := srv.mux
 
 	// Public API.
 	m.HandleFunc("POST /api/v1/pipelines", srv.createPipeline)
 	m.HandleFunc("GET /api/v1/pipelines", srv.listPipelines)
 	m.HandleFunc("GET /api/v1/pipelines/{id}", srv.getPipeline)
+	m.HandleFunc("GET /api/v1/repos", srv.listRepos)
 	m.HandleFunc("GET /api/v1/jobs/{id}/logs", srv.getLogs)
 	m.HandleFunc("POST /api/v1/jobs/{id}/approvals", srv.approve)
 	m.HandleFunc("GET /api/v1/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -46,13 +50,16 @@ func New(s *store.Store) *Server {
 	m.HandleFunc("POST /api/v1/runner/jobs/{id}/heartbeat", srv.heartbeat)
 	m.HandleFunc("POST /api/v1/runner/jobs/{id}/complete", srv.complete)
 
+	srv.registerSettingsRoutes()
+	srv.registerWebhookRoutes()
+
 	return srv
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Permissive CORS: fine for local dev; put real authn/authz here later.
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
@@ -88,7 +95,7 @@ func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "repo, ref, sha and config are required")
 		return
 	}
-	jobs, err := compiler.Compile(req.Config)
+	jobs, err := compiler.Compile(req.Config, req.Ref)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -102,8 +109,18 @@ func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{"pipeline": p})
 }
 
+func (s *Server) listRepos(w http.ResponseWriter, r *http.Request) {
+	repos, err := s.store.ListRepos(r.Context())
+	if err != nil {
+		slog.Error("list repos", "err", err)
+		writeErr(w, http.StatusInternalServerError, "failed to list repos")
+		return
+	}
+	writeJSON(w, http.StatusOK, repos)
+}
+
 func (s *Server) listPipelines(w http.ResponseWriter, r *http.Request) {
-	ps, err := s.store.ListPipelines(r.Context())
+	ps, err := s.store.ListPipelines(r.Context(), r.URL.Query().Get("repo"))
 	if err != nil {
 		slog.Error("list pipelines", "err", err)
 		writeErr(w, http.StatusInternalServerError, "failed to list pipelines")
@@ -174,6 +191,10 @@ func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusConflict, "job is not waiting for approval")
 	case errors.Is(err, store.ErrDuplicateVote):
 		writeErr(w, http.StatusConflict, "you have already voted on this job")
+	case errors.Is(err, store.ErrForbidden):
+		writeErr(w, http.StatusForbidden, err.Error())
+	case errors.Is(err, store.ErrSelfApproval):
+		writeErr(w, http.StatusForbidden, err.Error())
 	case err != nil:
 		slog.Error("approve", "err", err)
 		writeErr(w, http.StatusInternalServerError, "failed to record approval")
@@ -194,7 +215,7 @@ func (s *Server) acquire(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), acquireLongPoll)
 	defer cancel()
 	for {
-		job, err := s.store.AcquireJob(ctx, req.RunnerID)
+		job, err := s.store.AcquireJob(ctx, req)
 		if err != nil {
 			if ctx.Err() != nil {
 				break
@@ -229,7 +250,15 @@ func (s *Server) pushLogs(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "empty log chunk")
 		return
 	}
-	if err := s.store.AppendLog(r.Context(), id, string(body)); err != nil {
+	// Redact masked variable values before the chunk is persisted. (Values
+	// split across chunk boundaries can escape this — documented limitation.)
+	chunk := string(body)
+	if masked, err := s.store.MaskedValuesForJob(r.Context(), id); err == nil {
+		for _, v := range masked {
+			chunk = strings.ReplaceAll(chunk, v, "[MASKED]")
+		}
+	}
+	if err := s.store.AppendLog(r.Context(), id, chunk); err != nil {
 		slog.Error("push logs", "err", err)
 		writeErr(w, http.StatusInternalServerError, "failed to store logs")
 		return

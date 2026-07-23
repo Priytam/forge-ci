@@ -54,13 +54,23 @@ jobs:
   unit-tests:
     stage: test              # no explicit needs -> depends on previous stage
     script: [echo testing]
+  deploy-dev:
+    stage: deploy
+    except: [main]           # ref-aware DAG: skipped on main
+    script: [echo dev deploy]
   deploy-prod:
     stage: deploy
     needs: [unit-tests]      # explicit needs must be in an earlier stage
     environment: production  # protected -> requires approval
+    only: [main, release-*]  # ref-aware DAG: glob-matched against the ref
     variables: {REGION: ap-south-1}
     script: [echo deploying]
 ```
+
+`only`/`except` are glob patterns matched against the pipeline ref at compile
+time, so the same YAML yields different DAGs for dev branches vs main —
+excluded jobs never enter the pipeline. Implicit needs skip over stages left
+empty for a ref; an explicit `needs` on a ref-excluded job is a compile error.
 
 ## Quickstart (local dev)
 
@@ -83,8 +93,9 @@ Full containerized stack instead: `make up` (dashboard on :3000).
 
 Public:
 
-- `POST /api/v1/pipelines` `{repo, ref, sha, config}` — compile YAML and enqueue
-- `GET  /api/v1/pipelines` / `GET /api/v1/pipelines/{id}`
+- `POST /api/v1/pipelines` `{repo, ref, sha, config}` — compile YAML (for that ref) and enqueue
+- `GET  /api/v1/repos` — per-repo rollup cards (counts, refs, recent statuses, last pipeline)
+- `GET  /api/v1/pipelines[?repo=name]` / `GET /api/v1/pipelines/{id}` — both include per-stage statuses
 - `GET  /api/v1/jobs/{id}/logs` (plain text)
 - `POST /api/v1/jobs/{id}/approvals` `{approver, verdict: approved|rejected, comment}`
 
@@ -95,13 +106,34 @@ Runner protocol:
 - `POST /api/v1/runner/jobs/{id}/heartbeat`
 - `POST /api/v1/runner/jobs/{id}/complete` `{status, exit_code}`
 
-## Deliberate MVP simplifications
+## Docs
 
-- No authn/authz — put OIDC + RBAC in front before real use; approver identity
-  is currently client-asserted.
-- Logs live in Postgres — move to object storage with a Redis live-tail.
-- No git clone step, artifacts, or caches yet — the executor interface and
-  schema are where they'd attach.
-- Single approval count per environment (no approver allowlists / self-approval
-  block yet; the `job_approvals` schema already supports adding them).
-- No retries, `rules:`, matrix builds, or includes in the DSL.
+- [VCS integration (GitHub/Bitbucket webhooks)](docs/vcs-integration.md)
+- [Registering runners (VM/systemd, Docker, Kubernetes)](docs/runners.md)
+- [Artifact storage (local, MinIO, S3, GCS)](docs/artifact-storage.md)
+- [Roles, membership & approval rules](docs/rbac-approvals.md)
+- [Feature comparison vs GitLab CI + roadmap](docs/feature-comparison.md)
+
+## What's here beyond the core
+
+- **CI/CD variables** per repo — protected (only on protected refs), masked
+  (redacted in job logs at ingestion), environment-scoped.
+- **Runner registry** — self-registration, online/offline, tag-based job
+  routing (`tags:` on jobs), pause/drain.
+- **Artifacts** — `artifacts.paths` archived per job; local disk or any
+  S3-compatible store (S3/MinIO/GCS).
+- **RBAC approvals** — repo members (admin/owner/developer), per-repo
+  protected-environment rules (required approvals, allowed roles,
+  self-approval block, timeout), append-only audit trail.
+- **GitHub/Bitbucket webhooks** — push → pipeline, with per-repo registered
+  configs and HMAC verification (GitHub).
+
+## Known limitations (see docs/feature-comparison.md for the full roadmap)
+
+- No authn — RBAC is enforced server-side but identity is client-asserted;
+  front with OIDC before real use.
+- No git clone step yet: scripts operate on an empty workspace.
+- Logs live in Postgres; masked values split across log chunks can escape
+  redaction.
+- Variable values are plaintext in the DB (envelope encryption/Vault next).
+- No caching, `rules:`, includes, matrix, retries, or scheduled pipelines yet.

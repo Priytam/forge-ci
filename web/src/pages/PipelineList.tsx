@@ -1,19 +1,39 @@
-import { Link, useNavigate } from "react-router-dom";
-import { listPipelines, relativeTime, shortSha } from "../api";
+import { useCallback } from "react";
+import { Link, useNavigate, useParams } from "react-router-dom";
+import { decodeRepoParam, listPipelines, relativeTime, shortSha } from "../api";
 import { usePoll } from "../hooks/usePoll";
 import StatusBadge from "../components/StatusBadge";
+import StageDots from "../components/StageDots";
 
 export default function PipelineList() {
   const navigate = useNavigate();
-  const { data: pipelines, error, loading } = usePoll(listPipelines, 2000);
+  const params = useParams<{ repo: string }>();
+  const repo = decodeRepoParam(params.repo ?? "");
+
+  const fetchPipelines = useCallback(() => listPipelines(repo), [repo]);
+  const { data: pipelines, error, loading } = usePoll(fetchPipelines, 2000);
 
   return (
     <div>
+      <div className="breadcrumbs">
+        <Link to="/">Repos</Link> <span className="crumb-sep">/</span>{" "}
+        <span>{repo}</span>
+      </div>
+
       <div className="page-head">
-        <h1>Pipelines</h1>
-        <Link to="/new" className="btn btn-primary">
-          New Pipeline
-        </Link>
+        <h1>{repo}</h1>
+        <div className="page-head-actions">
+          <Link
+            to={`/repos/${encodeURIComponent(repo)}/settings`}
+            className="btn"
+            title="CI/CD Settings"
+          >
+            ⚙ Settings
+          </Link>
+          <Link to="/new" className="btn btn-primary">
+            New Pipeline
+          </Link>
+        </div>
       </div>
 
       {error && <div className="error-banner">Failed to load pipelines: {error}</div>}
@@ -21,7 +41,8 @@ export default function PipelineList() {
 
       {pipelines && pipelines.length === 0 && (
         <div className="empty card">
-          No pipelines yet. <Link to="/new">Create one</Link> to get started.
+          No pipelines for this repo yet. <Link to="/new">Create one</Link> to get
+          started.
         </div>
       )}
 
@@ -34,6 +55,7 @@ export default function PipelineList() {
                 <th>Repo</th>
                 <th>Ref</th>
                 <th>SHA</th>
+                <th>Stages</th>
                 <th>Status</th>
                 <th>Created</th>
               </tr>
@@ -49,6 +71,9 @@ export default function PipelineList() {
                   <td>{p.repo}</td>
                   <td>{p.ref}</td>
                   <td className="mono">{shortSha(p.sha)}</td>
+                  <td>
+                    <StageDots stages={p.stages ?? []} />
+                  </td>
                   <td>
                     <StatusBadge status={p.status} />
                   </td>

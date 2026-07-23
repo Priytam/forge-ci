@@ -6,20 +6,25 @@ const DEFAULT_YAML = `stages: [build, test, deploy]
 jobs:
   build-app:
     stage: build
-    image: alpine:3
     script:
       - echo "compiling..."
       - sleep 2
       - echo "build done"
   unit-tests:
     stage: test
-    image: alpine:3
     script:
       - echo "running unit tests"
       - sleep 2
       - echo "all 42 tests passed"
+  deploy-dev:
+    stage: deploy
+    except: [main]
+    script:
+      - echo "deploying to DEV"
+      - echo "done"
   deploy-prod:
     stage: deploy
+    only: [main]
     environment: production
     script:
       - echo "deploying to production"
@@ -52,7 +57,7 @@ export default function NewPipeline() {
   return (
     <div>
       <div className="breadcrumbs">
-        <Link to="/">Pipelines</Link> <span className="crumb-sep">/</span>{" "}
+        <Link to="/">Repos</Link> <span className="crumb-sep">/</span>{" "}
         <span>new</span>
       </div>
 
@@ -73,6 +78,10 @@ export default function NewPipeline() {
           <label className="field">
             <span>Ref</span>
             <input value={ref} onChange={(e) => setRef(e.target.value)} required />
+            <span className="field-hint">
+              Jobs with only/except are included per ref — e.g. ref main gets
+              deploy-prod (approval gate), any other ref gets deploy-dev.
+            </span>
           </label>
           <label className="field">
             <span>SHA</span>

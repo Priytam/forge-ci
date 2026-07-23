@@ -15,6 +15,11 @@ export type JobStatus =
   | "failed"
   | "canceled";
 
+export interface StageStatus {
+  name: string;
+  status: string;
+}
+
 export interface Pipeline {
   id: number;
   repo: string;
@@ -22,6 +27,8 @@ export interface Pipeline {
   sha: string;
   status: string;
   created_at: string;
+  /** Derived per-stage statuses, ordered by stage_idx. */
+  stages: StageStatus[];
 }
 
 export interface Job {
@@ -42,6 +49,76 @@ export interface Job {
 export interface PipelineDetail {
   pipeline: Pipeline;
   jobs: Job[];
+}
+
+export interface Variable {
+  id: number;
+  repo: string;
+  key: string;
+  /** empty string when masked and not revealed */
+  value: string;
+  protected: boolean;
+  masked: boolean;
+  environment_scope: string;
+  created_at: string;
+}
+
+export interface Runner {
+  id: number | string;
+  executor: string;
+  tags: string[];
+  description: string;
+  paused: boolean;
+  online: boolean;
+  created_at: string;
+  last_contact_at: string;
+}
+
+export interface Artifact {
+  id: number;
+  job_id: number;
+  job_name: string;
+  pipeline_id: number;
+  repo: string;
+  name: string;
+  size_bytes: number;
+  created_at: string;
+}
+
+export interface Member {
+  id: number;
+  repo: string;
+  username: string;
+  role: string;
+}
+
+export interface ProtectedEnvironment {
+  id: number;
+  /** empty string means a global default (read-only) */
+  repo: string;
+  name: string;
+  required_approvals: number;
+  approval_timeout_hours: number;
+  approver_roles: string[];
+  allow_self_approval: boolean;
+}
+
+export interface RepoConfig {
+  repo: string;
+  config: string;
+}
+
+export interface RepoSummary {
+  repo: string;
+  pipeline_count: number;
+  success_count: number;
+  failed_count: number;
+  /** distinct refs seen, most recent first */
+  refs: string[];
+  /** last <=5 pipeline statuses, newest first */
+  recent_statuses: string[];
+  last_pipeline: Pipeline | null;
+  last_activity_at: string;
 }
 
 export interface ApprovalRequest {
@@ -102,8 +179,169 @@ async function postJSON<T>(path: string, body: unknown): Promise<T> {
   return (await res.json()) as T;
 }
 
-export function listPipelines(): Promise<Pipeline[]> {
-  return getJSON<Pipeline[]>("/pipelines");
+/** For endpoints that return no body (204 etc.). */
+async function requestVoid(
+  method: "PUT" | "POST" | "DELETE",
+  path: string,
+  body?: unknown
+): Promise<void> {
+  const res = await fetch(`${BASE}${path}`, {
+    method,
+    headers:
+      body !== undefined
+        ? { "Content-Type": "application/json", Accept: "application/json" }
+        : { Accept: "application/json" },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    throw await parseError(res);
+  }
+}
+
+async function putJSON<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    throw await parseError(res);
+  }
+  return (await res.json()) as T;
+}
+
+export function listPipelines(repo?: string): Promise<Pipeline[]> {
+  const qs = repo ? `?repo=${encodeURIComponent(repo)}` : "";
+  return getJSON<Pipeline[]>(`/pipelines${qs}`);
+}
+
+export function listRepos(): Promise<RepoSummary[]> {
+  return getJSON<RepoSummary[]>("/repos");
+}
+
+// --- CI/CD settings ---
+
+export function listVariables(repo: string, reveal: boolean): Promise<Variable[]> {
+  const qs = `?repo=${encodeURIComponent(repo)}${reveal ? "&reveal=1" : ""}`;
+  return getJSON<Variable[]>(`/variables${qs}`);
+}
+
+export interface VariableInput {
+  key: string;
+  value: string;
+  protected: boolean;
+  masked: boolean;
+  environment_scope: string;
+}
+
+export function createVariable(
+  repo: string,
+  input: VariableInput
+): Promise<Variable> {
+  return postJSON<Variable>("/variables", { repo, ...input });
+}
+
+export function updateVariable(
+  id: number,
+  input: Omit<VariableInput, "key">
+): Promise<Variable> {
+  return putJSON<Variable>(`/variables/${id}`, input);
+}
+
+export function deleteVariable(id: number): Promise<void> {
+  return requestVoid("DELETE", `/variables/${id}`);
+}
+
+export function listRunners(): Promise<Runner[]> {
+  return getJSON<Runner[]>("/runners");
+}
+
+export function setRunnerPaused(
+  id: number | string,
+  paused: boolean
+): Promise<Runner> {
+  return postJSON<Runner>(`/runners/${encodeURIComponent(id)}/pause`, { paused });
+}
+
+export function listArtifacts(repo: string, jobId?: number | string): Promise<Artifact[]> {
+  const qs = `?repo=${encodeURIComponent(repo)}${jobId !== undefined ? `&job=${jobId}` : ""}`;
+  return getJSON<Artifact[]>(`/artifacts${qs}`);
+}
+
+export function artifactDownloadUrl(id: number): string {
+  return `${BASE}/artifacts/${id}/download`;
+}
+
+export function listMembers(repo: string): Promise<Member[]> {
+  return getJSON<Member[]>(`/members?repo=${encodeURIComponent(repo)}`);
+}
+
+export function addMember(
+  repo: string,
+  username: string,
+  role: string
+): Promise<Member> {
+  return postJSON<Member>("/members", { repo, username, role });
+}
+
+export function deleteMember(id: number): Promise<void> {
+  return requestVoid("DELETE", `/members/${id}`);
+}
+
+export function listProtectedEnvironments(
+  repo: string
+): Promise<ProtectedEnvironment[]> {
+  return getJSON<ProtectedEnvironment[]>(
+    `/protected-environments?repo=${encodeURIComponent(repo)}`
+  );
+}
+
+export interface ProtectedEnvironmentInput {
+  name: string;
+  required_approvals: number;
+  approval_timeout_hours: number;
+  approver_roles: string[];
+  allow_self_approval: boolean;
+}
+
+export function upsertProtectedEnvironment(
+  repo: string,
+  input: ProtectedEnvironmentInput
+): Promise<ProtectedEnvironment> {
+  return postJSON<ProtectedEnvironment>("/protected-environments", {
+    repo,
+    ...input,
+  });
+}
+
+export async function getRepoConfig(repo: string): Promise<RepoConfig | null> {
+  try {
+    return await getJSON<RepoConfig>(`/repo-configs?repo=${encodeURIComponent(repo)}`);
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) return null;
+    throw err;
+  }
+}
+
+export function putRepoConfig(repo: string, config: string): Promise<void> {
+  return requestVoid("PUT", "/repo-configs", { repo, config });
+}
+
+/** Human-readable byte size, e.g. "1.4 MB". */
+export function humanSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
+/** Decode a repo route param; react-router usually pre-decodes. */
+export function decodeRepoParam(raw: string): string {
+  try {
+    return raw.includes("%") ? decodeURIComponent(raw) : raw;
+  } catch {
+    return raw;
+  }
 }
 
 export function getPipeline(id: number | string): Promise<PipelineDetail> {

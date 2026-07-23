@@ -1,10 +1,14 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import {
+  artifactDownloadUrl,
   duration,
   getJobLogs,
   getPipeline,
+  humanSize,
   isTerminalStatus,
+  listArtifacts,
+  type Artifact,
   type Job,
 } from "../api";
 import { usePoll } from "../hooks/usePoll";
@@ -44,6 +48,22 @@ export default function JobLog() {
     active
   );
 
+  // Artifacts uploaded by this job (fetched once metadata is known and
+  // refreshed when the job reaches a terminal state).
+  const repo = detail?.pipeline.repo;
+  const artifactsFetcher = useCallback(
+    () => (repo ? listArtifacts(repo, jobId) : Promise.resolve<Artifact[]>([])),
+    [repo, jobId]
+  );
+  const { data: artifacts, refresh: refreshArtifacts } = usePoll(
+    artifactsFetcher,
+    0,
+    false
+  );
+  useEffect(() => {
+    if (repo) refreshArtifacts();
+  }, [repo, jobStatus, refreshArtifacts]);
+
   // Auto-scroll to the bottom while the job is running.
   const termRef = useRef<HTMLPreElement>(null);
   useEffect(() => {
@@ -57,7 +77,7 @@ export default function JobLog() {
   return (
     <div>
       <div className="breadcrumbs">
-        <Link to="/">Pipelines</Link> <span className="crumb-sep">/</span>{" "}
+        <Link to="/">Repos</Link> <span className="crumb-sep">/</span>{" "}
         {pipelineId ? (
           <Link to={`/pipelines/${pipelineId}`} className="mono">
             #{pipelineId}
@@ -98,6 +118,21 @@ export default function JobLog() {
       {job && job.status === "blocked" && (
         <div className="card blocked-card">
           <ApprovalButtons jobId={job.id} onDone={refreshPipeline} />
+        </div>
+      )}
+
+      {artifacts && artifacts.length > 0 && (
+        <div className="card artifacts-box">
+          <div className="artifacts-title">Artifacts</div>
+          {artifacts.map((a) => (
+            <div key={a.id} className="artifact-row">
+              <span className="mono">{a.name}</span>
+              <span className="muted">{humanSize(a.size_bytes)}</span>
+              <a className="btn" href={artifactDownloadUrl(a.id)}>
+                Download
+              </a>
+            </div>
+          ))}
         </div>
       )}
 

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -26,6 +27,8 @@ var (
 	ErrNotFound      = errors.New("not found")
 	ErrNotBlocked    = errors.New("job is not waiting for approval")
 	ErrDuplicateVote = errors.New("approver has already voted on this job")
+	ErrForbidden     = errors.New("approver's role may not approve this environment")
+	ErrSelfApproval  = errors.New("pipeline author may not approve their own deployment")
 )
 
 type Store struct{ pool *pgxpool.Pool }
@@ -59,9 +62,9 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 	p.Repo, p.Ref, p.SHA = req.Repo, req.Ref, req.SHA
 	p.Status = "created"
 	err = tx.QueryRow(ctx,
-		`INSERT INTO pipelines (repo, ref, sha, config_yaml) VALUES ($1,$2,$3,$4)
-		 RETURNING id, created_at`,
-		req.Repo, req.Ref, req.SHA, req.Config).Scan(&p.ID, &p.CreatedAt)
+		`INSERT INTO pipelines (repo, ref, sha, config_yaml, triggered_by)
+		 VALUES ($1,$2,$3,$4,$5) RETURNING id, created_at`,
+		req.Repo, req.Ref, req.SHA, req.Config, req.TriggeredBy).Scan(&p.ID, &p.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -69,6 +72,11 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 	ids := map[string]int64{}
 	for _, j := range jobs {
 		env, _ := json.Marshal(j.Env)
+		artifacts, _ := json.Marshal(j.ArtifactPaths)
+		tags := j.Tags
+		if tags == nil {
+			tags = []string{}
+		}
 		var image, environment *string
 		if j.Image != "" {
 			image = &j.Image
@@ -78,9 +86,9 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 		}
 		var id int64
 		err = tx.QueryRow(ctx,
-			`INSERT INTO jobs (pipeline_id, name, stage, stage_idx, image, script, env, environment)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
-			p.ID, j.Name, j.Stage, j.StageIdx, image, j.Script, env, environment).Scan(&id)
+			`INSERT INTO jobs (pipeline_id, name, stage, stage_idx, image, script, env, environment, tags, artifact_paths)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
+			p.ID, j.Name, j.Stage, j.StageIdx, image, j.Script, env, environment, tags, artifacts).Scan(&id)
 		if err != nil {
 			return nil, err
 		}
@@ -122,12 +130,50 @@ func deriveStatus(statuses []string) string {
 	}
 }
 
-func (s *Store) ListPipelines(ctx context.Context) ([]proto.Pipeline, error) {
+// deriveStages folds per-job statuses into one status per stage, ordered by
+// stage index.
+func deriveStages(stages []stageJob) []proto.StageStatus {
+	type agg struct {
+		name     string
+		idx      int
+		statuses []string
+	}
+	byIdx := map[int]*agg{}
+	order := []int{}
+	for _, sj := range stages {
+		a, ok := byIdx[sj.Idx]
+		if !ok {
+			a = &agg{name: sj.Stage, idx: sj.Idx}
+			byIdx[sj.Idx] = a
+			order = append(order, sj.Idx)
+		}
+		a.statuses = append(a.statuses, sj.Status)
+	}
+	sort.Ints(order)
+	out := make([]proto.StageStatus, 0, len(order))
+	for _, i := range order {
+		out = append(out, proto.StageStatus{Name: byIdx[i].name, Status: deriveStatus(byIdx[i].statuses)})
+	}
+	return out
+}
+
+type stageJob struct {
+	Stage  string `json:"stage"`
+	Idx    int    `json:"idx"`
+	Status string `json:"status"`
+}
+
+// ListPipelines returns recent pipelines (optionally for one repo), each with
+// its derived overall status and per-stage statuses.
+func (s *Store) ListPipelines(ctx context.Context, repo string) ([]proto.Pipeline, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT p.id, p.repo, p.ref, p.sha, p.created_at,
-		        COALESCE(array_agg(j.status) FILTER (WHERE j.id IS NOT NULL), '{}')
+		        COALESCE(json_agg(json_build_object(
+		            'stage', j.stage, 'idx', j.stage_idx, 'status', j.status
+		        ) ORDER BY j.stage_idx) FILTER (WHERE j.id IS NOT NULL), '[]')
 		 FROM pipelines p LEFT JOIN jobs j ON j.pipeline_id = p.id
-		 GROUP BY p.id ORDER BY p.id DESC LIMIT 100`)
+		 WHERE ($1 = '' OR p.repo = $1)
+		 GROUP BY p.id ORDER BY p.id DESC LIMIT 200`, repo)
 	if err != nil {
 		return nil, err
 	}
@@ -136,14 +182,70 @@ func (s *Store) ListPipelines(ctx context.Context) ([]proto.Pipeline, error) {
 	out := []proto.Pipeline{}
 	for rows.Next() {
 		var p proto.Pipeline
-		var statuses []string
-		if err := rows.Scan(&p.ID, &p.Repo, &p.Ref, &p.SHA, &p.CreatedAt, &statuses); err != nil {
+		var raw []byte
+		if err := rows.Scan(&p.ID, &p.Repo, &p.Ref, &p.SHA, &p.CreatedAt, &raw); err != nil {
 			return nil, err
 		}
+		var sjs []stageJob
+		if err := json.Unmarshal(raw, &sjs); err != nil {
+			return nil, err
+		}
+		statuses := make([]string, len(sjs))
+		for i, sj := range sjs {
+			statuses[i] = sj.Status
+		}
 		p.Status = deriveStatus(statuses)
+		p.Stages = deriveStages(sjs)
 		out = append(out, p)
 	}
 	return out, rows.Err()
+}
+
+// ListRepos aggregates pipelines into one summary card per repo, most
+// recently active first.
+func (s *Store) ListRepos(ctx context.Context) ([]proto.RepoSummary, error) {
+	pipelines, err := s.ListPipelines(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	const recentStatusMax = 5
+	byRepo := map[string]*proto.RepoSummary{}
+	order := []string{}
+	for i := range pipelines {
+		p := pipelines[i]
+		r, ok := byRepo[p.Repo]
+		if !ok {
+			r = &proto.RepoSummary{Repo: p.Repo, LastPipeline: &pipelines[i], LastActivityAt: p.CreatedAt}
+			byRepo[p.Repo] = r
+			order = append(order, p.Repo)
+		}
+		r.PipelineCount++
+		switch p.Status {
+		case "success":
+			r.SuccessCount++
+		case "failed":
+			r.FailedCount++
+		}
+		if len(r.RecentStatuses) < recentStatusMax {
+			r.RecentStatuses = append(r.RecentStatuses, p.Status)
+		}
+		seen := false
+		for _, ref := range r.Refs {
+			if ref == p.Ref {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			r.Refs = append(r.Refs, p.Ref)
+		}
+	}
+	// pipelines are newest-first, so insertion order == last-activity order.
+	out := make([]proto.RepoSummary, 0, len(order))
+	for _, name := range order {
+		out = append(out, *byRepo[name])
+	}
+	return out, nil
 }
 
 func (s *Store) GetPipeline(ctx context.Context, id int64) (*proto.Pipeline, []proto.Job, error) {
@@ -172,6 +274,7 @@ func (s *Store) GetPipeline(ctx context.Context, id int64) (*proto.Pipeline, []p
 
 	jobs := []proto.Job{}
 	statuses := []string{}
+	sjs := []stageJob{}
 	for rows.Next() {
 		var j proto.Job
 		if err := rows.Scan(&j.ID, &j.PipelineID, &j.Name, &j.Stage, &j.StageIdx, &j.Image,
@@ -180,11 +283,13 @@ func (s *Store) GetPipeline(ctx context.Context, id int64) (*proto.Pipeline, []p
 		}
 		jobs = append(jobs, j)
 		statuses = append(statuses, j.Status)
+		sjs = append(sjs, stageJob{Stage: j.Stage, Idx: j.StageIdx, Status: j.Status})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, nil, err
 	}
 	p.Status = deriveStatus(statuses)
+	p.Stages = deriveStages(sjs)
 	return &p, jobs, nil
 }
 
@@ -231,11 +336,13 @@ func (s *Store) Approve(ctx context.Context, jobID int64, req proto.ApprovalRequ
 	}
 	defer tx.Rollback(ctx)
 
-	var status string
+	var status, repo, triggeredBy string
 	var environment *string
 	err = tx.QueryRow(ctx,
-		`SELECT status, environment FROM jobs WHERE id=$1 FOR UPDATE`, jobID).
-		Scan(&status, &environment)
+		`SELECT j.status, j.environment, p.repo, p.triggered_by
+		 FROM jobs j JOIN pipelines p ON p.id = j.pipeline_id
+		 WHERE j.id=$1 FOR UPDATE OF j`, jobID).
+		Scan(&status, &environment, &repo, &triggeredBy)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -244,6 +351,40 @@ func (s *Store) Approve(ctx context.Context, jobID int64, req proto.ApprovalRequ
 	}
 	if status != "blocked" || environment == nil {
 		return nil, ErrNotBlocked
+	}
+
+	rule, err := s.resolveProtectedEnv(ctx, repo, *environment)
+	if err != nil {
+		return nil, err
+	}
+	if rule == nil {
+		return nil, ErrNotBlocked
+	}
+
+	// RBAC: enforced when the repo has members; a repo with no members runs
+	// in bootstrap mode (anyone may approve) — see docs/rbac-approvals.md.
+	hasMembers, err := s.repoHasMembers(ctx, repo)
+	if err != nil {
+		return nil, err
+	}
+	if hasMembers {
+		role, err := s.memberRole(ctx, repo, req.Approver)
+		if err != nil {
+			return nil, err
+		}
+		allowed := false
+		for _, r := range rule.ApproverRoles {
+			if role == r {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return nil, ErrForbidden
+		}
+	}
+	if !rule.AllowSelfApproval && triggeredBy != "" && req.Approver == triggeredBy {
+		return nil, ErrSelfApproval
 	}
 
 	if _, err := tx.Exec(ctx,
@@ -262,15 +403,14 @@ func (s *Store) Approve(ctx context.Context, jobID int64, req proto.ApprovalRequ
 			return nil, err
 		}
 	} else {
-		var approved, required int
+		var approved int
 		err = tx.QueryRow(ctx,
-			`SELECT (SELECT count(*) FROM job_approvals WHERE job_id=$1 AND verdict='approved'),
-			        (SELECT required_approvals FROM protected_environments WHERE name=$2)`,
-			jobID, *environment).Scan(&approved, &required)
+			`SELECT count(*) FROM job_approvals WHERE job_id=$1 AND verdict='approved'`,
+			jobID).Scan(&approved)
 		if err != nil {
 			return nil, err
 		}
-		if approved >= required {
+		if approved >= rule.RequiredApprovals {
 			if _, err := tx.Exec(ctx,
 				`UPDATE jobs SET status='pending', blocked_at=NULL WHERE id=$1`, jobID); err != nil {
 				return nil, err
@@ -285,18 +425,40 @@ func (s *Store) Approve(ctx context.Context, jobID int64, req proto.ApprovalRequ
 
 // ---- runner queue ----
 
-// AcquireJob atomically claims the oldest pending job for a runner.
+// AcquireJob atomically claims the oldest pending job for a runner and
+// resolves the env to inject: repo-level CI/CD variables (respecting
+// protected refs and environment scope) overlaid by job-level YAML variables.
 // Returns (nil, nil) when the queue is empty.
-func (s *Store) AcquireJob(ctx context.Context, runnerID string) (*proto.RunnerJob, error) {
+func (s *Store) AcquireJob(ctx context.Context, req proto.AcquireRequest) (*proto.RunnerJob, error) {
+	paused, err := s.TouchRunner(ctx, req.RunnerID, req.Executor, req.Tags)
+	if err != nil {
+		return nil, err
+	}
+	if paused {
+		return nil, nil
+	}
+	runnerTags := req.Tags
+	if runnerTags == nil {
+		runnerTags = []string{}
+	}
 	var j proto.RunnerJob
-	var image *string
-	var envRaw []byte
-	err := s.pool.QueryRow(ctx,
-		`UPDATE jobs SET status='running', started_at=now(), heartbeat_at=now(), runner_id=$1
-		 WHERE id = (SELECT id FROM jobs WHERE status='pending' ORDER BY id
-		             FOR UPDATE SKIP LOCKED LIMIT 1)
-		 RETURNING id, pipeline_id, name, image, script, env`, runnerID).
-		Scan(&j.ID, &j.PipelineID, &j.Name, &image, &j.Script, &envRaw)
+	var image, environment *string
+	var envRaw, artifactsRaw []byte
+	var repo, ref string
+	err = s.pool.QueryRow(ctx,
+		`UPDATE jobs j
+		 SET status='running', started_at=now(), heartbeat_at=now(), runner_id=$1
+		 FROM (SELECT id FROM jobs
+		       WHERE status='pending' AND tags <@ $2::text[]
+		       ORDER BY id
+		       FOR UPDATE SKIP LOCKED LIMIT 1) next,
+		      pipelines p
+		 WHERE j.id = next.id AND p.id = j.pipeline_id
+		 RETURNING j.id, j.pipeline_id, j.name, j.image, j.script, j.env,
+		           j.artifact_paths, j.environment, p.repo, p.ref`,
+		req.RunnerID, runnerTags).
+		Scan(&j.ID, &j.PipelineID, &j.Name, &image, &j.Script, &envRaw,
+			&artifactsRaw, &environment, &repo, &ref)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -306,8 +468,22 @@ func (s *Store) AcquireJob(ctx context.Context, runnerID string) (*proto.RunnerJ
 	if image != nil {
 		j.Image = *image
 	}
-	j.Env = map[string]string{}
-	_ = json.Unmarshal(envRaw, &j.Env)
+	env := ""
+	if environment != nil {
+		env = *environment
+	}
+	resolved, err := s.ResolveVariables(ctx, repo, ref, env)
+	if err != nil {
+		return nil, err
+	}
+	jobEnv := map[string]string{}
+	_ = json.Unmarshal(envRaw, &jobEnv)
+	for k, v := range jobEnv { // job-level YAML variables win
+		resolved[k] = v
+	}
+	j.Env = resolved
+	j.ArtifactPaths = []string{}
+	_ = json.Unmarshal(artifactsRaw, &j.ArtifactPaths)
 	return &j, nil
 }
 
@@ -348,33 +524,40 @@ func (s *Store) CancelDeadJobs(ctx context.Context) (int64, error) {
 
 // PromoteReadyJobs moves created jobs with all needs satisfied to pending, or
 // to blocked when they target a protected environment.
+// protectedFor matches a job's environment against a repo-specific rule or
+// the global (repo='') default.
+const protectedFor = `EXISTS (
+	SELECT 1 FROM protected_environments pe, pipelines p
+	WHERE p.id = j.pipeline_id AND pe.name = j.environment AND pe.repo IN ('', p.repo))`
+
 func (s *Store) PromoteReadyJobs(ctx context.Context) (int64, error) {
 	blocked, err := s.pool.Exec(ctx,
 		`UPDATE jobs j SET status='blocked', blocked_at=now()
-		 WHERE j.status='created'
-		   AND EXISTS (SELECT 1 FROM protected_environments pe WHERE pe.name = j.environment)
-		   AND NOT `+needsUnmet)
+		 WHERE j.status='created' AND `+protectedFor+` AND NOT `+needsUnmet)
 	if err != nil {
 		return 0, err
 	}
 	pending, err := s.pool.Exec(ctx,
 		`UPDATE jobs j SET status='pending'
-		 WHERE j.status='created'
-		   AND NOT EXISTS (SELECT 1 FROM protected_environments pe WHERE pe.name = j.environment)
-		   AND NOT `+needsUnmet)
+		 WHERE j.status='created' AND NOT `+protectedFor+` AND NOT `+needsUnmet)
 	if err != nil {
 		return 0, err
 	}
 	return blocked.RowsAffected() + pending.RowsAffected(), nil
 }
 
-// ExpireBlockedJobs fails blocked jobs whose approval window has lapsed.
+// ExpireBlockedJobs fails blocked jobs whose approval window has lapsed,
+// using the repo-specific timeout when one exists.
 func (s *Store) ExpireBlockedJobs(ctx context.Context) (int64, error) {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE jobs j SET status='failed', finished_at=now()
-		 FROM protected_environments pe
-		 WHERE j.status='blocked' AND pe.name = j.environment
-		   AND j.blocked_at + make_interval(hours => pe.approval_timeout_hours) < now()`)
+		 WHERE j.status='blocked'
+		   AND j.blocked_at + make_interval(hours => (
+		       SELECT pe.approval_timeout_hours
+		       FROM protected_environments pe, pipelines p
+		       WHERE p.id = j.pipeline_id AND pe.name = j.environment
+		         AND pe.repo IN ('', p.repo)
+		       ORDER BY pe.repo DESC LIMIT 1)) < now()`)
 	return tag.RowsAffected(), err
 }
 

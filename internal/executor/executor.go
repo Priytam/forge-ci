@@ -18,9 +18,10 @@ const defaultImage = "alpine:3"
 
 type Executor interface {
 	Name() string
-	// Start launches the job and returns a reader of combined stdout+stderr
-	// and a wait function returning the exit code.
-	Start(ctx context.Context, job *proto.RunnerJob) (io.ReadCloser, func() int, error)
+	// Start launches the job in workdir (the job's workspace — artifacts are
+	// collected from it afterwards) and returns a reader of combined
+	// stdout+stderr and a wait function returning the exit code.
+	Start(ctx context.Context, job *proto.RunnerJob, workdir string) (io.ReadCloser, func() int, error)
 }
 
 func New(kind string) (Executor, error) {
@@ -77,8 +78,9 @@ type shellExecutor struct{}
 
 func (shellExecutor) Name() string { return "shell" }
 
-func (shellExecutor) Start(ctx context.Context, job *proto.RunnerJob) (io.ReadCloser, func() int, error) {
+func (shellExecutor) Start(ctx context.Context, job *proto.RunnerJob, workdir string) (io.ReadCloser, func() int, error) {
 	cmd := exec.CommandContext(ctx, "sh", "-ce", job.Script)
+	cmd.Dir = workdir
 	cmd.Env = append(os.Environ(), ciEnv(job)...)
 	return start(cmd)
 }
@@ -87,12 +89,15 @@ type dockerExecutor struct{}
 
 func (dockerExecutor) Name() string { return "docker" }
 
-func (dockerExecutor) Start(ctx context.Context, job *proto.RunnerJob) (io.ReadCloser, func() int, error) {
+func (dockerExecutor) Start(ctx context.Context, job *proto.RunnerJob, workdir string) (io.ReadCloser, func() int, error) {
 	image := job.Image
 	if image == "" {
 		image = defaultImage
 	}
-	args := []string{"run", "--rm", "--network", "none"}
+	// The workspace is bind-mounted so artifacts land on the host for
+	// collection after the container exits.
+	args := []string{"run", "--rm", "--network", "none",
+		"-v", workdir + ":/workspace", "-w", "/workspace"}
 	for _, kv := range ciEnv(job) {
 		args = append(args, "-e", kv)
 	}

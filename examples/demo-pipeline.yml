@@ -17,9 +17,16 @@ jobs:
     script:
       - echo "linting"
       - echo "no issues"
+  deploy-dev:
+    stage: deploy
+    except: [main]        # dev DAG: any non-main ref deploys to dev, no gate
+    script:
+      - echo "deploying to DEV"
+      - echo "done"
   deploy-prod:
     stage: deploy
-    environment: production   # protected -> requires approval
+    only: [main]          # prod DAG: main only, behind the approval gate
+    environment: production
     script:
       - echo "deploying to production"
       - sleep 1

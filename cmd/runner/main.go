@@ -12,7 +12,9 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	osexec "os/exec"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -52,8 +54,16 @@ func main() {
 		server   = flag.String("server", envOr("SERVER_URL", "http://localhost:8080"), "control plane base URL")
 		execKind = flag.String("executor", envOr("EXECUTOR", "shell"), "executor: shell | docker")
 		runnerID = flag.String("id", envOr("RUNNER_ID", fmt.Sprintf("%s-%d", host, os.Getpid())), "runner id")
+		tagsFlag = flag.String("tags", envOr("RUNNER_TAGS", ""), "comma-separated runner tags (jobs route by tag)")
 	)
 	flag.Parse()
+
+	var tags []string
+	for _, t := range strings.Split(*tagsFlag, ",") {
+		if t = strings.TrimSpace(t); t != "" {
+			tags = append(tags, t)
+		}
+	}
 
 	exec, err := executor.New(*execKind)
 	if err != nil {
@@ -65,10 +75,12 @@ func main() {
 	defer stop()
 
 	c := &client{base: *server, http: &http.Client{Timeout: 60 * time.Second}}
-	slog.Info("forge-runner started", "id", *runnerID, "server", *server, "executor", exec.Name())
+	slog.Info("forge-runner started", "id", *runnerID, "server", *server,
+		"executor", exec.Name(), "tags", tags)
 
+	req := proto.AcquireRequest{RunnerID: *runnerID, Executor: exec.Name(), Tags: tags}
 	for ctx.Err() == nil {
-		job, err := acquire(ctx, c, *runnerID)
+		job, err := acquire(ctx, c, req)
 		if err != nil {
 			if ctx.Err() == nil {
 				slog.Warn("acquire failed, retrying", "err", err)
@@ -83,8 +95,8 @@ func main() {
 	}
 }
 
-func acquire(ctx context.Context, c *client, runnerID string) (*proto.RunnerJob, error) {
-	resp, err := c.postJSON(ctx, "/api/v1/runner/acquire", proto.AcquireRequest{RunnerID: runnerID})
+func acquire(ctx context.Context, c *client, req proto.AcquireRequest) (*proto.RunnerJob, error) {
+	resp, err := c.postJSON(ctx, "/api/v1/runner/acquire", req)
 	if err != nil {
 		return nil, err
 	}
@@ -129,7 +141,13 @@ func runJob(ctx context.Context, c *client, exec executor.Executor, job *proto.R
 	}()
 
 	status, exitCode := "success", 0
-	out, wait, err := exec.Start(ctx, job)
+	workdir, err := os.MkdirTemp("", "forge-job-*")
+	if err != nil {
+		workdir = "."
+	} else {
+		defer os.RemoveAll(workdir)
+	}
+	out, wait, err := exec.Start(ctx, job, workdir)
 	if err != nil {
 		status, exitCode = "failed", 1
 		logs.printf("executor error: %v\n", err)
@@ -151,6 +169,10 @@ func runJob(ctx context.Context, c *client, exec executor.Executor, job *proto.R
 		logs.printf("\nJob exited with code %d\n", exitCode)
 	}
 
+	if status == "success" && len(job.ArtifactPaths) > 0 {
+		uploadArtifacts(c, logs, job, workdir)
+	}
+
 	stopHB()
 	hbWG.Wait()
 	logs.close()
@@ -166,6 +188,69 @@ func runJob(ctx context.Context, c *client, exec executor.Executor, job *proto.R
 	}
 	resp.Body.Close()
 	slog.Info("job finished", "job", job.ID, "status", status, "exit_code", exitCode)
+}
+
+// uploadArtifacts archives the declared workspace paths with tar and streams
+// the archive to the control plane. Missing paths are skipped with a log line.
+func uploadArtifacts(c *client, logs *logStreamer, job *proto.RunnerJob, workdir string) {
+	var existing []string
+	for _, p := range job.ArtifactPaths {
+		clean := strings.TrimSuffix(strings.TrimSpace(p), "/")
+		if clean == "" || strings.HasPrefix(clean, "/") || strings.HasPrefix(clean, "..") {
+			logs.printf("artifacts: skipping unsafe path %q\n", p)
+			continue
+		}
+		if _, err := os.Stat(workdir + "/" + clean); err != nil {
+			logs.printf("artifacts: path %q not found in workspace, skipping\n", clean)
+			continue
+		}
+		existing = append(existing, clean)
+	}
+	if len(existing) == 0 {
+		logs.printf("artifacts: nothing to upload\n")
+		return
+	}
+
+	archive, err := os.CreateTemp("", "forge-artifacts-*.tar.gz")
+	if err != nil {
+		logs.printf("artifacts: temp file error: %v\n", err)
+		return
+	}
+	archive.Close()
+	defer os.Remove(archive.Name())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	tarArgs := append([]string{"-czf", archive.Name(), "-C", workdir}, existing...)
+	if out, err := osexec.CommandContext(ctx, "tar", tarArgs...).CombinedOutput(); err != nil {
+		logs.printf("artifacts: tar failed: %v: %s\n", err, out)
+		return
+	}
+	f, err := os.Open(archive.Name())
+	if err != nil {
+		logs.printf("artifacts: open archive: %v\n", err)
+		return
+	}
+	defer f.Close()
+	stat, _ := f.Stat()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		fmt.Sprintf("%s/api/v1/runner/jobs/%d/artifacts?name=artifacts.tar.gz", c.base, job.ID), f)
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/gzip")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		logs.printf("artifacts: upload failed: %v\n", err)
+		return
+	}
+	resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		logs.printf("artifacts: upload rejected with status %d\n", resp.StatusCode)
+		return
+	}
+	logs.printf("artifacts: uploaded %d bytes (%s)\n", stat.Size(), strings.Join(existing, ", "))
 }
 
 // logStreamer batches log bytes and flushes them to the server periodically.

@@ -1,0 +1,179 @@
+package api
+
+import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
+	"net/http"
+	"os"
+	"strings"
+
+	"github.com/priytamjeepandey/forge-ci/internal/compiler"
+	"github.com/priytamjeepandey/forge-ci/internal/proto"
+	"github.com/priytamjeepandey/forge-ci/internal/store"
+)
+
+// Forge is a standalone CI system — it does not host the repo. Pushes arrive
+// via provider webhooks, and the pipeline YAML for each repo is registered
+// with Forge (PUT /api/v1/repo-configs). See docs/vcs-integration.md.
+
+func (s *Server) registerWebhookRoutes() {
+	s.mux.HandleFunc("POST /api/v1/webhooks/github", s.githubWebhook)
+	s.mux.HandleFunc("POST /api/v1/webhooks/bitbucket", s.bitbucketWebhook)
+	s.mux.HandleFunc("PUT /api/v1/repo-configs", s.putRepoConfig)
+	s.mux.HandleFunc("GET /api/v1/repo-configs", s.getRepoConfig)
+}
+
+func (s *Server) triggerFromWebhook(w http.ResponseWriter, r *http.Request, repo, ref, sha, author string) {
+	if repo == "" || ref == "" || sha == "" {
+		writeErr(w, http.StatusBadRequest, "payload missing repo/ref/sha")
+		return
+	}
+	config, err := s.store.GetRepoConfig(r.Context(), repo)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound,
+			"no pipeline config registered for "+repo+" — PUT /api/v1/repo-configs first")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to load repo config")
+		return
+	}
+	jobs, err := compiler.Compile(config, ref)
+	if err != nil {
+		writeErr(w, http.StatusUnprocessableEntity, "pipeline config error: "+err.Error())
+		return
+	}
+	p, err := s.store.CreatePipeline(r.Context(),
+		proto.CreatePipelineRequest{Repo: repo, Ref: ref, SHA: sha, Config: config, TriggeredBy: author},
+		jobs)
+	if err != nil {
+		slog.Error("webhook pipeline create", "err", err)
+		writeErr(w, http.StatusInternalServerError, "failed to create pipeline")
+		return
+	}
+	slog.Info("pipeline triggered via webhook", "repo", repo, "ref", ref, "pipeline", p.ID)
+	writeJSON(w, http.StatusCreated, map[string]any{"pipeline": p})
+}
+
+// githubWebhook handles push events. If WEBHOOK_SECRET is set, the
+// X-Hub-Signature-256 HMAC is verified.
+func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "unreadable body")
+		return
+	}
+	if secret := os.Getenv("WEBHOOK_SECRET"); secret != "" {
+		mac := hmac.New(sha256.New, []byte(secret))
+		mac.Write(body)
+		want := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+		if !hmac.Equal([]byte(want), []byte(r.Header.Get("X-Hub-Signature-256"))) {
+			writeErr(w, http.StatusUnauthorized, "invalid webhook signature")
+			return
+		}
+	}
+	if ev := r.Header.Get("X-GitHub-Event"); ev != "" && ev != "push" {
+		w.WriteHeader(http.StatusAccepted) // ignore non-push events politely
+		return
+	}
+	var payload struct {
+		Ref        string `json:"ref"` // refs/heads/main
+		After      string `json:"after"`
+		Repository struct {
+			FullName string `json:"full_name"`
+		} `json:"repository"`
+		Pusher struct {
+			Name string `json:"name"`
+		} `json:"pusher"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON payload")
+		return
+	}
+	ref := strings.TrimPrefix(payload.Ref, "refs/heads/")
+	ref = strings.TrimPrefix(ref, "refs/tags/")
+	s.triggerFromWebhook(w, r, payload.Repository.FullName, ref, payload.After, payload.Pusher.Name)
+}
+
+// bitbucketWebhook handles repo:push events (Bitbucket Cloud payload shape).
+func (s *Server) bitbucketWebhook(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		Repository struct {
+			FullName string `json:"full_name"`
+		} `json:"repository"`
+		Actor struct {
+			Nickname    string `json:"nickname"`
+			DisplayName string `json:"display_name"`
+		} `json:"actor"`
+		Push struct {
+			Changes []struct {
+				New struct {
+					Name   string `json:"name"`
+					Target struct {
+						Hash string `json:"hash"`
+					} `json:"target"`
+				} `json:"new"`
+			} `json:"changes"`
+		} `json:"push"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&payload); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON payload")
+		return
+	}
+	if len(payload.Push.Changes) == 0 {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+	change := payload.Push.Changes[0].New
+	author := payload.Actor.Nickname
+	if author == "" {
+		author = payload.Actor.DisplayName
+	}
+	s.triggerFromWebhook(w, r, payload.Repository.FullName, change.Name, change.Target.Hash, author)
+}
+
+// ---- registered pipeline configs ----
+
+func (s *Server) putRepoConfig(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Repo   string `json:"repo"`
+		Config string `json:"config"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Repo == "" || req.Config == "" {
+		writeErr(w, http.StatusBadRequest, "repo and config are required")
+		return
+	}
+	// Validate against a representative ref so broken YAML is rejected early.
+	if _, err := compiler.Compile(req.Config, "main"); err != nil {
+		writeErr(w, http.StatusBadRequest, "config error: "+err.Error())
+		return
+	}
+	if err := s.store.SetRepoConfig(r.Context(), req.Repo, req.Config); err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to save config")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) getRepoConfig(w http.ResponseWriter, r *http.Request) {
+	repo := r.URL.Query().Get("repo")
+	if repo == "" {
+		writeErr(w, http.StatusBadRequest, "repo query param is required")
+		return
+	}
+	config, err := s.store.GetRepoConfig(r.Context(), repo)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "no config registered for this repo")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to load config")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"repo": repo, "config": config})
+}
