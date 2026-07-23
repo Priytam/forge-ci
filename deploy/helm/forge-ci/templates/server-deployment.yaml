@@ -1,0 +1,113 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "forge-ci.server.fullname" . }}
+  labels:
+    {{- include "forge-ci.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  {{- if not .Values.server.autoscaling.enabled }}
+  replicas: {{ .Values.server.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "forge-ci.server.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "forge-ci.labels" . | nindent 8 }}
+        app.kubernetes.io/component: server
+      annotations:
+        {{/* roll pods when config/secret content changes */}}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if and .Values.secrets.create (not .Values.secrets.existingSecret) }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.server.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "forge-ci.server.serviceAccountName" . }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.server.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: server
+          image: {{ include "forge-ci.image" (dict "root" $ "repo" .Values.server.image.repository "tag" .Values.server.image.tag) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.server.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.server.service.targetPort }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "forge-ci.configMapName" . }}
+            - secretRef:
+                name: {{ include "forge-ci.secretName" . }}
+          livenessProbe:
+            httpGet:
+              path: /api/v1/healthz
+              port: http
+            {{- toYaml .Values.server.livenessProbe | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /api/v1/healthz
+              port: http
+            {{- toYaml .Values.server.readinessProbe | nindent 12 }}
+          {{- if eq .Values.config.artifacts.store "local" }}
+          volumeMounts:
+            - name: artifacts
+              mountPath: {{ .Values.config.artifacts.dir }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.server.resources | nindent 12 }}
+      {{- if eq .Values.config.artifacts.store "local" }}
+      volumes:
+        - name: artifacts
+          {{- if .Values.config.artifacts.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "forge-ci.server.fullname" . }}-artifacts
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+      {{- end }}
+      {{- with .Values.server.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.server.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.server.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if and (eq .Values.config.artifacts.store "local") .Values.config.artifacts.persistence.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "forge-ci.server.fullname" . }}-artifacts
+  labels:
+    {{- include "forge-ci.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  accessModes:
+    - {{ .Values.config.artifacts.persistence.accessMode }}
+  resources:
+    requests:
+      storage: {{ .Values.config.artifacts.persistence.size }}
+  {{- with .Values.config.artifacts.persistence.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+{{- end }}

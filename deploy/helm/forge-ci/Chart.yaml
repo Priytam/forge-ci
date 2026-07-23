@@ -1,0 +1,34 @@
+apiVersion: v2
+name: forge-ci
+description: >-
+  Forge CI — a GitLab-style CI/CD engine: control-plane API + scheduler,
+  pull-based runners (shell/docker/kubernetes executors), and a React
+  dashboard. Umbrella chart that deploys the whole platform.
+type: application
+
+# Chart version — bump on every chart change.
+version: 0.1.0
+# Default application version — the container image tag used when a component
+# does not pin its own `image.tag`. Override per environment.
+appVersion: "0.1.0"
+
+home: https://github.com/priytamjeepandey/forge-ci
+sources:
+  - https://github.com/priytamjeepandey/forge-ci
+
+keywords:
+  - ci
+  - cd
+  - pipelines
+  - devops
+
+maintainers:
+  - name: Forge CI
+
+# Optional in-cluster Postgres. Disable (postgresql.enabled=false) to point the
+# server at a managed database (RDS / Cloud SQL) via `database.url`.
+dependencies:
+  - name: postgresql
+    version: "16.x.x"
+    repository: https://charts.bitnami.com/bitnami
+    condition: postgresql.enabled

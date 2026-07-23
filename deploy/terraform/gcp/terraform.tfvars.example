@@ -1,0 +1,45 @@
+# Copy to terraform.tfvars and edit. Do NOT commit real values.
+
+project_id            = "my-gcp-project"
+region                = "asia-south1"
+name                  = "forge-ci"
+domain                = "forge.example.com"
+artifacts_bucket_name = "acme-forge-ci-artifacts"   # must be globally unique
+
+# --- Cluster ---
+create_cluster = true
+gke_location   = "asia-south1"       # regional cluster
+machine_type   = "e2-standard-4"
+node_count     = 1
+max_node_count = 3
+
+# Install into an existing cluster instead:
+# create_cluster             = false
+# byo_cluster_endpoint       = "https://34.x.x.x"
+# byo_cluster_ca_certificate = "LS0tLS1CRUdJTi..."   # base64
+# byo_cluster_token          = "ya29...."
+
+# --- Network ---
+create_vpc = true
+# Or bring your own:
+# create_vpc                 = false
+# byo_network_id             = "projects/PROJECT/global/networks/my-vpc"
+# byo_network_name           = "my-vpc"
+# byo_subnet_name            = "my-subnet"
+# byo_pods_range_name        = "pods"
+# byo_services_range_name    = "services"
+# byo_private_vpc_connection = "..."   # required for Cloud SQL private IP
+
+# --- Database ---
+db_tier              = "db-custom-2-7680"
+db_availability_type = "REGIONAL"
+db_deletion_protection = true
+
+# --- App ---
+runner_mode        = "kubernetes"
+runner_auth        = "on"
+admin_emails       = "platform-admin@example.com"
+image_registry     = "asia-south1-docker.pkg.dev/my-gcp-project/forge-ci"
+ingress_enabled    = true
+ingress_class_name = "gce"
+# webhook_secret = "..."   # prefer TF_VAR_webhook_secret in the environment

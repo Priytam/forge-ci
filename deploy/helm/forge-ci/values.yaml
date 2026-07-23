@@ -1,0 +1,304 @@
+# Default values for forge-ci.
+# This is a YAML-formatted file. Every knob is documented inline.
+# See values-prod.yaml for a hardened, cloud-ready example.
+
+## -----------------------------------------------------------------------------
+## Naming
+## -----------------------------------------------------------------------------
+# Override the chart name / full resource-name prefix.
+nameOverride: ""
+fullnameOverride: ""
+
+## -----------------------------------------------------------------------------
+## Images (shared)
+## -----------------------------------------------------------------------------
+image:
+  # Optional registry prefix applied to every component repository,
+  # e.g. "ghcr.io/acme" -> ghcr.io/acme/forge-ci/server:<tag>.
+  # Leave empty to use the repositories verbatim. You build & push these
+  # images yourself (deploy/Dockerfile.server, deploy/Dockerfile.runner,
+  # deploy/Dockerfile.runner-k8s, web/Dockerfile).
+  registry: ""
+  pullPolicy: IfNotPresent
+  # imagePullSecrets for private registries (list of {name: ...}).
+  pullSecrets: []
+
+## -----------------------------------------------------------------------------
+## forge-server — control plane (API, compiler, scheduler)
+## -----------------------------------------------------------------------------
+server:
+  image:
+    repository: forge-ci/server
+    # Defaults to .Chart.AppVersion when empty.
+    tag: ""
+  replicaCount: 2
+  service:
+    type: ClusterIP
+    # Service port (cluster-internal + ingress target).
+    port: 8080
+    # Container listen port -> LISTEN_ADDR=":<targetPort>".
+    targetPort: 8080
+  # HorizontalPodAutoscaler (autoscaling/v2). replicaCount is ignored when on.
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 75
+    targetMemoryUtilizationPercentage: 0   # 0 disables the memory metric
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+  # Probes hit GET /api/v1/healthz (returns 200 when the server is up).
+  livenessProbe:
+    initialDelaySeconds: 10
+    periodSeconds: 15
+    timeoutSeconds: 3
+    failureThreshold: 3
+  readinessProbe:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}   # e.g. IRSA / Workload-Identity role bindings
+  podSecurityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+## -----------------------------------------------------------------------------
+## web — React dashboard (nginx)
+## -----------------------------------------------------------------------------
+web:
+  enabled: true
+  image:
+    repository: forge-ci/web
+    tag: ""
+  replicaCount: 2
+  service:
+    type: ClusterIP
+    port: 80
+    targetPort: 80
+  autoscaling:
+    enabled: false
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+  livenessProbe:
+    initialDelaySeconds: 5
+    periodSeconds: 15
+    timeoutSeconds: 3
+    failureThreshold: 3
+  readinessProbe:
+    initialDelaySeconds: 3
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+  podSecurityContext:
+    runAsNonRoot: false   # stock nginx:alpine binds :80 as root
+  containerSecurityContext: {}
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+## -----------------------------------------------------------------------------
+## runner — pull-based build agents
+## -----------------------------------------------------------------------------
+runner:
+  enabled: true
+  # mode:
+  #   shell      -> resident fleet, jobs run as shell scripts on the runner pod
+  #   docker     -> resident fleet, jobs run in docker containers (needs a docker
+  #                 daemon reachable via extraVolumes/extraEnv — DinD or mounted socket)
+  #   kubernetes -> one resident manager that spawns an ephemeral job pod per job
+  #                 (requires the namespaced RBAC below)
+  mode: shell
+
+  # Resident fleet size (shell/docker modes).
+  replicaCount: 1
+  # Manager replicas (kubernetes mode). Keep at 1 and scale jobs via concurrency.
+  managerReplicas: 1
+
+  # Runner image for shell/docker modes.
+  image:
+    repository: forge-ci/runner
+    tag: ""
+  # Runner-manager image for kubernetes mode (bundles kubectl + git).
+  imageK8s:
+    repository: forge-ci/runner-k8s
+    tag: ""
+
+  # Comma-separated capability tags; jobs route to runners by tag (RUNNER_TAGS).
+  tags: "linux,shell"
+  # Parallel jobs per runner/manager (RUNNER_CONCURRENCY).
+  concurrency: 2
+
+  # Override the control-plane URL the runner dials. Empty -> in-cluster
+  # server Service. Set this when the runner runs outside the cluster.
+  serverUrl: ""
+
+  # kubernetes-mode settings.
+  kube:
+    # in-cluster uses the pod ServiceAccount (no kubeconfig). For a separate
+    # target cluster, mount a kubeconfig via extraVolumes and set this to that
+    # context name (see docs/kubernetes-deployment.md, Topology B).
+    context: in-cluster
+    # Namespace job pods are created in. Empty -> release namespace.
+    namespace: ""
+
+  # RBAC for the kubernetes executor (only rendered when mode=kubernetes).
+  rbac:
+    create: true
+
+  # Optional namespace LimitRange for job pods (kubernetes mode).
+  limitRange:
+    enabled: false
+    default:
+      cpu: "1"
+      memory: 2Gi
+    defaultRequest:
+      cpu: 250m
+      memory: 256Mi
+
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+  podSecurityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+
+  # Escape hatches for docker mode / custom job tooling.
+  extraEnv: []          # list of core-v1 EnvVar
+  extraVolumes: []
+  extraVolumeMounts: []
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+## -----------------------------------------------------------------------------
+## Non-secret env matrix (rendered into a ConfigMap, injected via envFrom)
+## -----------------------------------------------------------------------------
+config:
+  # off | on — require a bearer token on the runner protocol + artifact upload.
+  runnerAuth: "off"
+  # Comma-separated platform-admin emails (enforced once SSO is enabled).
+  adminEmails: ""
+  # Public origins. Empty -> derived from ingress.host when ingress.enabled.
+  externalUrl: ""     # server's public origin (SSO redirect + CSRF allow-list)
+  frontendUrl: ""     # dashboard origin (post-login redirect + CSRF allow-list)
+  # Log/artifact caps and retention.
+  maxJobLogBytes: "10485760"      # 10 MiB
+  maxArtifactBytes: "524288000"   # 500 MiB; 0 disables
+  retentionDays: "30"             # 0 = keep forever
+
+  artifacts:
+    # local | s3 (s3 = any S3-compatible store: AWS S3, GCS interop, MinIO)
+    store: local
+    # local backend: on-disk dir inside the server pod.
+    dir: /data/artifacts
+    # Persist the local artifacts dir with a PVC (only for store=local).
+    # A single-writer local store is dev/small only; for HA use store=s3.
+    persistence:
+      enabled: false
+      size: 10Gi
+      accessMode: ReadWriteOnce
+      storageClass: ""
+    # s3 backend (non-secret half; S3_SECRET_KEY lives under secrets.*).
+    s3:
+      endpoint: ""     # host[:port], no scheme (s3.amazonaws.com, storage.googleapis.com, minio:9000)
+      bucket: ""
+      region: ""
+      useSSL: "true"
+      accessKey: ""
+
+## -----------------------------------------------------------------------------
+## Secrets — sensitive env
+## -----------------------------------------------------------------------------
+secrets:
+  # Generate a Secret from the values below.
+  create: true
+  # ...or reference a pre-existing Secret (from Vault / External Secrets /
+  # SealedSecrets). When set, `create` is ignored and the Secret is NOT
+  # rendered. It MUST contain: DATABASE_URL, FORGE_SECRET_KEY, RUNNER_TOKEN,
+  # WEBHOOK_SECRET, and (when artifacts.store=s3) S3_SECRET_KEY.
+  existingSecret: ""
+
+  # base64 32-byte AES-256-GCM key. Empty = plaintext passthrough (INSECURE).
+  # Generate: head -c 32 /dev/urandom | base64
+  forgeSecretKey: ""
+  # Runner bearer token (used when config.runnerAuth=on).
+  runnerToken: ""
+  # GitHub webhook HMAC secret (WEBHOOK_SECRET). Empty = signature check off.
+  webhookSecret: ""
+  # S3 secret key (only used when config.artifacts.store=s3).
+  s3SecretKey: ""
+
+## -----------------------------------------------------------------------------
+## Database
+## -----------------------------------------------------------------------------
+# External managed DB — used ONLY when postgresql.enabled=false and no
+# existingSecret is set. Full DSN, e.g.
+#   postgres://user:pass@my-rds.abc.rds.amazonaws.com:5432/forge?sslmode=require
+database:
+  url: ""
+
+# Bundled bitnami/postgresql subchart. Disable for a managed DB.
+postgresql:
+  enabled: true
+  auth:
+    username: forge
+    password: forge          # CHANGE ME; dev default only
+    database: forge
+  # primary.persistence.enabled etc. pass through to the bitnami subchart.
+  primary:
+    persistence:
+      enabled: true
+      size: 8Gi
+
+## -----------------------------------------------------------------------------
+## Ingress — single host; /api -> server, / -> web
+## -----------------------------------------------------------------------------
+ingress:
+  enabled: false
+  className: ""             # e.g. nginx, alb, gce
+  host: forge.example.com
+  annotations: {}           # cert-manager, ALB, GCE annotations go here
+  tls:
+    enabled: false
+    secretName: forge-ci-tls

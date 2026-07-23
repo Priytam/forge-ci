@@ -1,0 +1,73 @@
+Forge CI ({{ .Chart.Name }}-{{ .Chart.Version }}, app {{ .Chart.AppVersion }}) has been deployed as "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+1. Reach the dashboard / API
+{{- if .Values.ingress.enabled }}
+   {{- $scheme := ternary "https" "http" .Values.ingress.tls.enabled }}
+   URL: {{ $scheme }}://{{ .Values.ingress.host }}
+   {{- if .Values.web.enabled }}
+   The dashboard is served at "/" and the API + runner protocol at "/api".
+   {{- else }}
+   The API is served at "/api" (web frontend disabled).
+   {{- end }}
+{{- else if .Values.web.enabled }}
+   No Ingress is enabled. Port-forward the web frontend:
+     kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "forge-ci.web.fullname" . }} 8080:{{ .Values.web.service.port }}
+   then open http://localhost:8080
+   NOTE: the web container proxies "/api" to a host literally named "server".
+   Without an Ingress splitting "/api" to the server Service, hit the API
+   directly instead:
+     kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "forge-ci.server.fullname" . }} 8081:{{ .Values.server.service.port }}
+{{- else }}
+   No Ingress and no web frontend. Port-forward the API:
+     kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "forge-ci.server.fullname" . }} 8080:{{ .Values.server.service.port }}
+   then open http://localhost:8080/api/v1/healthz
+{{- end }}
+
+2. Database
+{{- if .Values.postgresql.enabled }}
+   Using the bundled bitnami/postgresql subchart (service {{ .Release.Name }}-postgresql:5432).
+   For production, set postgresql.enabled=false and point database.url at a
+   managed Postgres (RDS / Cloud SQL).
+{{- else }}
+   Using an external managed database via DATABASE_URL{{ if .Values.secrets.existingSecret }} from existingSecret "{{ .Values.secrets.existingSecret }}"{{ end }}.
+{{- end }}
+
+3. Secrets
+{{- if .Values.secrets.existingSecret }}
+   Sensitive env is read from the pre-existing Secret "{{ .Values.secrets.existingSecret }}".
+   It MUST contain: DATABASE_URL, FORGE_SECRET_KEY, RUNNER_TOKEN, WEBHOOK_SECRET{{ if eq .Values.config.artifacts.store "s3" }}, S3_SECRET_KEY{{ end }}.
+{{- else }}
+   A Secret "{{ include "forge-ci.secretName" . }}" was generated.
+   {{- if not .Values.secrets.forgeSecretKey }}
+   WARNING: FORGE_SECRET_KEY is empty — the server runs in plaintext-passthrough
+   mode (variables/tokens/SSO secrets are NOT encrypted at rest). Generate one:
+     head -c 32 /dev/urandom | base64
+   then set secrets.forgeSecretKey and `helm upgrade`.
+   {{- end }}
+{{- end }}
+
+4. Enable SSO + admins (see docs/sso.md)
+   Set config.adminEmails (comma-separated) and configure an SSO provider in the
+   dashboard. Until SSO is enabled the platform is in open (no-authz) mode.
+
+5. Runner auth / token bootstrap (see docs/runners.md)
+{{- if eq .Values.config.runnerAuth "on" }}
+   RUNNER_AUTH=on. Runners authenticate with RUNNER_TOKEN from the Secret.
+   {{- if and (not .Values.secrets.existingSecret) (not .Values.secrets.runnerToken) }}
+   No token was provided; on first boot with zero tokens the server generates a
+   bootstrap token and logs it once:
+     kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "forge-ci.server.fullname" . }} | grep -i "bootstrap runner token"
+   Set secrets.runnerToken to that value (or mint one via POST /api/v1/runner-tokens) and upgrade.
+   {{- end }}
+{{- else }}
+   RUNNER_AUTH=off (insecure — any client can acquire jobs). Set
+   config.runnerAuth=on for production.
+{{- end }}
+
+6. Runner mode: {{ .Values.runner.mode }}
+{{- if eq .Values.runner.mode "kubernetes" }}
+   The kubernetes executor manager runs in namespace "{{ include "forge-ci.runner.kubeNamespace" . }}"
+   with a Role granting pod create/exec/log. Job pods carry app=forge-ci-job.
+{{- else }}
+   A resident {{ .Values.runner.mode }} runner fleet ({{ .Values.runner.replicaCount }} replica(s), tags "{{ .Values.runner.tags }}").
+{{- end }}

@@ -1,0 +1,16 @@
+# OpenTofu / Terraform working files — do NOT commit.
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+
+# Local variable files with real values.
+terraform.tfvars
+*.auto.tfvars
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Keep: .terraform.lock.hcl (provider version pins), *.tfvars.example

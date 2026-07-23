@@ -1,0 +1,37 @@
+{{/*
+Non-secret env matrix for forge-server. Injected via envFrom on the server
+Deployment. Secret values (FORGE_SECRET_KEY, DATABASE_URL, S3_SECRET_KEY,
+RUNNER_TOKEN, WEBHOOK_SECRET) live in the Secret, never here.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "forge-ci.configMapName" . }}
+  labels:
+    {{- include "forge-ci.labels" . | nindent 4 }}
+data:
+  LISTEN_ADDR: {{ printf ":%d" (int .Values.server.service.targetPort) | quote }}
+  RUNNER_AUTH: {{ .Values.config.runnerAuth | quote }}
+  ADMIN_EMAILS: {{ .Values.config.adminEmails | quote }}
+  RETENTION_DAYS: {{ .Values.config.retentionDays | quote }}
+  MAX_JOB_LOG_BYTES: {{ .Values.config.maxJobLogBytes | quote }}
+  MAX_ARTIFACT_BYTES: {{ .Values.config.maxArtifactBytes | quote }}
+  {{/* EXTERNAL_URL / FRONTEND_URL: explicit value wins, else derive from ingress host. */}}
+  {{- $scheme := "http" -}}
+  {{- if and .Values.ingress.enabled .Values.ingress.tls.enabled }}{{ $scheme = "https" }}{{- end }}
+  {{- $host := "" -}}
+  {{- if .Values.ingress.enabled }}{{ $host = .Values.ingress.host }}{{- end }}
+  {{- $derived := "" -}}
+  {{- if $host }}{{ $derived = printf "%s://%s" $scheme $host }}{{- end }}
+  EXTERNAL_URL: {{ (default $derived .Values.config.externalUrl) | quote }}
+  FRONTEND_URL: {{ (default $derived .Values.config.frontendUrl) | quote }}
+  ARTIFACT_STORE: {{ .Values.config.artifacts.store | quote }}
+  {{- if eq .Values.config.artifacts.store "s3" }}
+  S3_ENDPOINT: {{ .Values.config.artifacts.s3.endpoint | quote }}
+  S3_BUCKET: {{ .Values.config.artifacts.s3.bucket | quote }}
+  S3_REGION: {{ .Values.config.artifacts.s3.region | quote }}
+  S3_USE_SSL: {{ .Values.config.artifacts.s3.useSSL | quote }}
+  S3_ACCESS_KEY: {{ .Values.config.artifacts.s3.accessKey | quote }}
+  {{- else }}
+  ARTIFACTS_DIR: {{ .Values.config.artifacts.dir | quote }}
+  {{- end }}

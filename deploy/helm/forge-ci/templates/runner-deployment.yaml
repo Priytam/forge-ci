@@ -1,0 +1,107 @@
+{{- if .Values.runner.enabled }}
+{{- $isK8s := eq .Values.runner.mode "kubernetes" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "forge-ci.runner.fullname" . }}
+  {{- if $isK8s }}
+  namespace: {{ include "forge-ci.runner.kubeNamespace" . }}
+  {{- end }}
+  labels:
+    {{- include "forge-ci.labels" . | nindent 4 }}
+    app.kubernetes.io/component: runner
+    forge-ci/runner-mode: {{ .Values.runner.mode }}
+spec:
+  {{/* One resident manager in kubernetes mode; a fleet in shell/docker mode. */}}
+  replicas: {{ if $isK8s }}{{ .Values.runner.managerReplicas }}{{ else }}{{ .Values.runner.replicaCount }}{{ end }}
+  selector:
+    matchLabels:
+      {{- include "forge-ci.runner.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "forge-ci.labels" . | nindent 8 }}
+        app.kubernetes.io/component: runner
+      {{- with .Values.runner.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- if $isK8s }}
+      serviceAccountName: {{ include "forge-ci.runner.serviceAccountName" . }}
+      {{- else if .Values.runner.serviceAccount.create }}
+      serviceAccountName: {{ include "forge-ci.runner.serviceAccountName" . }}
+      {{- end }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.runner.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: runner
+          {{- if $isK8s }}
+          image: {{ include "forge-ci.image" (dict "root" $ "repo" .Values.runner.imageK8s.repository "tag" .Values.runner.imageK8s.tag) }}
+          {{- else }}
+          image: {{ include "forge-ci.image" (dict "root" $ "repo" .Values.runner.image.repository "tag" .Values.runner.image.tag) }}
+          {{- end }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.runner.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            - name: SERVER_URL
+              value: {{ default (include "forge-ci.serverInternalURL" .) .Values.runner.serverUrl | quote }}
+            - name: EXECUTOR
+              value: {{ if $isK8s }}"kubernetes"{{ else }}{{ .Values.runner.mode | quote }}{{ end }}
+            - name: RUNNER_TAGS
+              value: {{ .Values.runner.tags | quote }}
+            - name: RUNNER_CONCURRENCY
+              value: {{ .Values.runner.concurrency | quote }}
+            - name: RUNNER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            {{- if $isK8s }}
+            - name: KUBE_CONTEXT
+              value: {{ .Values.runner.kube.context | quote }}
+            - name: KUBE_NAMESPACE
+              value: {{ include "forge-ci.runner.kubeNamespace" . | quote }}
+            {{- end }}
+            {{- if eq .Values.config.runnerAuth "on" }}
+            - name: RUNNER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "forge-ci.secretName" . }}
+                  key: RUNNER_TOKEN
+                  optional: true
+            {{- end }}
+            {{- with .Values.runner.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.runner.resources | nindent 12 }}
+          {{- with .Values.runner.extraVolumeMounts }}
+          volumeMounts:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.runner.extraVolumes }}
+      volumes:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.runner.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.runner.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.runner.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

@@ -1,0 +1,104 @@
+# Production example values for forge-ci.
+#   helm install forge ./deploy/helm/forge-ci -f deploy/helm/forge-ci/values-prod.yaml
+#
+# Managed Postgres + S3 artifacts + RUNNER_AUTH=on + ingress TLS + HPA.
+# Replace every <PLACEHOLDER> and supply secrets via --set or (preferred) an
+# existingSecret from your secret manager. Do NOT commit real secrets.
+
+image:
+  # Registry host/org prefix. Push your images here first; final refs become
+  # e.g. registry.example.com/forge-ci/server:<appVersion>.
+  registry: "registry.example.com"
+  pullPolicy: IfNotPresent
+  pullSecrets:
+    - name: forge-ci-registry
+
+server:
+  replicaCount: 3
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "2"
+      memory: 1Gi
+
+web:
+  enabled: true
+  replicaCount: 3
+
+runner:
+  enabled: true
+  mode: kubernetes         # ephemeral job pods per job
+  managerReplicas: 1
+  concurrency: 6
+  tags: "k8s,linux"
+  rbac:
+    create: true
+  limitRange:
+    enabled: true
+    default:
+      cpu: "2"
+      memory: 4Gi
+    defaultRequest:
+      cpu: 500m
+      memory: 512Mi
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+config:
+  runnerAuth: "on"                       # require runner bearer tokens
+  adminEmails: "platform-admin@example.com"
+  # externalUrl / frontendUrl are derived from ingress.host (https) automatically.
+  retentionDays: "30"
+  maxArtifactBytes: "1073741824"         # 1 GiB
+  artifacts:
+    store: s3
+    s3:
+      endpoint: "s3.amazonaws.com"       # or storage.googleapis.com for GCS interop
+      bucket: "acme-forge-artifacts"
+      region: "ap-south-1"
+      useSSL: "true"
+      accessKey: "<S3_ACCESS_KEY>"       # non-secret half
+
+secrets:
+  # PREFERRED: reference a Secret managed by Vault / External Secrets and leave
+  # the inline values empty. That Secret must carry DATABASE_URL,
+  # FORGE_SECRET_KEY, RUNNER_TOKEN, WEBHOOK_SECRET, S3_SECRET_KEY.
+  existingSecret: "forge-ci-prod-secrets"
+  # If you instead let the chart generate the Secret, blank out existingSecret
+  # and pass these via --set / --set-file at install time — never commit them.
+  # (When existingSecret is set the values below are ignored.)
+  create: true
+  forgeSecretKey: ""     # head -c 32 /dev/urandom | base64
+  runnerToken: ""
+  webhookSecret: ""
+  s3SecretKey: ""
+
+# Managed Postgres (RDS / Cloud SQL). Provide the DSN via secrets.existingSecret
+# (DATABASE_URL) OR set database.url here / via --set.
+postgresql:
+  enabled: false
+database:
+  url: ""   # postgres://user:pass@<managed-endpoint>:5432/forge?sslmode=require
+
+ingress:
+  enabled: true
+  className: "nginx"
+  host: "forge.example.com"
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/proxy-body-size: "1024m"   # allow large artifact uploads
+  tls:
+    enabled: true
+    secretName: "forge-ci-tls"

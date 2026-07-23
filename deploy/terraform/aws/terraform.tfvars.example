@@ -1,0 +1,46 @@
+# Copy to terraform.tfvars and edit. Do NOT commit real values.
+
+region                = "ap-south-1"
+name                  = "forge-ci"
+domain                = "forge.example.com"
+artifacts_bucket_name = "acme-forge-ci-artifacts"   # must be globally unique
+
+# --- Cluster ---
+create_cluster      = true
+kubernetes_version  = "1.31"
+node_instance_types = ["t3.large"]
+node_desired_size   = 2
+
+# Install into an existing cluster instead:
+# create_cluster             = false
+# byo_cluster_endpoint       = "https://XXXX.eks.amazonaws.com"
+# byo_cluster_ca_certificate = "LS0tLS1CRUdJTi..."   # base64
+# byo_cluster_token          = "k8s-aws-v1..."
+
+# --- Network ---
+create_vpc = true
+vpc_cidr   = "10.20.0.0/16"
+# Or bring your own VPC:
+# create_vpc             = false
+# byo_vpc_id             = "vpc-0abc..."
+# byo_vpc_cidr           = "10.0.0.0/16"
+# byo_private_subnet_ids = ["subnet-aaa", "subnet-bbb"]
+# byo_public_subnet_ids  = ["subnet-ccc", "subnet-ddd"]
+
+# --- Database ---
+db_instance_class      = "db.t3.medium"
+db_multi_az            = true
+db_deletion_protection = true
+
+# --- App ---
+runner_mode        = "kubernetes"   # shell | docker | kubernetes
+runner_auth        = "on"
+admin_emails       = "platform-admin@example.com"
+image_registry     = "REGISTRY.dkr.ecr.ap-south-1.amazonaws.com/forge-ci"
+ingress_enabled    = true
+ingress_class_name = "alb"
+ingress_annotations = {
+  "alb.ingress.kubernetes.io/scheme"      = "internet-facing"
+  "alb.ingress.kubernetes.io/target-type" = "ip"
+}
+# webhook_secret = "..."   # prefer TF_VAR_webhook_secret in the environment

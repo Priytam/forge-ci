@@ -1,0 +1,56 @@
+{{- if .Values.ingress.enabled }}
+{{- $svcServer := include "forge-ci.server.fullname" . -}}
+{{- $svcWeb := include "forge-ci.web.fullname" . -}}
+{{- $serverPort := .Values.server.service.port -}}
+{{- $webPort := .Values.web.service.port -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "forge-ci.fullname" . }}
+  labels:
+    {{- include "forge-ci.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+      secretName: {{ .Values.ingress.tls.secretName }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          {{/* /api → server (API + runner protocol). Listed first so it wins over "/". */}}
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $svcServer }}
+                port:
+                  number: {{ $serverPort }}
+          {{- if .Values.web.enabled }}
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $svcWeb }}
+                port:
+                  number: {{ $webPort }}
+          {{- else }}
+          {{/* No web frontend — route the root to the server too. */}}
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $svcServer }}
+                port:
+                  number: {{ $serverPort }}
+          {{- end }}
+{{- end }}
