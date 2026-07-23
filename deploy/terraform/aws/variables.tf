@@ -133,6 +133,37 @@ variable "db_skip_final_snapshot" {
   default = false
 }
 
+# ---- Redis (log tier) ----
+
+variable "create_redis" {
+  description = "Provision managed ElastiCache Redis for the log tier. false = bundle the chart's in-cluster Redis instead."
+  type        = bool
+  default     = true
+}
+
+variable "redis_node_type" {
+  type    = string
+  default = "cache.t4g.small"
+}
+
+variable "redis_num_nodes" {
+  description = "ElastiCache nodes (1 = single node; >1 enables failover + multi-AZ)."
+  type        = number
+  default     = 1
+}
+
+variable "redis_transit_encryption" {
+  description = "Enable in-transit TLS (produces a rediss:// URL)."
+  type        = bool
+  default     = true
+}
+
+variable "log_backend" {
+  description = "LOG_BACKEND: '' (auto), 'redis', or 'postgres'."
+  type        = string
+  default     = "redis"
+}
+
 # ---- Artifacts ----
 
 variable "artifacts_bucket_name" {

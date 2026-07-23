@@ -69,6 +69,21 @@ module "artifacts" {
   force_destroy = var.artifacts_force_destroy
 }
 
+# Managed Redis (Memorystore) for the high-volume log tier. Disable
+# (create_redis=false) to bundle the chart's in-cluster Redis instead.
+module "cache" {
+  count  = var.create_redis ? 1 : 0
+  source = "../modules/gcp-redis"
+  name   = var.name
+  region = var.region
+
+  authorized_network     = local.network_id
+  private_vpc_connection = local.private_vpc_connection
+
+  tier           = var.redis_tier
+  memory_size_gb = var.redis_memory_gb
+}
+
 module "secret" {
   source                = "../modules/gcp-secret"
   secret_id             = "${var.name}-app"
@@ -98,6 +113,11 @@ module "forge" {
     access_key = module.artifacts.s3_access_key
     secret_key = module.artifacts.s3_secret_key
   }
+
+  # Log tier: managed Redis when provisioned, else bundle in-cluster Redis.
+  log_backend   = var.log_backend
+  redis_url     = var.create_redis ? module.cache[0].redis_url : ""
+  redis_enabled = !var.create_redis
 
   image_registry     = var.image_registry
   runner_mode        = var.runner_mode

@@ -101,7 +101,8 @@ func authExempt(path string) bool {
 	case strings.HasPrefix(path, "/api/v1/runner/"),
 		strings.HasPrefix(path, "/api/v1/webhooks/"),
 		strings.HasPrefix(path, "/api/v1/auth/"),
-		path == "/api/v1/healthz":
+		path == "/api/v1/healthz",
+		path == "/api/v1/metrics":
 		return true
 	}
 	return false

@@ -32,3 +32,10 @@ dependencies:
     version: "16.x.x"
     repository: https://charts.bitnami.com/bitnami
     condition: postgresql.enabled
+  # Optional in-cluster Redis for the high-volume log tier (live buffer +
+  # pub/sub fan-out). Disable (redis.enabled=false) to point the server at a
+  # managed Redis (ElastiCache / Memorystore) via `redis.url`.
+  - name: redis
+    version: "20.x.x"
+    repository: https://charts.bitnami.com/bitnami
+    condition: redis.enabled

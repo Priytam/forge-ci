@@ -17,6 +17,12 @@ locals {
     },
     var.artifact_store == "s3" && var.s3 != null ? {
       S3_SECRET_KEY = var.s3.secret_key
+    } : {},
+    # REDIS_URL is delivered through the existingSecret (it may carry a password).
+    # Empty when using the bundled in-cluster Redis (redis.enabled derives the
+    # URL) or when running without Redis (server falls back to postgres logs).
+    var.redis_url != "" ? {
+      REDIS_URL = var.redis_url
     } : {}
   )
 
@@ -30,10 +36,15 @@ locals {
     postgresql = {
       enabled = var.postgresql_enabled
     }
+    # Bundle in-cluster Redis only when no managed Redis URL is supplied.
+    redis = {
+      enabled = var.redis_enabled
+    }
     config = merge(
       {
         runnerAuth  = var.runner_auth
         adminEmails = var.admin_emails
+        logBackend  = var.log_backend
         artifacts   = { store = var.artifact_store }
       },
       var.artifact_store == "s3" && var.s3 != null ? {

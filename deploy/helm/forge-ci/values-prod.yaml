@@ -62,6 +62,7 @@ config:
   # externalUrl / frontendUrl are derived from ingress.host (https) automatically.
   retentionDays: "30"
   maxArtifactBytes: "1073741824"         # 1 GiB
+  logBackend: "redis"                    # high-volume log tier (managed Redis below)
   artifacts:
     store: s3
     s3:
@@ -91,6 +92,13 @@ postgresql:
   enabled: false
 database:
   url: ""   # postgres://user:pass@<managed-endpoint>:5432/forge?sslmode=require
+
+# Managed Redis (ElastiCache / Memorystore) for the log tier. Provide the URL
+# via secrets.existingSecret (REDIS_URL) — preferred when it carries a password —
+# OR set redis.url here / via --set.
+redis:
+  enabled: false          # do NOT bundle in-cluster Redis in prod
+  url: ""                 # redis://:pass@forge.abc.cache.amazonaws.com:6379/0
 
 ingress:
   enabled: true

@@ -546,17 +546,32 @@ func (s *Store) AppendLog(ctx context.Context, jobID int64, chunk string) error 
 	return err
 }
 
+// TruncationNotice is the single line written (once) when a job's cumulative
+// log bytes cross MAX_JOB_LOG_BYTES. Both log backends emit exactly this text so
+// truncated output is byte-identical regardless of where logs are buffered.
+func TruncationNotice(capBytes int64) string {
+	return fmt.Sprintf(
+		"\n[forge] log truncated: job exceeded MAX_JOB_LOG_BYTES (%d bytes); further output dropped\n",
+		capBytes)
+}
+
 // AppendLogCapped appends a log chunk while enforcing a cumulative per-job
 // byte cap. capBytes <= 0 disables the cap. Once the cap is crossed it writes a
 // single truncation notice, sets jobs.log_truncated, and silently drops all
-// further chunks. Returns ErrNotFound if the job does not exist.
-func (s *Store) AppendLogCapped(ctx context.Context, jobID int64, chunk string, capBytes int64) error {
+// further chunks. Returns the cumulative byte total after the append and
+// whether truncation fired on THIS call. Returns ErrNotFound if the job does
+// not exist. This is the postgres log backend's write path (see
+// internal/logstore).
+func (s *Store) AppendLogCapped(ctx context.Context, jobID int64, chunk string, capBytes int64) (total int64, truncatedNow bool, err error) {
 	if capBytes <= 0 {
-		return s.AppendLog(ctx, jobID, chunk)
+		if err := s.AppendLog(ctx, jobID, chunk); err != nil {
+			return 0, false, err
+		}
+		return 0, false, nil
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return err
+		return 0, false, err
 	}
 	defer tx.Rollback(ctx)
 
@@ -567,13 +582,13 @@ func (s *Store) AppendLogCapped(ctx context.Context, jobID int64, chunk string, 
 		        COALESCE((SELECT sum(octet_length(chunk)) FROM job_logs WHERE job_id=j.id), 0)
 		 FROM jobs j WHERE j.id=$1`, jobID).Scan(&truncated, &used)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrNotFound
+		return 0, false, ErrNotFound
 	}
 	if err != nil {
-		return err
+		return 0, false, err
 	}
 	if truncated {
-		return tx.Commit(ctx) // already capped — drop
+		return used, false, tx.Commit(ctx) // already capped — drop
 	}
 	if used+int64(len(chunk)) > capBytes {
 		// Store the portion that still fits under the cap, then a single
@@ -582,27 +597,27 @@ func (s *Store) AppendLogCapped(ctx context.Context, jobID int64, chunk string, 
 			if _, err := tx.Exec(ctx,
 				`INSERT INTO job_logs (job_id, chunk) VALUES ($1,$2)`,
 				jobID, chunk[:remaining]); err != nil {
-				return err
+				return 0, false, err
 			}
+			used += remaining
 		}
-		notice := fmt.Sprintf(
-			"\n[forge] log truncated: job exceeded MAX_JOB_LOG_BYTES (%d bytes); further output dropped\n",
-			capBytes)
+		notice := TruncationNotice(capBytes)
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO job_logs (job_id, chunk) VALUES ($1,$2)`, jobID, notice); err != nil {
-			return err
+			return 0, false, err
 		}
+		used += int64(len(notice))
 		if _, err := tx.Exec(ctx,
 			`UPDATE jobs SET log_truncated=TRUE WHERE id=$1`, jobID); err != nil {
-			return err
+			return 0, false, err
 		}
-		return tx.Commit(ctx)
+		return used, true, tx.Commit(ctx)
 	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO job_logs (job_id, chunk) VALUES ($1,$2)`, jobID, chunk); err != nil {
-		return err
+		return 0, false, err
 	}
-	return tx.Commit(ctx)
+	return used + int64(len(chunk)), false, tx.Commit(ctx)
 }
 
 // ---- retention GC ----
@@ -699,6 +714,96 @@ func (s *Store) GetLogs(ctx context.Context, jobID int64) (string, error) {
 		}
 	}
 	return logs, nil
+}
+
+// ---- log archive pointer (LOG_BACKEND=redis) ----
+
+// JobLogMeta bundles the fields the log read/archive paths need without pulling
+// the whole job row: current status, the archive pointer (nil objectKey = not
+// archived), the archived byte length, and the truncation flag.
+type JobLogMeta struct {
+	Status    string
+	ObjectKey *string
+	TotalByte int64
+	Truncated bool
+}
+
+// GetJobLogMeta returns the log-relevant fields for a job. ErrNotFound when the
+// job does not exist.
+func (s *Store) GetJobLogMeta(ctx context.Context, jobID int64) (JobLogMeta, error) {
+	var m JobLogMeta
+	err := s.pool.QueryRow(ctx,
+		`SELECT status, log_object_key, log_total_bytes, log_truncated
+		 FROM jobs WHERE id=$1`, jobID).
+		Scan(&m.Status, &m.ObjectKey, &m.TotalByte, &m.Truncated)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return m, ErrNotFound
+	}
+	return m, err
+}
+
+// SetLogPointer records where a finished job's archived log landed in the blob
+// store (objectKey may be "" when the job produced no output), its byte length,
+// and the truncation flag. Setting a non-NULL object key marks the job archived
+// so the scheduler's safety-net sweep skips it.
+func (s *Store) SetLogPointer(ctx context.Context, jobID int64, objectKey string, totalBytes int64, truncated bool) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE jobs SET log_object_key=$2, log_total_bytes=$3, log_truncated=$4 WHERE id=$1`,
+		jobID, objectKey, totalBytes, truncated)
+	return err
+}
+
+// TerminalUnarchivedJobs returns ids of jobs that reached a terminal state but
+// were never archived (log_object_key IS NULL) within the recent window. It is
+// the scheduler's safety net for jobs that die WITHOUT a runner complete call
+// (stale/overdue/canceled-while-pending), whose Redis buffers would otherwise
+// expire unflushed. Bounded by `within` so we never rescan ancient history.
+func (s *Store) TerminalUnarchivedJobs(ctx context.Context, within time.Duration, limit int) ([]int64, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id FROM jobs
+		 WHERE status IN ('success','failed','canceled')
+		   AND log_object_key IS NULL
+		   AND finished_at IS NOT NULL
+		   AND finished_at > now() - $1::interval
+		 ORDER BY finished_at LIMIT $2`, within.String(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// ExpiredLogObjectKeys returns the blob keys of archived job logs belonging to
+// pipelines older than the retention window, so the caller can delete the
+// objects from the blob store before the DB rows cascade away. Empty-string
+// keys (jobs that produced no output) are skipped.
+func (s *Store) ExpiredLogObjectKeys(ctx context.Context, olderThan time.Duration) ([]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT j.log_object_key FROM jobs j
+		 JOIN pipelines p ON p.id = j.pipeline_id
+		 WHERE p.created_at < now() - $1::interval
+		   AND j.log_object_key IS NOT NULL AND j.log_object_key <> ''`, olderThan.String())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var keys []string
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			return nil, err
+		}
+		keys = append(keys, k)
+	}
+	return keys, rows.Err()
 }
 
 // ---- approvals ----
@@ -928,10 +1033,15 @@ func (s *Store) Heartbeat(ctx context.Context, jobID int64) (cancel bool, err er
 //
 // It is idempotent: a job that already left 'running' yields ErrNotFound so a
 // late/duplicate report from the runner is a no-op.
-func (s *Store) CompleteJob(ctx context.Context, jobID int64, status string, exitCode int) (string, error) {
+//
+// On a retry it returns a non-empty note (the "attempt N/M …" separator) which
+// the caller appends to the job's log through the active log backend, so the
+// separator lands in the right place whether logs live in Postgres or Redis
+// (CompleteJob no longer writes log bodies itself — see internal/logstore).
+func (s *Store) CompleteJob(ctx context.Context, jobID int64, status string, exitCode int) (final, note string, err error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer tx.Rollback(ctx)
 
@@ -942,10 +1052,10 @@ func (s *Store) CompleteJob(ctx context.Context, jobID int64, status string, exi
 		 WHERE id=$1 AND status='running' FOR UPDATE`, jobID).
 		Scan(&attempt, &maxAttempts, &cancelReq)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", ErrNotFound
+		return "", "", ErrNotFound
 	}
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	// requeue for graceful drain: back to the queue, same attempt.
@@ -953,9 +1063,9 @@ func (s *Store) CompleteJob(ctx context.Context, jobID int64, status string, exi
 		if _, err := tx.Exec(ctx,
 			`UPDATE jobs SET status='pending', started_at=NULL, heartbeat_at=NULL,
 			        runner_id=NULL, exit_code=NULL WHERE id=$1`, jobID); err != nil {
-			return "", err
+			return "", "", err
 		}
-		return "pending", tx.Commit(ctx)
+		return "pending", "", tx.Commit(ctx)
 	}
 
 	// Cancellation wins over the reported status: a killed job may surface as
@@ -964,9 +1074,9 @@ func (s *Store) CompleteJob(ctx context.Context, jobID int64, status string, exi
 		if _, err := tx.Exec(ctx,
 			`UPDATE jobs SET status='canceled', exit_code=$2, finished_at=now(),
 			        cancel_requested=FALSE WHERE id=$1`, jobID, exitCode); err != nil {
-			return "", err
+			return "", "", err
 		}
-		return "canceled", tx.Commit(ctx)
+		return "canceled", "", tx.Commit(ctx)
 	}
 
 	// Retry a plain failure (not a timeout-kill: exit 124) while attempts remain.
@@ -974,23 +1084,19 @@ func (s *Store) CompleteJob(ctx context.Context, jobID int64, status string, exi
 		if _, err := tx.Exec(ctx,
 			`UPDATE jobs SET status='pending', attempt=attempt+1, started_at=NULL,
 			        heartbeat_at=NULL, runner_id=NULL, exit_code=NULL WHERE id=$1`, jobID); err != nil {
-			return "", err
+			return "", "", err
 		}
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO job_logs (job_id, chunk) VALUES ($1,$2)`, jobID,
-			fmt.Sprintf("\n[forge] attempt %d/%d failed (exit %d); retrying (attempt %d/%d)\n",
-				attempt, maxAttempts, exitCode, attempt+1, maxAttempts)); err != nil {
-			return "", err
-		}
-		return "pending", tx.Commit(ctx)
+		note = fmt.Sprintf("\n[forge] attempt %d/%d failed (exit %d); retrying (attempt %d/%d)\n",
+			attempt, maxAttempts, exitCode, attempt+1, maxAttempts)
+		return "pending", note, tx.Commit(ctx)
 	}
 
 	if _, err := tx.Exec(ctx,
 		`UPDATE jobs SET status=$2, exit_code=$3, finished_at=now()
 		 WHERE id=$1`, jobID, status, exitCode); err != nil {
-		return "", err
+		return "", "", err
 	}
-	return status, tx.Commit(ctx)
+	return status, "", tx.Commit(ctx)
 }
 
 // ---- cancellation ----

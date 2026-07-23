@@ -15,6 +15,17 @@ services:
       timeout: 2s
       retries: 15
 
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "6379:6379" # live log buffer + pub/sub fan-out (LOG_BACKEND=redis)
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
   server:
     profiles: [full]
     build:
@@ -22,10 +33,16 @@ services:
       dockerfile: deploy/Dockerfile.server
     environment:
       DATABASE_URL: postgres://forge:forge@postgres:5432/forge?sslmode=disable
+      # High-volume log tier: Redis live buffer + blob archive. Unset LOG_BACKEND
+      # would still pick redis because REDIS_URL is set; it is explicit here.
+      REDIS_URL: redis://redis:6379/0
+      LOG_BACKEND: redis
     ports:
       - "8080:8080"
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
   runner:

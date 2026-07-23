@@ -231,6 +231,20 @@ CREATE TABLE IF NOT EXISTS runner_tokens (
 -- flag so further chunks are dropped without re-noticing.
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS log_truncated BOOLEAN NOT NULL DEFAULT FALSE;
 
+-- High-volume log archive pointer (LOG_BACKEND=redis). When a job reaches a
+-- terminal state its full log is flushed from the Redis live buffer to the blob
+-- store as one object; the pointer below records where it landed so finished
+-- jobs are read straight from object storage and never accumulate bodies in
+-- Postgres. NULL log_object_key means "not archived yet" (still in Redis, or
+-- the postgres backend which keeps bodies in job_logs). An empty-string key
+-- means "archived, but the job produced no output" (nothing was written to the
+-- blob store). log_total_bytes is the archived byte length.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS log_object_key  TEXT;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS log_total_bytes BIGINT NOT NULL DEFAULT 0;
+-- Serves the scheduler's "archive terminal-but-unarchived jobs" safety-net scan.
+CREATE INDEX IF NOT EXISTS jobs_log_unarchived_idx
+    ON jobs (finished_at) WHERE log_object_key IS NULL AND finished_at IS NOT NULL;
+
 -- Append-only audit trail of approval decisions.
 CREATE TABLE IF NOT EXISTS job_approvals (
     id         BIGSERIAL PRIMARY KEY,

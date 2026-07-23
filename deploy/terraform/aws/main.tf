@@ -64,6 +64,23 @@ module "artifacts" {
   tags          = var.tags
 }
 
+# Managed Redis (ElastiCache) for the high-volume log tier. Disable
+# (create_redis=false) to bundle the chart's in-cluster Redis instead.
+module "cache" {
+  count  = var.create_redis ? 1 : 0
+  source = "../modules/aws-redis"
+  name   = var.name
+
+  vpc_id              = local.vpc_id
+  subnet_ids          = local.private_subnet_ids
+  allowed_cidr_blocks = [local.vpc_cidr]
+
+  node_type                  = var.redis_node_type
+  num_cache_clusters         = var.redis_num_nodes
+  transit_encryption_enabled = var.redis_transit_encryption
+  tags                       = var.tags
+}
+
 module "secret" {
   source                = "../modules/aws-secret"
   secret_name           = "${var.name}/app"
@@ -94,6 +111,11 @@ module "forge" {
     access_key = module.artifacts.s3_access_key
     secret_key = module.artifacts.s3_secret_key
   }
+
+  # Log tier: managed Redis when provisioned, else bundle in-cluster Redis.
+  log_backend   = var.log_backend
+  redis_url     = var.create_redis ? module.cache[0].redis_url : ""
+  redis_enabled = !var.create_redis
 
   image_registry     = var.image_registry
   runner_mode        = var.runner_mode

@@ -12,6 +12,7 @@ import (
 
 	"github.com/priytamjeepandey/forge-ci/internal/api"
 	"github.com/priytamjeepandey/forge-ci/internal/blob"
+	"github.com/priytamjeepandey/forge-ci/internal/logstore"
 	"github.com/priytamjeepandey/forge-ci/internal/scheduler"
 	"github.com/priytamjeepandey/forge-ci/internal/store"
 )
@@ -44,9 +45,14 @@ func main() {
 	}
 	slog.Info("artifact store configured", "backend", blobs.Kind())
 
-	go scheduler.New(st, blobs).Run(ctx)
+	// High-volume log tier: redis live buffer + blob archive, or the postgres
+	// fallback. Backend is resolved from LOG_BACKEND / REDIS_URL (see logstore).
+	logs := logstore.Resolve(ctx, st, blobs)
+	defer logs.Close()
 
-	srv := &http.Server{Addr: addr, Handler: api.New(st, blobs)}
+	go scheduler.New(st, blobs, logs).Run(ctx)
+
+	srv := &http.Server{Addr: addr, Handler: api.New(st, blobs, logs)}
 	go func() {
 		<-ctx.Done()
 		_ = srv.Shutdown(context.Background())

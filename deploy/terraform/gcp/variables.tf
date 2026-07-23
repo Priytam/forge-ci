@@ -152,6 +152,31 @@ variable "db_deletion_protection" {
   default = true
 }
 
+# ---- Redis (log tier) ----
+
+variable "create_redis" {
+  description = "Provision managed Memorystore Redis for the log tier. false = bundle the chart's in-cluster Redis instead."
+  type        = bool
+  default     = true
+}
+
+variable "redis_tier" {
+  description = "BASIC (single node) or STANDARD_HA (failover replica)."
+  type        = string
+  default     = "BASIC"
+}
+
+variable "redis_memory_gb" {
+  type    = number
+  default = 1
+}
+
+variable "log_backend" {
+  description = "LOG_BACKEND: '' (auto), 'redis', or 'postgres'."
+  type        = string
+  default     = "redis"
+}
+
 # ---- Artifacts ----
 
 variable "artifacts_bucket_name" {

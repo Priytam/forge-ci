@@ -11,26 +11,31 @@ import (
 	"time"
 
 	"github.com/priytamjeepandey/forge-ci/internal/blob"
+	"github.com/priytamjeepandey/forge-ci/internal/logstore"
 	"github.com/priytamjeepandey/forge-ci/internal/store"
 )
 
 type Scheduler struct {
-	store      *store.Store
-	blobs      blob.Store
-	tick       time.Duration
-	staleAfter time.Duration
-	gcEvery    time.Duration // retention GC cadence
-	retention  time.Duration // RETENTION_DAYS as a duration; 0 = keep forever
+	store        *store.Store
+	blobs        blob.Store
+	logs         *logstore.Service
+	tick         time.Duration
+	staleAfter   time.Duration
+	gcEvery      time.Duration // retention GC cadence
+	archiveEvery time.Duration // log-archive safety-net sweep cadence
+	retention    time.Duration // RETENTION_DAYS as a duration; 0 = keep forever
 }
 
-func New(s *store.Store, blobs blob.Store) *Scheduler {
+func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Scheduler {
 	return &Scheduler{
-		store:      s,
-		blobs:      blobs,
-		tick:       time.Second,
-		staleAfter: 90 * time.Second,
-		gcEvery:    time.Hour,
-		retention:  retentionWindow(),
+		store:        s,
+		blobs:        blobs,
+		logs:         logs,
+		tick:         time.Second,
+		staleAfter:   90 * time.Second,
+		gcEvery:      time.Hour,
+		archiveEvery: 30 * time.Second,
+		retention:    retentionWindow(),
 	}
 }
 
@@ -51,6 +56,8 @@ func (sc *Scheduler) Run(ctx context.Context) {
 	defer t.Stop()
 	gc := time.NewTicker(sc.gcEvery)
 	defer gc.Stop()
+	archive := time.NewTicker(sc.archiveEvery)
+	defer archive.Stop()
 	// Run one GC pass shortly after startup so operators see it work without
 	// waiting a full hour.
 	firstGC := time.After(30 * time.Second)
@@ -60,11 +67,28 @@ func (sc *Scheduler) Run(ctx context.Context) {
 			return
 		case <-t.C:
 			sc.step(ctx)
+		case <-archive.C:
+			sc.archivePending(ctx)
 		case <-firstGC:
 			sc.gc(ctx)
 		case <-gc.C:
 			sc.gc(ctx)
 		}
+	}
+}
+
+// archivePending is the log-archive safety net: it flushes to the blob store the
+// logs of jobs that reached a terminal state WITHOUT a runner complete call
+// (stale/overdue/canceled-while-pending), whose Redis live buffers would
+// otherwise expire unflushed. No-op for the postgres log backend.
+func (sc *Scheduler) archivePending(ctx context.Context) {
+	n, err := sc.logs.ArchivePending(ctx)
+	if err != nil {
+		slog.Error("archive pending logs", "err", err)
+		return
+	}
+	if n > 0 {
+		slog.Info("archived terminal-but-unflushed job logs", "jobs", n)
 	}
 }
 
@@ -87,8 +111,8 @@ func (sc *Scheduler) gc(ctx context.Context) {
 		slog.Info("gc: deleted expired webhook deliveries", "rows", n)
 	}
 
-	// Delete artifact blobs first (we still have the DB rows to find them),
-	// then cascade-delete the pipeline rows.
+	// Delete artifact blobs and archived log objects first (we still have the DB
+	// rows to find their keys), then cascade-delete the pipeline rows.
 	keys, err := sc.store.ExpiredArtifactBlobKeys(ctx, sc.retention)
 	if err != nil {
 		slog.Error("gc: list expired artifact blobs", "err", err)
@@ -102,14 +126,27 @@ func (sc *Scheduler) gc(ctx context.Context) {
 		}
 		blobsDeleted++
 	}
+	logKeys, err := sc.store.ExpiredLogObjectKeys(ctx, sc.retention)
+	if err != nil {
+		slog.Error("gc: list expired log objects", "err", err)
+		return
+	}
+	logsDeleted := 0
+	for _, k := range logKeys {
+		if err := sc.blobs.Delete(ctx, k); err != nil {
+			slog.Error("gc: delete log object", "err", err, "key", k)
+			continue
+		}
+		logsDeleted++
+	}
 	n, err := sc.store.DeleteExpiredPipelines(ctx, sc.retention)
 	if err != nil {
 		slog.Error("gc: delete expired pipelines", "err", err)
 		return
 	}
-	if n > 0 || blobsDeleted > 0 {
+	if n > 0 || blobsDeleted > 0 || logsDeleted > 0 {
 		slog.Info("gc: retention sweep", "pipelines", n, "artifact_blobs", blobsDeleted,
-			"retention", sc.retention)
+			"log_objects", logsDeleted, "retention", sc.retention)
 	}
 }
 

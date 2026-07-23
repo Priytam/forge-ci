@@ -15,6 +15,7 @@ import (
 
 	"github.com/priytamjeepandey/forge-ci/internal/blob"
 	"github.com/priytamjeepandey/forge-ci/internal/compiler"
+	"github.com/priytamjeepandey/forge-ci/internal/logstore"
 	"github.com/priytamjeepandey/forge-ci/internal/proto"
 	"github.com/priytamjeepandey/forge-ci/internal/store"
 )
@@ -33,6 +34,7 @@ const (
 type Server struct {
 	store *store.Store
 	blobs blob.Store
+	logs  *logstore.Service // high-volume log tier (redis live buffer + blob archive, or postgres)
 	mux   *http.ServeMux
 	sso   ssoCache
 
@@ -47,10 +49,11 @@ type Server struct {
 	maskBuf map[int64]string
 }
 
-func New(s *store.Store, blobs blob.Store) *Server {
+func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 	srv := &Server{
 		store:            s,
 		blobs:            blobs,
+		logs:             logs,
 		mux:              http.NewServeMux(),
 		runnerAuth:       runnerAuthMode(),
 		maxJobLogBytes:   envBytes("MAX_JOB_LOG_BYTES", defaultMaxJobLogBytes),
@@ -68,11 +71,13 @@ func New(s *store.Store, blobs blob.Store) *Server {
 	m.HandleFunc("GET /api/v1/repos", srv.listRepos)
 	m.HandleFunc("GET /api/v1/stats", srv.dashboardStats)
 	m.HandleFunc("GET /api/v1/jobs/{id}/logs", srv.getLogs)
+	m.HandleFunc("GET /api/v1/jobs/{id}/logs/stream", srv.streamLogs)
 	m.HandleFunc("POST /api/v1/jobs/{id}/approvals", srv.approve)
 	m.HandleFunc("POST /api/v1/jobs/{id}/cancel", srv.cancelJob)
 	m.HandleFunc("GET /api/v1/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
+	m.HandleFunc("GET /api/v1/metrics", srv.metrics)
 
 	// Runner protocol.
 	m.HandleFunc("POST /api/v1/runner/acquire", srv.acquire)
@@ -253,20 +258,57 @@ func (s *Server) getPipeline(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"pipeline": p, "jobs": jobs})
 }
 
+// getLogs serves a job's log two ways, chosen by the presence of ?offset:
+//
+//   - no ?offset       → the full log as text/plain (back-compat: the current
+//     web client GETs .../logs and renders the whole body). Byte-identical to
+//     the legacy path.
+//   - ?offset=N        → JSON {bytes, next_offset, eof} carrying only the bytes
+//     from N to the current end, for incremental polling by the UI/CLI.
+//
+// Both honor masking and both resolve running jobs from the live buffer and
+// finished jobs from the archived object (redis backend) or job_logs (postgres).
 func (s *Server) getLogs(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(r)
 	if !ok {
 		writeErr(w, http.StatusBadRequest, "invalid job id")
 		return
 	}
-	logs, err := s.store.GetLogs(r.Context(), id)
+	offStr := r.URL.Query().Get("offset")
+	if offStr == "" {
+		logs, err := s.logs.FullText(r.Context(), id)
+		if err != nil {
+			slog.Error("get logs", "err", err)
+			writeErr(w, http.StatusInternalServerError, "failed to load logs")
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = io.WriteString(w, logs)
+		return
+	}
+	offset, err := strconv.ParseInt(offStr, 10, 64)
+	if err != nil || offset < 0 {
+		writeErr(w, http.StatusBadRequest, "offset must be a non-negative integer")
+		return
+	}
+	d, err := s.logs.ReadDelta(r.Context(), id, offset)
 	if err != nil {
-		slog.Error("get logs", "err", err)
+		slog.Error("get logs incremental", "err", err)
 		writeErr(w, http.StatusInternalServerError, "failed to load logs")
 		return
 	}
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = io.WriteString(w, logs)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"bytes":       string(d.Bytes),
+		"next_offset": d.NextOffset,
+		"eof":         d.EOF,
+	})
+}
+
+// metrics exposes the log-tier counters in Prometheus text format. It is a GET
+// (CSRF-exempt) and auth-exempt (see authExempt) so a scraper needs no session.
+func (s *Server) metrics(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	_, _ = io.WriteString(w, s.logs.Metrics().Render(s.logs.Backend()))
 }
 
 func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
@@ -428,9 +470,12 @@ func (s *Server) pushLogs(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
-	if err := s.store.AppendLogCapped(r.Context(), id, chunk, s.maxJobLogBytes); err != nil {
-		slog.Error("push logs", "err", err)
-		writeErr(w, http.StatusInternalServerError, "failed to store logs")
+	if _, err := s.logs.Append(r.Context(), id, []byte(chunk), s.maxJobLogBytes); err != nil {
+		// Degrade rather than hang the runner: a log-tier write failure (e.g.
+		// Redis blip) is logged and counted, but we still ACK so the job keeps
+		// running. The bytes for this window are lost; the job is not.
+		slog.Error("push logs", "err", err, "job", id, "backend", s.logs.Backend())
+		w.WriteHeader(http.StatusAccepted)
 		return
 	}
 	w.WriteHeader(http.StatusAccepted)
@@ -515,7 +560,7 @@ func (s *Server) flushMaskTail(ctx context.Context, jobID int64) {
 		return
 	}
 	masked, _ := s.store.MaskedValuesForJob(ctx, jobID)
-	if err := s.store.AppendLogCapped(ctx, jobID, maskAll(tail, masked), s.maxJobLogBytes); err != nil {
+	if _, err := s.logs.Append(ctx, jobID, []byte(maskAll(tail, masked)), s.maxJobLogBytes); err != nil {
 		slog.Error("flush log tail", "err", err, "job", jobID)
 	}
 }
@@ -572,7 +617,7 @@ func (s *Server) complete(w http.ResponseWriter, r *http.Request) {
 	}
 	// Flush any carried-over log tail for this job before it leaves 'running'.
 	s.flushMaskTail(r.Context(), id)
-	final, err := s.store.CompleteJob(r.Context(), id, req.Status, req.ExitCode)
+	final, note, err := s.store.CompleteJob(r.Context(), id, req.Status, req.ExitCode)
 	if errors.Is(err, store.ErrNotFound) {
 		// Job already transitioned (e.g. failed as stale) — not the runner's problem.
 		w.WriteHeader(http.StatusConflict)
@@ -582,6 +627,21 @@ func (s *Server) complete(w http.ResponseWriter, r *http.Request) {
 		slog.Error("complete", "err", err)
 		writeErr(w, http.StatusInternalServerError, "failed to complete job")
 		return
+	}
+	// A retry emits an "attempt N/M …" separator; append it through the active
+	// log backend so it lands in the buffer that survives the requeue.
+	if note != "" {
+		if _, err := s.logs.Append(r.Context(), id, []byte(note), s.maxJobLogBytes); err != nil {
+			slog.Error("append retry note", "err", err, "job", id)
+		}
+	}
+	// On a terminal transition, flush the job's log to the blob archive (redis
+	// backend only; no-op for postgres). Best-effort — the scheduler safety-net
+	// sweep re-archives anything missed.
+	if final == "success" || final == "failed" || final == "canceled" {
+		if err := s.logs.Archive(r.Context(), id); err != nil {
+			slog.Error("archive log", "err", err, "job", id)
+		}
 	}
 	slog.Info("job completed", "job", id, "reported", req.Status, "final", final, "exit_code", req.ExitCode)
 	w.WriteHeader(http.StatusOK)

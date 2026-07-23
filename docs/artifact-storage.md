@@ -19,6 +19,17 @@ runners need no storage credentials (they never talk to the store directly).
 The `s3` backend speaks the S3 API and therefore covers AWS S3, MinIO, and
 Google Cloud Storage (interoperability mode) with the same configuration.
 
+## The store also holds archived job logs
+
+With the **redis log backend** (`LOG_BACKEND=redis`), each finished job's full
+log is flushed from its Redis live buffer to this same blob store as one object,
+keyed `logs/job-<id>.log`; Postgres keeps only a pointer. So the configured
+backend (local dir or S3-compatible) holds **two** kinds of object — artifact
+archives (`job-<id>/…`) and job logs (`logs/job-<id>.log`) — and no extra
+configuration is needed. See
+[log-ingestion-design.md](log-ingestion-design.md). The postgres log backend
+keeps log bodies in the database and writes no log objects.
+
 ## Size cap and retention GC
 
 - **`MAX_ARTIFACT_BYTES`** caps a single artifact upload. Oversize uploads are
@@ -30,7 +41,8 @@ Google Cloud Storage (interoperability mode) with the same configuration.
 - **`RETENTION_DAYS`** (default `30`, `0` = keep forever) drives an hourly
   retention GC on the server: expired login sessions are always collected, and
   pipelines older than the window are deleted (cascading their jobs, logs and
-  artifact rows) **and their artifact blobs are removed from the blob store**.
+  artifact rows) **and their artifact blobs *and archived log objects* are
+  removed from the blob store**.
 
 ## Option A — local disk (default, dev)
 

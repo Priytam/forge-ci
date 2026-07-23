@@ -55,6 +55,29 @@ variable "webhook_secret" {
   default     = ""
 }
 
+variable "redis_url" {
+  description = "Managed Redis URL for the log tier (REDIS_URL). Empty = use the bundled in-cluster Redis (redis_enabled) or fall back to the postgres log backend."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "redis_enabled" {
+  description = "Bundle the chart's in-cluster Redis subchart. Keep false when using a managed Redis (redis_url)."
+  type        = bool
+  default     = false
+}
+
+variable "log_backend" {
+  description = "LOG_BACKEND: '' (auto), 'redis', or 'postgres'."
+  type        = string
+  default     = "redis"
+  validation {
+    condition     = contains(["", "redis", "postgres"], var.log_backend)
+    error_message = "log_backend must be '', 'redis', or 'postgres'."
+  }
+}
+
 variable "artifact_store" {
   description = "local | s3"
   type        = string

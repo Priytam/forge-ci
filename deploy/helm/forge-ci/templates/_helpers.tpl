@@ -130,6 +130,30 @@ existingSecret the operator supplies DATABASE_URL themselves.
 {{- end -}}
 
 {{/*
+Assembled REDIS_URL for the high-volume log tier. Precedence:
+  1. secrets.redisUrl (explicit override — a managed Redis with a password)
+  2. bundled bitnami/redis subchart service (when redis.enabled)
+  3. redis.url (external managed Redis)
+Empty when none apply — the server then falls back to the postgres log backend.
+Only used when generating the Secret; with an existingSecret the operator
+supplies REDIS_URL themselves.
+*/}}
+{{- define "forge-ci.redisUrl" -}}
+{{- if .Values.secrets.redisUrl -}}
+{{- .Values.secrets.redisUrl -}}
+{{- else if .Values.redis.enabled -}}
+{{- $host := printf "%s-redis-master" .Release.Name -}}
+{{- if .Values.redis.auth.enabled -}}
+{{- printf "redis://:%s@%s:6379/0" .Values.redis.auth.password $host -}}
+{{- else -}}
+{{- printf "redis://%s:6379/0" $host -}}
+{{- end -}}
+{{- else -}}
+{{- .Values.redis.url -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 ServiceAccount name for the server component.
 */}}
 {{- define "forge-ci.server.serviceAccountName" -}}

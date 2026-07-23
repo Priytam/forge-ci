@@ -117,8 +117,12 @@ Public:
 - `GET  /api/v1/pipelines/{id}` — includes per-stage statuses and jobs
 - `POST /api/v1/pipelines/{id}/cancel` — cancel the whole pipeline (all non-terminal jobs); idempotent
 - `POST /api/v1/jobs/{id}/cancel` — cancel a single job (created/pending/blocked → canceled; running → stopped via heartbeat); idempotent
-- `GET  /api/v1/jobs/{id}/logs` (plain text; masked values re-masked on read)
+- `GET  /api/v1/jobs/{id}/logs` — full log as `text/plain` (masked; back-compat), or
+  `?offset=N` → JSON `{bytes, next_offset, eof}` for incremental polling
+- `GET  /api/v1/jobs/{id}/logs/stream[?offset=N]` — SSE live tail (`text/event-stream`);
+  `log` events then a final `eof` event on terminal state
 - `POST /api/v1/jobs/{id}/approvals` `{approver, verdict: approved|rejected, comment}`
+- `GET  /api/v1/metrics` — Prometheus-format log-tier counters (auth-exempt)
 
 Cancel and other mutating routes use the same authz as the rest of the API:
 open in bootstrap mode, admin session required once SSO is enforced.
@@ -147,6 +151,8 @@ the dev experience):
 | `ADMIN_EMAILS` | comma-separated platform-admin emails (enforced once SSO is on) | — |
 | `EXTERNAL_URL` | server's public origin (SSO redirect + CSRF allow-list) | `http://localhost:8080` |
 | `FRONTEND_URL` | dashboard origin (post-login redirect + CSRF allow-list) | `http://localhost:5173` |
+| `REDIS_URL` | Redis for the high-volume log tier (live buffer + pub/sub fan-out), e.g. `redis://localhost:6379/0` | — |
+| `LOG_BACKEND` | `redis` \| `postgres`; empty auto-selects redis when `REDIS_URL` is set+reachable, else postgres | — (auto) |
 | `MAX_JOB_LOG_BYTES` | per-job cumulative log cap; excess truncated with a notice | `10485760` (10 MiB) |
 | `MAX_ARTIFACT_BYTES` | per-upload artifact cap (`413` + cleanup on overflow); `0` disables | `524288000` (500 MiB) |
 | `RETENTION_DAYS` | delete pipelines, artifact blobs and webhook-dedup rows older than this; `0` = keep forever | `30` |
@@ -171,6 +177,7 @@ the dev experience):
 - [Registering runners (VM/systemd, Docker, Kubernetes)](docs/runners.md)
 - [Kubernetes executor: deployment, access & RBAC (incl. separate-cluster)](docs/kubernetes-deployment.md)
 - [Artifact storage (local, MinIO, S3, GCS)](docs/artifact-storage.md)
+- [High-volume log architecture (Redis live buffer, blob archive, SSE)](docs/log-ingestion-design.md)
 - [Roles, membership & approval rules](docs/rbac-approvals.md)
 - [SSO setup: Google, Microsoft, GitHub](docs/sso.md)
 - [Cloud deployment (Helm chart + Terraform/OpenTofu for AWS & GCP)](docs/cloud-deployment.md)
@@ -198,8 +205,13 @@ the dev experience):
 
 - Identity comes from SSO sessions; with SSO in open mode there is no authz
   (bootstrap). Enable a provider and set `ADMIN_EMAILS` before real use.
-- Logs live in Postgres. Masked values are redacted per chunk, across chunk
-  boundaries (a carry-over tail per job), and re-masked on read as a backstop.
+- Logs use a swappable backend (`LOG_BACKEND`): **redis** keeps each running
+  job's log in a capped Redis buffer with pub/sub live-tail, then archives the
+  finished log to the blob store as one object (Postgres holds only a pointer);
+  **postgres** (dev/no-Redis) keeps bodies in `job_logs`. See
+  [docs/log-ingestion-design.md](docs/log-ingestion-design.md). Masked values are
+  redacted per chunk, across chunk boundaries (a carry-over tail per job), and
+  re-masked on full-text reads as a backstop.
 - Secret encryption uses a single `FORGE_SECRET_KEY` (no per-key rotation or
   external KMS/Vault yet); rotating the key requires re-encrypting rows.
 - No caching, `rules:`, includes, matrix, retries, or scheduled pipelines yet.

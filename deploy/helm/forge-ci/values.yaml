@@ -227,6 +227,13 @@ config:
   maxArtifactBytes: "524288000"   # 500 MiB; 0 disables
   retentionDays: "30"             # 0 = keep forever
 
+  # High-volume log backend (LOG_BACKEND):
+  #   ""        -> auto: redis when a REDIS_URL is available, else postgres
+  #   redis     -> live buffer in Redis + one archived object per finished job
+  #   postgres  -> log bodies in Postgres (dev / no-Redis; unchanged behavior)
+  # A LOG_BACKEND=redis that cannot reach Redis degrades to postgres at startup.
+  logBackend: ""
+
   artifacts:
     # local | s3 (s3 = any S3-compatible store: AWS S3, GCS interop, MinIO)
     store: local
@@ -256,7 +263,8 @@ secrets:
   # ...or reference a pre-existing Secret (from Vault / External Secrets /
   # SealedSecrets). When set, `create` is ignored and the Secret is NOT
   # rendered. It MUST contain: DATABASE_URL, FORGE_SECRET_KEY, RUNNER_TOKEN,
-  # WEBHOOK_SECRET, and (when artifacts.store=s3) S3_SECRET_KEY.
+  # WEBHOOK_SECRET, (when artifacts.store=s3) S3_SECRET_KEY, and (when the redis
+  # log backend is used with a managed Redis) REDIS_URL.
   existingSecret: ""
 
   # base64 32-byte AES-256-GCM key. Empty = plaintext passthrough (INSECURE).
@@ -268,6 +276,9 @@ secrets:
   webhookSecret: ""
   # S3 secret key (only used when config.artifacts.store=s3).
   s3SecretKey: ""
+  # Override REDIS_URL (managed Redis with an embedded password). Leave empty to
+  # derive it: the bundled subchart's service when redis.enabled, else redis.url.
+  redisUrl: ""
 
 ## -----------------------------------------------------------------------------
 ## Database
@@ -290,6 +301,36 @@ postgresql:
     persistence:
       enabled: true
       size: 8Gi
+
+## -----------------------------------------------------------------------------
+## Redis — high-volume log tier (live buffer + pub/sub fan-out)
+## -----------------------------------------------------------------------------
+# The `redis:` map is shared: forge-ci reads `enabled`/`url`, and (when enabled)
+# the bundled bitnami/redis subchart reads the rest (auth/architecture/master).
+redis:
+  # Bundled bitnami/redis subchart. Disable to use a managed Redis (ElastiCache /
+  # Memorystore) via `url`, or to run without Redis (server falls back to the
+  # postgres log backend).
+  enabled: true
+
+  # External managed Redis — used ONLY when redis.enabled=false. Full URL, e.g.
+  #   redis://:password@forge.abc.cache.amazonaws.com:6379/0
+  # When it embeds a password, prefer supplying REDIS_URL via secrets.existingSecret
+  # (or secrets.redisUrl) instead of committing it here.
+  url: ""
+
+  # --- bitnami/redis subchart knobs (only when enabled=true) ---
+  # The live buffer is ephemeral (finished jobs are archived to the blob store),
+  # so a single standalone node with no persistence is the sensible dev default.
+  architecture: standalone
+  auth:
+    enabled: false         # dev default: no password on the in-cluster Redis
+    # password: ""         # set (and enable) to require AUTH
+  master:
+    persistence:
+      enabled: false       # buffer is transient; nothing to persist
+  replica:
+    replicaCount: 0
 
 ## -----------------------------------------------------------------------------
 ## Ingress — single host; /api -> server, / -> web

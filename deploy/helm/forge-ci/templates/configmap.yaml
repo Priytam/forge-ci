@@ -16,6 +16,7 @@ data:
   RETENTION_DAYS: {{ .Values.config.retentionDays | quote }}
   MAX_JOB_LOG_BYTES: {{ .Values.config.maxJobLogBytes | quote }}
   MAX_ARTIFACT_BYTES: {{ .Values.config.maxArtifactBytes | quote }}
+  LOG_BACKEND: {{ .Values.config.logBackend | quote }}
   {{/* EXTERNAL_URL / FRONTEND_URL: explicit value wins, else derive from ingress host. */}}
   {{- $scheme := "http" -}}
   {{- if and .Values.ingress.enabled .Values.ingress.tls.enabled }}{{ $scheme = "https" }}{{- end }}
