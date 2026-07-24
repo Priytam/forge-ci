@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/priytamjeepandey/forge-ci/internal/compiler"
 	"github.com/priytamjeepandey/forge-ci/internal/proto"
 )
 
@@ -121,6 +122,68 @@ func (s *Store) GetRepoConfig(ctx context.Context, repo string) (string, error) 
 	return config, err
 }
 
+// ---- include: templates ----
+
+// UpsertRepoTemplate registers (or replaces) a named pipeline fragment for a
+// repo. These fragments are what top-level include: [{template: name}] resolves
+// against — Forge has no repo file tree, so reusable YAML lives here.
+func (s *Store) UpsertRepoTemplate(ctx context.Context, repo, name, yml string) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO repo_templates (repo, name, yaml, updated_at)
+		 VALUES ($1,$2,$3, now())
+		 ON CONFLICT (repo, name) DO UPDATE SET yaml=EXCLUDED.yaml, updated_at=now()`,
+		repo, name, yml)
+	return err
+}
+
+// GetRepoTemplate returns one registered template's YAML. ErrNotFound when the
+// repo has no template by that name.
+func (s *Store) GetRepoTemplate(ctx context.Context, repo, name string) (string, error) {
+	var yml string
+	err := s.pool.QueryRow(ctx,
+		`SELECT yaml FROM repo_templates WHERE repo=$1 AND name=$2`, repo, name).Scan(&yml)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return yml, err
+}
+
+// ListRepoTemplates returns the names of a repo's registered templates.
+func (s *Store) ListRepoTemplates(ctx context.Context, repo string) ([]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT name FROM repo_templates WHERE repo=$1 ORDER BY name`, repo)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+// TemplateResolver builds a compiler.TemplateFunc bound to one repo, so the
+// compiler can resolve include: templates during Compile. ErrNotFound is
+// translated to (found=false) so the compiler can report a clear "not
+// registered" error.
+func (s *Store) TemplateResolver(ctx context.Context, repo string) compiler.TemplateFunc {
+	return func(name string) (string, bool, error) {
+		yml, err := s.GetRepoTemplate(ctx, repo, name)
+		if errors.Is(err, ErrNotFound) {
+			return "", false, nil
+		}
+		if err != nil {
+			return "", false, err
+		}
+		return yml, true, nil
+	}
+}
+
 func (s *Store) ListMembers(ctx context.Context, repo string) ([]proto.Member, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, repo, username, role FROM repo_members WHERE repo=$1 ORDER BY username`, repo)
@@ -185,7 +248,7 @@ func (s *Store) repoHasMembers(ctx context.Context, repo string) (bool, error) {
 }
 
 // resolveProtectedEnv returns the approval rule for (repo, env): the
-// repo-specific row if present, else the global (repo='') default, else nil.
+// repo-specific row if present, else the global (repo=”) default, else nil.
 func (s *Store) resolveProtectedEnv(ctx context.Context, repo, name string) (*proto.ProtectedEnvironment, error) {
 	var pe proto.ProtectedEnvironment
 	err := s.pool.QueryRow(ctx,

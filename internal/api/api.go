@@ -66,6 +66,7 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 	m.HandleFunc("GET /api/v1/jobs/{id}/logs/stream", srv.streamLogs)
 	m.HandleFunc("POST /api/v1/jobs/{id}/approvals", srv.approve)
 	m.HandleFunc("POST /api/v1/jobs/{id}/cancel", srv.cancelJob)
+	m.HandleFunc("POST /api/v1/jobs/{id}/play", srv.playJob)
 	m.HandleFunc("GET /api/v1/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -156,7 +157,7 @@ func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
 		}
 		req.SHA = sha
 	}
-	jobs, err := compiler.Compile(req.Config, req.Ref)
+	jobs, err := compiler.Compile(req.Config, req.Ref, compiler.SourceAPI, s.store.TemplateResolver(r.Context(), req.Repo))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -416,6 +417,37 @@ func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) {
 	}
 	slog.Info("job cancel requested", "job", id, "status", job.Status)
 	s.audit(r, "job.cancel", strconv.FormatInt(id, 10), "", "ok", map[string]any{"status": job.Status})
+	writeJSON(w, http.StatusOK, map[string]any{"job": job})
+}
+
+// playJob releases a gated manual job (rules when: manual). It returns the job
+// to 'created' so the scheduler runs it once its needs are met (and blocks it
+// for environment approval if it targets a protected environment).
+func (s *Server) playJob(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+	job, err := s.store.StartManualJob(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "job not found")
+		return
+	}
+	if errors.Is(err, store.ErrNotManual) {
+		writeErr(w, http.StatusConflict, "job is not a manual job awaiting play")
+		return
+	}
+	if err != nil {
+		slog.Error("play job", "err", err)
+		writeErr(w, http.StatusInternalServerError, "failed to play job")
+		return
+	}
+	slog.Info("manual job played", "job", id)
+	s.audit(r, "job.play", strconv.FormatInt(id, 10), "", "ok", nil)
 	writeJSON(w, http.StatusOK, map[string]any{"job": job})
 }
 

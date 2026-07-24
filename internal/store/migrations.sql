@@ -282,6 +282,30 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cancel_requested BOOLEAN NOT NULL DEFA
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS attempt      INT NOT NULL DEFAULT 1;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS max_attempts INT NOT NULL DEFAULT 1;
 
+-- Manual gate (rules when: manual, or job-level when: manual). A manual job is
+-- created in the 'blocked' state and does not run until it is explicitly played
+-- (POST /api/v1/jobs/{id}/play), which returns it to 'created' so the normal
+-- scheduler flow (needs / protected-environment) applies. It is distinct from
+-- the environment-approval 'blocked' state: the manual flag lets the scheduler
+-- and the approval endpoint tell the two apart.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS manual BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- allow_failure: when TRUE, this job failing does NOT block its dependents and
+-- is not counted as a pipeline failure for status derivation (GitLab semantics).
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS allow_failure BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- Reusable pipeline fragments referenced by top-level include: [{template: N}].
+-- Forge hosts no repo file tree and webhooks carry no file contents, so
+-- includes resolve against these per-repo registered templates by name rather
+-- than a filesystem path. repo scopes the template; name is unique per repo.
+CREATE TABLE IF NOT EXISTS repo_templates (
+    repo       TEXT        NOT NULL,
+    name       TEXT        NOT NULL,
+    yaml       TEXT        NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (repo, name)
+);
+
 -- Webhook delivery dedup: providers redeliver the same event (retries, manual
 -- redelivery). Recording each delivery id makes pipeline creation idempotent
 -- per (provider, delivery_id). Old rows are GC'd by the retention sweep.

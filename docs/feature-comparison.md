@@ -14,13 +14,14 @@ Legend: ✅ shipped · 🟡 partial · ❌ not yet (roadmap).
 |---|---|---|---|
 | YAML pipeline (stages, jobs, script, image) | ✅ | ✅ | |
 | DAG via `needs` | ✅ | ✅ | explicit must point to earlier stage |
-| Ref-conditional jobs (`only/except`, `rules:`) | ✅ rules engine | 🟡 `only/except` globs | `rules: if/changes/exists` engine next |
+| Ref-conditional jobs (`only/except`, `rules:`) | ✅ rules engine | ✅ `only/except` globs + `rules:` engine | `rules: if/when` with a safe expr evaluator; `changes/exists` are documented no-ops (no checkout at compile time) — see docs/pipeline-dsl.md |
 | `variables` at job level | ✅ | ✅ | |
 | Artifacts (`paths`) | ✅ + expiry, reports | 🟡 paths only | add `expire_in`, junit test reports |
 | Caching (keyed, per-lockfile) | ✅ | ❌ | biggest perceived-speed feature — high priority |
-| Templates: `include`, `extends`, anchors | ✅ | ❌ | needed for org-wide standards |
-| Matrix builds (`parallel:`) | ✅ | ❌ | |
-| Manual jobs (`when: manual`) | ✅ | 🟡 | approvals cover the gated case; plain manual next |
+| Templates: `include`, `extends`, anchors | ✅ | 🟡 `include` (per-repo templates) + `extends` | anchors N/A; remote/URL includes out of scope (no network fetch) — see docs/pipeline-dsl.md |
+| Matrix builds (`parallel:`) | ✅ | ✅ | `parallel: N` and `parallel: {matrix}` with `needs` fan-in |
+| Manual jobs (`when: manual`) | ✅ | ✅ | `rules`/job `when: manual` → gated `blocked`; `POST /jobs/{id}/play` releases; composes with env approval |
+| Allowed failures (`allow_failure`) | ✅ | ✅ | job-level or per-rule; dependents proceed, pipeline not failed |
 | Timeouts (per job + pipeline default) | ✅ | ✅ | runner group-kill + server backstop + queue timeout |
 | Retry policy | ✅ | ✅ | `retry: N` (0..10) + `default.retry`, attempt tracking; timeouts/cancels not retried |
 | Child/multi-project pipelines, triggers | ✅ | ❌ | |
@@ -98,4 +99,4 @@ view in GitLab's visual language:
 2. ~~Git clone step + commit-status write-back~~ ✅ shipped (makes it a *real* CI for GitHub/Bitbucket)
 3. Caching + k8s executor (speed and scale)
 4. Environments board with deploy history/rollback (ArgoCD lens, GitLab skin)
-5. `rules:`/`include`/matrix (authoring power) · WebSocket logs · scheduled pipelines
+5. ~~`rules:`/`include`/matrix (authoring power)~~ ✅ shipped (see docs/pipeline-dsl.md) · WebSocket logs · scheduled pipelines

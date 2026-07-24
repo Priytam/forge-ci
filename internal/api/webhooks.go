@@ -35,6 +35,47 @@ func (s *Server) registerWebhookRoutes() {
 	s.mux.HandleFunc("POST /api/v1/repo-configs/revert", s.revertRepoConfig)
 	s.mux.HandleFunc("POST /api/v1/repo-registry", s.registerRepo)
 	s.mux.HandleFunc("GET /api/v1/repo-registry", s.listRegisteredRepos)
+	s.mux.HandleFunc("PUT /api/v1/repo-templates", s.putRepoTemplate)
+	s.mux.HandleFunc("GET /api/v1/repo-templates", s.listRepoTemplates)
+}
+
+// putRepoTemplate registers (or replaces) a reusable pipeline fragment that
+// top-level include: [{template: name}] can compose in. Forge hosts no repo
+// file tree, so include: resolves against these named per-repo templates.
+func (s *Server) putRepoTemplate(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	var req struct {
+		Repo string `json:"repo"`
+		Name string `json:"name"`
+		YAML string `json:"yaml"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Repo == "" || req.Name == "" || req.YAML == "" {
+		writeErr(w, http.StatusBadRequest, "repo, name and yaml are required")
+		return
+	}
+	if err := s.store.UpsertRepoTemplate(r.Context(), req.Repo, req.Name, req.YAML); err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to save template")
+		return
+	}
+	s.audit(r, "repo-template.push", req.Name, req.Repo, "ok", map[string]any{"name": req.Name})
+	writeJSON(w, http.StatusOK, map[string]any{"repo": req.Repo, "name": req.Name})
+}
+
+// listRepoTemplates lists the names of a repo's registered templates.
+func (s *Server) listRepoTemplates(w http.ResponseWriter, r *http.Request) {
+	repo := r.URL.Query().Get("repo")
+	if repo == "" {
+		writeErr(w, http.StatusBadRequest, "repo query param is required")
+		return
+	}
+	names, err := s.store.ListRepoTemplates(r.Context(), repo)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to list templates")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"repo": repo, "templates": names})
 }
 
 // registerRepo connects a Forge repo to a real GitHub/Bitbucket repository.
@@ -215,7 +256,7 @@ func (s *Server) triggerFromWebhook(w http.ResponseWriter, r *http.Request, repo
 		writeErr(w, http.StatusInternalServerError, "failed to load repo config")
 		return false
 	}
-	jobs, err := compiler.Compile(config, ref)
+	jobs, err := compiler.Compile(config, ref, compiler.SourceWebhook, s.store.TemplateResolver(r.Context(), repo))
 	if err != nil {
 		writeErr(w, http.StatusUnprocessableEntity, "pipeline config error: "+err.Error())
 		return false
@@ -399,7 +440,9 @@ func (s *Server) putRepoConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Validate against a representative ref so broken YAML is rejected early.
-	if _, err := compiler.Compile(req.Config, "main"); err != nil {
+	// Templates referenced via include: are resolved against this repo's
+	// registered templates so an include of a missing template is caught here.
+	if _, err := compiler.Compile(req.Config, "main", compiler.SourcePush, s.store.TemplateResolver(r.Context(), req.Repo)); err != nil {
 		writeErr(w, http.StatusBadRequest, "config error: "+err.Error())
 		return
 	}

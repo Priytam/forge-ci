@@ -266,11 +266,20 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 		if j.Environment != "" {
 			environment = &j.Environment
 		}
+		// Manual jobs start gated in the 'blocked' state (with the manual flag so
+		// the scheduler and approval endpoint distinguish them from an
+		// environment-approval block); a play releases them back to 'created'.
+		status := "created"
+		var blockedAt any
+		if j.Manual {
+			status = "blocked"
+			blockedAt = time.Now()
+		}
 		var id int64
 		err = tx.QueryRow(ctx,
-			`INSERT INTO jobs (pipeline_id, name, stage, stage_idx, image, script, env, environment, tags, artifact_paths, timeout_seconds, max_attempts)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
-			p.ID, j.Name, j.Stage, j.StageIdx, image, j.Script, env, environment, tags, artifacts, timeoutSec, j.Retry+1).Scan(&id)
+			`INSERT INTO jobs (pipeline_id, name, stage, stage_idx, image, script, env, environment, tags, artifact_paths, timeout_seconds, max_attempts, status, manual, allow_failure, blocked_at)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id`,
+			p.ID, j.Name, j.Stage, j.StageIdx, image, j.Script, env, environment, tags, artifacts, timeoutSec, j.Retry+1, status, j.Manual, j.AllowFailure, blockedAt).Scan(&id)
 		if err != nil {
 			return nil, err
 		}
@@ -374,7 +383,7 @@ func (s *Store) ListPipelines(ctx context.Context, repo string) ([]proto.Pipelin
 	rows, err := s.pool.Query(ctx,
 		`SELECT p.id, p.repo, p.ref, p.sha, p.config_version, p.created_at,
 		        COALESCE(json_agg(json_build_object(
-		            'stage', j.stage, 'idx', j.stage_idx, 'status', j.status
+		            'stage', j.stage, 'idx', j.stage_idx, 'status', CASE WHEN j.status='failed' AND j.allow_failure THEN 'success' ELSE j.status END
 		        ) ORDER BY j.stage_idx) FILTER (WHERE j.id IS NOT NULL), '[]')
 		 FROM pipelines p LEFT JOIN jobs j ON j.pipeline_id = p.id
 		 WHERE ($1 = '' OR p.repo = $1)
@@ -418,7 +427,7 @@ func (s *Store) ListPipelinesPage(ctx context.Context, repo string, limit, offse
 	rows, err := s.pool.Query(ctx,
 		`SELECT p.id, p.repo, p.ref, p.sha, p.config_version, p.created_at,
 		        COALESCE(json_agg(json_build_object(
-		            'stage', j.stage, 'idx', j.stage_idx, 'status', j.status
+		            'stage', j.stage, 'idx', j.stage_idx, 'status', CASE WHEN j.status='failed' AND j.allow_failure THEN 'success' ELSE j.status END
 		        ) ORDER BY j.stage_idx) FILTER (WHERE j.id IS NOT NULL), '[]')
 		 FROM pipelines p LEFT JOIN jobs j ON j.pipeline_id = p.id
 		 WHERE ($1 = '' OR p.repo = $1)
@@ -526,7 +535,9 @@ func (s *Store) GetPipeline(ctx context.Context, id int64) (*proto.Pipeline, []p
 
 	rows, err := s.pool.Query(ctx,
 		`SELECT j.id, j.pipeline_id, j.name, j.stage, j.stage_idx, j.image, j.environment,
-		        j.status, j.started_at, j.finished_at, j.exit_code,
+		        j.status,
+		        CASE WHEN j.status='failed' AND j.allow_failure THEN 'success' ELSE j.status END,
+		        j.started_at, j.finished_at, j.exit_code,
 		        COALESCE(array_agg(n.needs_job_id) FILTER (WHERE n.needs_job_id IS NOT NULL), '{}')
 		 FROM jobs j LEFT JOIN job_needs n ON n.job_id = j.id
 		 WHERE j.pipeline_id = $1
@@ -541,13 +552,16 @@ func (s *Store) GetPipeline(ctx context.Context, id int64) (*proto.Pipeline, []p
 	sjs := []stageJob{}
 	for rows.Next() {
 		var j proto.Job
+		// effective status folds an allowed failure into 'success' for pipeline
+		// and stage status derivation, while j.Status keeps the true state.
+		var effective string
 		if err := rows.Scan(&j.ID, &j.PipelineID, &j.Name, &j.Stage, &j.StageIdx, &j.Image,
-			&j.Environment, &j.Status, &j.StartedAt, &j.FinishedAt, &j.ExitCode, &j.Needs); err != nil {
+			&j.Environment, &j.Status, &effective, &j.StartedAt, &j.FinishedAt, &j.ExitCode, &j.Needs); err != nil {
 			return nil, nil, err
 		}
 		jobs = append(jobs, j)
-		statuses = append(statuses, j.Status)
-		sjs = append(sjs, stageJob{Stage: j.Stage, Idx: j.StageIdx, Status: j.Status})
+		statuses = append(statuses, effective)
+		sjs = append(sjs, stageJob{Stage: j.Stage, Idx: j.StageIdx, Status: effective})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, nil, err
@@ -1188,6 +1202,45 @@ func (s *Store) CancelJob(ctx context.Context, jobID int64) (*proto.Job, error) 
 	return s.GetJob(ctx, jobID)
 }
 
+// ErrNotManual is returned when a play is attempted on a job that is not a
+// gated manual job awaiting its trigger.
+var ErrNotManual = errors.New("job is not a manual job awaiting play")
+
+// StartManualJob releases a gated manual job. A manual job is created in the
+// 'blocked' state with manual=TRUE; play returns it to 'created' and clears the
+// manual flag so the normal scheduler flow (needs, then protected-environment
+// approval if any) applies from here on. Idempotency: a job already past the
+// gate returns ErrNotManual.
+func (s *Store) StartManualJob(ctx context.Context, jobID int64) (*proto.Job, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	var status string
+	var manual bool
+	err = tx.QueryRow(ctx,
+		`SELECT status, manual FROM jobs WHERE id=$1 FOR UPDATE`, jobID).Scan(&status, &manual)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if status != "blocked" || !manual {
+		return nil, ErrNotManual
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE jobs SET status='created', manual=FALSE, blocked_at=NULL WHERE id=$1`, jobID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return s.GetJob(ctx, jobID)
+}
+
 // CancelPipeline cancels every non-terminal job in a pipeline (and thereby its
 // dependents). Running jobs are flagged for the runner to stop; others go
 // straight to canceled. Idempotent: an already-finished pipeline is a clean
@@ -1225,17 +1278,30 @@ func (s *Store) CancelPipeline(ctx context.Context, pipelineID int64) (*proto.Pi
 
 // ---- scheduler transitions (each idempotent; called every tick) ----
 
+// A need is satisfied when the dependency succeeded, or failed while marked
+// allow_failure (GitLab: an allowed failure does not block dependents).
 const needsUnmet = `EXISTS (
 	SELECT 1 FROM job_needs n JOIN jobs d ON d.id = n.needs_job_id
-	WHERE n.job_id = j.id AND d.status <> 'success')`
+	WHERE n.job_id = j.id
+	  AND d.status <> 'success'
+	  AND NOT (d.status = 'failed' AND d.allow_failure))`
 
-// CancelDeadJobs cancels created jobs whose dependencies failed or were canceled.
+// depFatallyDead is true when a dependency reached a terminal non-success state
+// that should NOT be tolerated: canceled, or failed without allow_failure.
+const depFatallyDead = `EXISTS (
+	SELECT 1 FROM job_needs n JOIN jobs d ON d.id = n.needs_job_id
+	WHERE n.job_id = j.id
+	  AND (d.status = 'canceled' OR (d.status = 'failed' AND NOT d.allow_failure)))`
+
+// CancelDeadJobs cancels jobs whose dependencies fatally failed or were
+// canceled. Covers both queued (created) jobs and gated manual (blocked) jobs
+// so a manual job whose upstream died is not left hanging forever. An allowed
+// failure upstream does not trigger cancellation.
 func (s *Store) CancelDeadJobs(ctx context.Context) (int64, error) {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE jobs j SET status='canceled', finished_at=now()
-		 WHERE j.status='created' AND EXISTS (
-		   SELECT 1 FROM job_needs n JOIN jobs d ON d.id = n.needs_job_id
-		   WHERE n.job_id = j.id AND d.status IN ('failed','canceled'))`)
+		 WHERE (j.status='created' OR (j.status='blocked' AND j.manual))
+		   AND `+depFatallyDead)
 	return tag.RowsAffected(), err
 }
 
@@ -1268,7 +1334,7 @@ func (s *Store) PromoteReadyJobs(ctx context.Context) (int64, error) {
 func (s *Store) ExpireBlockedJobs(ctx context.Context) (int64, error) {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE jobs j SET status='failed', finished_at=now()
-		 WHERE j.status='blocked'
+		 WHERE j.status='blocked' AND NOT j.manual
 		   AND j.blocked_at + make_interval(hours => (
 		       SELECT pe.approval_timeout_hours
 		       FROM protected_environments pe, pipelines p

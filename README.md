@@ -89,6 +89,24 @@ creating a new pipeline for the same repo **and ref** (via API or webhook)
 cancels older non-terminal pipelines for that same repo+ref. Different refs are
 never affected. Set `auto_cancel: false` to let redundant pipelines run.
 
+### Advanced authoring: rules, include, extends, parallel/matrix
+
+On top of the core DSL above, Forge supports GitLab-style authoring power:
+
+- **`rules:`** — per-job ordered list; first match wins; controls inclusion and
+  `when` (`on_success` | `manual` | `never` | `always`) with a safe expression
+  language for `if:` (`==`, `!=`, `=~`, `!~`, `&&`, `||`, `!`, `null`). Supersedes
+  `only`/`except` for any job that declares it.
+- **`include:`** — compose a config from reusable per-repo **templates**
+  (`include: [{template: name}]`), registered via `PUT /api/v1/repo-templates`.
+- **`extends:`** — inherit from one or more base jobs (hidden `.name` template
+  jobs are never emitted); deep-merged, child overrides parent.
+- **`parallel: N`** / **`parallel: {matrix: […]}`** — expand a job into N
+  instances or one job per variable combination, with matrix `needs` fan-in.
+
+See **[docs/pipeline-dsl.md](docs/pipeline-dsl.md)** for the full reference,
+examples, and the honest `changes:` / `exists:` / remote-include limitations.
+
 ## Quickstart (local dev)
 
 Requires Go 1.24+, Node 22+, Docker (for Postgres).
@@ -117,11 +135,14 @@ Public:
 - `GET  /api/v1/pipelines/{id}` — includes per-stage statuses and jobs
 - `POST /api/v1/pipelines/{id}/cancel` — cancel the whole pipeline (all non-terminal jobs); idempotent
 - `POST /api/v1/jobs/{id}/cancel` — cancel a single job (created/pending/blocked → canceled; running → stopped via heartbeat); idempotent
+- `POST /api/v1/jobs/{id}/play` — release a gated `when: manual` job (blocked → created); see [docs/pipeline-dsl.md](docs/pipeline-dsl.md)
 - `GET  /api/v1/jobs/{id}/logs` — full log as `text/plain` (masked; back-compat), or
   `?offset=N` → JSON `{bytes, next_offset, eof}` for incremental polling
 - `GET  /api/v1/jobs/{id}/logs/stream[?offset=N]` — SSE live tail (`text/event-stream`);
   `log` events then a final `eof` event on terminal state
 - `POST /api/v1/jobs/{id}/approvals` `{approver, verdict: approved|rejected, comment}`
+- `PUT  /api/v1/repo-templates` `{repo, name, yaml}` — register a reusable fragment for `include:` (admin)
+- `GET  /api/v1/repo-templates?repo=name` — list a repo's registered template names
 - `GET  /api/v1/metrics` — Prometheus-format log-tier counters (auth-exempt)
 
 Cancel and other mutating routes use the same authz as the rest of the API:

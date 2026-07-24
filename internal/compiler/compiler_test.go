@@ -31,7 +31,7 @@ func jobNames(jobs []CompiledJob) map[string]CompiledJob {
 }
 
 func TestCompileRefAwareDAG(t *testing.T) {
-	main, err := Compile(refYAML, "main")
+	main, err := Compile(refYAML, "main", "push", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +43,7 @@ func TestCompileRefAwareDAG(t *testing.T) {
 		t.Error("main: deploy-dev must be excluded")
 	}
 
-	feat, err := Compile(refYAML, "feature/x")
+	feat, err := Compile(refYAML, "feature/x", "push", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +55,7 @@ func TestCompileRefAwareDAG(t *testing.T) {
 		t.Error("feature: deploy-prod must be excluded")
 	}
 
-	rel, err := Compile(refYAML, "release-1.2")
+	rel, err := Compile(refYAML, "release-1.2", "push", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ jobs:
     stage: deploy
     script: [./deploy.sh]
 `
-	jobs, err := Compile(yml, "feature/x") // test stage empty for this ref
+	jobs, err := Compile(yml, "feature/x", "push", nil) // test stage empty for this ref
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ jobs:
     needs: [only-main-tests]
     script: [./deploy.sh]
 `
-	if _, err := Compile(yml, "feature/x"); err == nil {
+	if _, err := Compile(yml, "feature/x", "push", nil); err == nil {
 		t.Fatal("expected error: explicit need on ref-excluded job")
 	}
 }
@@ -121,7 +121,7 @@ jobs:
     stage: test
     script: [make test]
 `
-	jobs, err := Compile(yml, "main")
+	jobs, err := Compile(yml, "main", "push", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ jobs:
     retry: 11
     script: [make]
 `
-	if _, err := Compile(bad, "main"); err == nil {
+	if _, err := Compile(bad, "main", "push", nil); err == nil {
 		t.Fatal("expected error for retry > 10")
 	}
 	neg := `
@@ -153,7 +153,7 @@ jobs:
     retry: -1
     script: [make]
 `
-	if _, err := Compile(neg, "main"); err == nil {
+	if _, err := Compile(neg, "main", "push", nil); err == nil {
 		t.Fatal("expected error for negative retry")
 	}
 }

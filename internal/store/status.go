@@ -58,7 +58,7 @@ func statusForPost(statuses []string) string {
 func (s *Store) PipelinesPendingStatusPost(ctx context.Context) ([]StatusCandidate, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT p.id, p.repo, p.ref, p.sha, rr.provider,
-		        COALESCE(json_agg(DISTINCT j.status) FILTER (WHERE j.id IS NOT NULL), '[]'),
+		        COALESCE(json_agg(DISTINCT CASE WHEN j.status='failed' AND j.allow_failure THEN 'success' ELSE j.status END) FILTER (WHERE j.id IS NOT NULL), '[]'),
 		        COALESCE((SELECT array_agg(sp.status)
 		                  FROM pipeline_status_posts sp WHERE sp.pipeline_id = p.id), '{}'::text[])
 		 FROM pipelines p
