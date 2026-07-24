@@ -75,8 +75,41 @@ func (s *Server) registerRepo(w http.ResponseWriter, r *http.Request) {
 		req.DefaultBranch = "main"
 	}
 
+	// GitHub App auth (github only) is configured when any App field is present.
+	// It authenticates INSTEAD of a static token — Forge mints short-lived
+	// installation tokens on demand (see internal/githubapp).
+	appConfigured := req.GitHubAppID != "" || req.GitHubInstallationID != "" || req.GitHubAppPrivateKey != ""
+	if appConfigured {
+		if req.Provider != "github" {
+			writeErr(w, http.StatusBadRequest, `GitHub App auth requires provider "github"`)
+			return
+		}
+		if req.GitHubAppID == "" || req.GitHubInstallationID == "" {
+			writeErr(w, http.StatusBadRequest,
+				"github_app_id and github_installation_id are required for GitHub App auth")
+			return
+		}
+	}
+
 	if r.URL.Query().Get("validate") != "0" {
-		if err := validateCloneAccess(r.Context(), req); err != nil {
+		if appConfigured {
+			// Prove the App config works: mint an installation token, then
+			// ls-remote with it. Errors never contain the key or token.
+			token, err := s.store.AppTokenForValidation(r.Context(),
+				req.Repo, req.GitHubAppID, req.GitHubAppPrivateKey, req.GitHubInstallationID)
+			if err != nil {
+				writeErr(w, http.StatusBadRequest,
+					"could not mint a GitHub App installation token "+
+						"(check app id, installation id and private key): "+err.Error())
+				return
+			}
+			if err := validateCloneAccessWithToken(r.Context(), req.CloneURL, token, "github"); err != nil {
+				writeErr(w, http.StatusBadRequest,
+					"could not reach the repository with the App token "+
+						"(check the installation and its Contents:read permission): "+err.Error())
+				return
+			}
+		} else if err := validateCloneAccess(r.Context(), req); err != nil {
 			writeErr(w, http.StatusBadRequest,
 				"could not reach the repository (check name, token and permissions): "+err.Error())
 			return
@@ -87,28 +120,52 @@ func (s *Server) registerRepo(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "failed to register repo")
 		return
 	}
-	slog.Info("repo registered", "repo", req.Repo, "provider", req.Provider)
-	// NEVER record the token.
-	s.audit(r, "repo-registry.register", req.Repo, req.Repo, "ok", map[string]any{
+	slog.Info("repo registered", "repo", req.Repo, "provider", req.Provider, "github_app", appConfigured)
+	// NEVER record the token or the private key.
+	s.audit(r, "repo-registry.register", req.Repo, req.Repo, "ok", repoRegistryAuditDetail(req))
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// repoRegistryAuditDetail builds the safe audit detail for a repo registration.
+// It records only non-secret metadata: NEVER the static token and NEVER the
+// GitHub App private key. has_token / github_app note that a secret was set,
+// and app_id / installation_id (not secret) identify the App connection.
+func repoRegistryAuditDetail(req proto.RepoRegistration) map[string]any {
+	appConfigured := req.GitHubAppID != "" || req.GitHubInstallationID != "" || req.GitHubAppPrivateKey != ""
+	detail := map[string]any{
 		"provider":       req.Provider,
 		"clone_url":      req.CloneURL,
 		"default_branch": req.DefaultBranch,
 		"has_token":      req.Token != "",
-	})
-	w.WriteHeader(http.StatusNoContent)
+		"github_app":     appConfigured,
+	}
+	if appConfigured {
+		detail["github_app_id"] = req.GitHubAppID
+		detail["installation_id"] = req.GitHubInstallationID
+		// The private key is NEVER recorded.
+	}
+	return detail
 }
 
-// validateCloneAccess runs git ls-remote against the (possibly authenticated)
-// URL. Errors are sanitized so tokens never reach the response.
+// validateCloneAccess runs git ls-remote against the PAT-authenticated URL.
+// Errors are sanitized so tokens never reach the response.
 func validateCloneAccess(ctx context.Context, req proto.RepoRegistration) error {
-	u := req.CloneURL
-	if req.Token != "" {
+	return validateCloneAccessWithToken(ctx, req.CloneURL, req.Token, req.Provider)
+}
+
+// validateCloneAccessWithToken runs git ls-remote against cloneURL, embedding
+// token (a static PAT or a minted GitHub App installation token) as the provider
+// expects. token is redacted from any error text so it never reaches the
+// response. An empty token validates anonymous (public-repo) access.
+func validateCloneAccessWithToken(ctx context.Context, cloneURL, token, provider string) error {
+	u := cloneURL
+	if token != "" {
 		parsed, err := url.Parse(u)
 		if err == nil {
-			if req.Provider == "bitbucket" {
-				parsed.User = url.UserPassword("x-token-auth", req.Token)
+			if provider == "bitbucket" {
+				parsed.User = url.UserPassword("x-token-auth", token)
 			} else {
-				parsed.User = url.UserPassword("x-access-token", req.Token)
+				parsed.User = url.UserPassword("x-access-token", token)
 			}
 			u = parsed.String()
 		}
@@ -120,8 +177,8 @@ func validateCloneAccess(ctx context.Context, req proto.RepoRegistration) error 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		msg := string(out)
-		if req.Token != "" {
-			msg = strings.ReplaceAll(msg, req.Token, "[REDACTED]")
+		if token != "" {
+			msg = strings.ReplaceAll(msg, token, "[REDACTED]")
 		}
 		if len(msg) > 300 {
 			msg = msg[:300]

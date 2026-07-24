@@ -148,6 +148,19 @@ CREATE TABLE IF NOT EXISTS repo_registry (
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- GitHub App authentication (alternative to the static `token` PAT above). A
+-- connection authenticates via EITHER a static token OR a GitHub App; when the
+-- App columns are set they take precedence and Forge mints a short-lived
+-- installation access token on demand (see internal/githubapp). The columns
+-- live on repo_registry so resolution stays a single primary-key lookup and the
+-- PAT path is unchanged (these default to '' and are simply ignored). The
+-- private key is a secret encrypted at rest exactly like `token`
+-- (enc:v1: prefix, re-encrypted by MigrateSecrets on start); it is write-only
+-- over the API and never returned. app_id and installation_id are not secret.
+ALTER TABLE repo_registry ADD COLUMN IF NOT EXISTS github_app_id              TEXT NOT NULL DEFAULT '';
+ALTER TABLE repo_registry ADD COLUMN IF NOT EXISTS github_app_private_key     TEXT NOT NULL DEFAULT '';
+ALTER TABLE repo_registry ADD COLUMN IF NOT EXISTS github_app_installation_id TEXT NOT NULL DEFAULT '';
+
 -- Per-repo defaults. Runners are deployed independently (global fleet,
 -- selected by tags); a repo picks its runner group here. Jobs without an
 -- explicit tags: list inherit these.

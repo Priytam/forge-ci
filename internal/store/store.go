@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/priytamjeepandey/forge-ci/internal/compiler"
+	"github.com/priytamjeepandey/forge-ci/internal/githubapp"
 	"github.com/priytamjeepandey/forge-ci/internal/proto"
 	"github.com/priytamjeepandey/forge-ci/internal/secret"
 )
@@ -36,8 +37,9 @@ var (
 )
 
 type Store struct {
-	pool   *pgxpool.Pool
-	cipher *secret.Cipher // envelope encryption for secrets at rest
+	pool      *pgxpool.Pool
+	cipher    *secret.Cipher    // envelope encryption for secrets at rest
+	appMinter *githubapp.Minter // mints/caches GitHub App installation tokens
 
 	// Execution-timeout policy (env-configured, see New).
 	defaultJobTimeout time.Duration // DEFAULT_JOB_TIMEOUT, jobs without timeout:
@@ -102,6 +104,7 @@ func New(ctx context.Context, dsn string) (*Store, error) {
 	s := &Store{
 		pool:              pool,
 		cipher:            cipher,
+		appMinter:         githubapp.New(),
 		defaultJobTimeout: envDuration("DEFAULT_JOB_TIMEOUT", time.Hour),
 		maxJobTimeout:     envDuration("MAX_JOB_TIMEOUT", 4*time.Hour),
 		queueTimeout:      envDuration("QUEUE_TIMEOUT", 24*time.Hour),
@@ -147,6 +150,7 @@ func (s *Store) countPlaintextSecrets(ctx context.Context) (int, error) {
 		SELECT
 		  (SELECT count(*) FROM repo_variables WHERE value <> '' AND value NOT LIKE 'enc:v1:%') +
 		  (SELECT count(*) FROM repo_registry  WHERE token <> '' AND token NOT LIKE 'enc:v1:%') +
+		  (SELECT count(*) FROM repo_registry  WHERE github_app_private_key <> '' AND github_app_private_key NOT LIKE 'enc:v1:%') +
 		  (SELECT count(*) FROM sso_providers  WHERE client_secret <> '' AND client_secret NOT LIKE 'enc:v1:%')`).
 		Scan(&n)
 	return n, err
@@ -166,6 +170,7 @@ func (s *Store) MigrateSecrets(ctx context.Context) (int, error) {
 	for _, t := range []target{
 		{"repo_variables", "id", "value"},
 		{"repo_registry", "repo", "token"},
+		{"repo_registry", "repo", "github_app_private_key"},
 		{"sso_providers", "provider", "client_secret"},
 	} {
 		rows, err := s.pool.Query(ctx, fmt.Sprintf(
@@ -1237,7 +1242,7 @@ func (s *Store) CancelDeadJobs(ctx context.Context) (int64, error) {
 // PromoteReadyJobs moves created jobs with all needs satisfied to pending, or
 // to blocked when they target a protected environment.
 // protectedFor matches a job's environment against a repo-specific rule or
-// the global (repo='') default.
+// the global (repo=”) default.
 const protectedFor = `EXISTS (
 	SELECT 1 FROM protected_environments pe, pipelines p
 	WHERE p.id = j.pipeline_id AND pe.name = j.environment AND pe.repo IN ('', p.repo))`

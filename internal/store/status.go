@@ -3,9 +3,6 @@ package store
 import (
 	"context"
 	"encoding/json"
-	"errors"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // StatusCandidate is one pipeline whose current commit-status phase has not yet
@@ -66,7 +63,10 @@ func (s *Store) PipelinesPendingStatusPost(ctx context.Context) ([]StatusCandida
 		                  FROM pipeline_status_posts sp WHERE sp.pipeline_id = p.id), '{}'::text[])
 		 FROM pipelines p
 		 JOIN repo_registry rr ON rr.repo = p.repo
-		      AND rr.provider IN ('github','bitbucket') AND rr.token <> ''
+		      AND rr.provider IN ('github','bitbucket')
+		      AND (rr.token <> ''
+		           OR (rr.github_app_id <> '' AND rr.github_app_installation_id <> ''
+		               AND rr.github_app_private_key <> ''))
 		 LEFT JOIN jobs j ON j.pipeline_id = p.id
 		 WHERE NOT EXISTS (
 		   SELECT 1 FROM pipeline_status_posts sp
@@ -130,24 +130,19 @@ func (s *Store) ReleaseStatusPost(ctx context.Context, pipelineID int64, status 
 	return err
 }
 
-// RepoStatusTarget returns a repo's VCS provider and DECRYPTED token for making
-// commit-status API calls, mirroring cloneAuth's decryption. ok is false when
-// the repo is not registered. The token is used only for outbound VCS API calls
-// (Authorization header) — it is never returned over Forge's own HTTP API and
-// never logged.
+// RepoStatusTarget returns a repo's VCS provider and a ready-to-use token for
+// making commit-status API calls. The token is a static PAT or a freshly-minted
+// (and cached) GitHub App installation token, resolved through the same path as
+// cloneAuth (see resolveRepoAuth). ok is false when the repo is not registered.
+// The token is used only for outbound VCS API calls (Authorization header) — it
+// is never returned over Forge's own HTTP API and never logged.
 func (s *Store) RepoStatusTarget(ctx context.Context, repo string) (provider, token string, ok bool, err error) {
-	var enc string
-	err = s.pool.QueryRow(ctx,
-		`SELECT provider, token FROM repo_registry WHERE repo=$1`, repo).Scan(&provider, &enc)
-	if errors.Is(err, pgx.ErrNoRows) {
+	provider, _, token, found, err := s.resolveRepoAuth(ctx, repo)
+	if err != nil {
+		return "", "", false, err
+	}
+	if !found {
 		return "", "", false, nil
-	}
-	if err != nil {
-		return "", "", false, err
-	}
-	token, err = s.cipher.Decrypt(enc)
-	if err != nil {
-		return "", "", false, err
 	}
 	return provider, token, true, nil
 }

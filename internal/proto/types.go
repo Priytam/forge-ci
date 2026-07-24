@@ -31,9 +31,9 @@ type RepoSummary struct {
 	PipelineCount  int       `json:"pipeline_count"`
 	SuccessCount   int       `json:"success_count"`
 	FailedCount    int       `json:"failed_count"`
-	Refs           []string  `json:"refs"`             // distinct refs, most recent first
-	RecentStatuses []string  `json:"recent_statuses"`  // last pipelines' statuses, newest first
-	LastPipeline   *Pipeline `json:"last_pipeline"`    // includes stages
+	Refs           []string  `json:"refs"`            // distinct refs, most recent first
+	RecentStatuses []string  `json:"recent_statuses"` // last pipelines' statuses, newest first
+	LastPipeline   *Pipeline `json:"last_pipeline"`   // includes stages
 	LastActivityAt time.Time `json:"last_activity_at"`
 }
 
@@ -89,7 +89,10 @@ type DependencyArtifact struct {
 	Name       string `json:"name"`
 }
 
-// RepoRegistration connects a Forge repo to its real VCS repository.
+// RepoRegistration connects a Forge repo to its real VCS repository. A
+// connection authenticates via EITHER a static token (PAT) OR a GitHub App
+// (app id + private key + installation id); when App fields are configured they
+// take precedence and Forge mints short-lived installation tokens on demand.
 type RepoRegistration struct {
 	Repo          string    `json:"repo"`
 	Provider      string    `json:"provider"` // github | bitbucket | other
@@ -98,6 +101,14 @@ type RepoRegistration struct {
 	HasToken      bool      `json:"has_token"`
 	DefaultBranch string    `json:"default_branch"`
 	CreatedAt     time.Time `json:"created_at"`
+
+	// GitHub App auth (github only). GitHubAppPrivateKey is a secret: write-only,
+	// encrypted at rest, and NEVER populated in responses. AppID and
+	// InstallationID are not secret and are returned so the config is visible.
+	GitHubAppID          string `json:"github_app_id,omitempty"`
+	GitHubInstallationID string `json:"github_installation_id,omitempty"`
+	GitHubAppPrivateKey  string `json:"github_app_private_key,omitempty"` // write-only; never returned
+	HasGitHubApp         bool   `json:"has_github_app"`
 }
 
 // Runner is a registered build agent as seen by the control plane.

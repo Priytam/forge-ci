@@ -17,6 +17,9 @@ connect it to your VCS:
    handed to runners, and redacted from all job logs. Without a connected
    repo, jobs still run — but in an empty workspace.
 
+   A connection can authenticate with **either** a static token (the PAT above)
+   **or** a GitHub App — see [GitHub App authentication](#github-app-authentication).
+
 1. **A registered pipeline config** — Forge stores the pipeline YAML per repo
    (it can't read `.forge-ci.yml` out of a repo it doesn't host):
    ```sh
@@ -54,6 +57,110 @@ connect it to your VCS:
    (Bitbucket Cloud has no HMAC signing — restrict by network/allowlist or a
    token in the URL if exposure is a concern.)
 
+## GitHub App authentication
+
+Instead of a long-lived static PAT, a GitHub-hosted repo can authenticate with a
+**GitHub App**. Forge signs a short-lived JWT with the App's private key, exchanges
+it for a ~1-hour installation access token, and uses that token exactly like a PAT
+(clone via `x-access-token`, commit-status via `Bearer`). Tokens auto-expire and
+Forge mints fresh ones on demand, caching each until it is near expiry — so there
+is no long-lived credential sitting in the database.
+
+### PAT vs App — which to use
+
+| | Static PAT | GitHub App |
+|---|---|---|
+| Credential at rest | the token itself (long-lived) | a private key (long-lived) that only **mints** short-lived tokens |
+| Token lifetime | until you rotate/revoke it | ~1 hour, auto-rotated by Forge |
+| Scope | the user's/PAT's access | exactly the App's declared permissions, on the installed repos |
+| Identity in the audit trail on GitHub | the PAT owner | the App (a bot identity) |
+| Rate limits | per-user | per-installation (higher) |
+| Best for | quick setup, a single repo | orgs, many repos, least-privilege, no human-owned token |
+
+Both are equally supported. The static-token path is unchanged; App auth is
+opt-in per connection.
+
+### Create the App and collect its three values
+
+You need three things: an **app id**, a **private key** (PEM), and the
+**installation id**.
+
+1. **Create the App.** GitHub → *Settings → Developer settings → GitHub Apps →
+   New GitHub App* (an org App lives under the org's settings). Give it a name and
+   a homepage URL (any valid URL). You can leave the webhook **unchecked** — Forge
+   receives pushes through its own webhook (see above); the App is used only for
+   auth, not for event delivery.
+2. **Set permissions** (App → *Permissions & events → Repository permissions*):
+   - **Contents: Read-only** — required to clone the source.
+   - **Commit statuses: Read and write** — required for commit-status write-back
+     (skip if you don't use it).
+   - Nothing else is needed. This is the least-privilege set.
+3. **Note the app id** — shown on the App's *General* page ("App ID").
+4. **Generate a private key** — App *General* page → *Private keys → Generate a
+   private key*. A `.pem` file downloads. This is the file's full contents
+   (`-----BEGIN RSA PRIVATE KEY-----` … PKCS#1, or `-----BEGIN PRIVATE KEY-----`
+   PKCS#8 — both are accepted). Treat it as a secret; it is never shown again by
+   GitHub.
+5. **Install the App** on the org/repos (App → *Install App*). After installing,
+   the browser URL is
+   `https://github.com/settings/installations/<INSTALLATION_ID>` (or, for an org,
+   `…/organizations/<org>/settings/installations/<INSTALLATION_ID>`) — that number
+   is the **installation id**. (Programmatically it's also available from
+   `GET /app/installations` using an App JWT.)
+
+### Configure it in Forge
+
+Register the repo with the App fields instead of `token`:
+
+```sh
+curl -X POST $FORGE/api/v1/repo-registry \
+  -d "$(jq -n --arg key "$(cat app-private-key.pem)" '{
+        repo: "acme/checkout-service",
+        provider: "github",
+        github_app_id: "123456",
+        github_installation_id: "789012",
+        github_app_private_key: $key
+      }')"
+```
+
+- **Admin-gated & audited.** Registration requires platform-admin (once SSO is
+  enforced) and is recorded in the audit trail — with the provider, app id and
+  installation id, but **never** the private key or any minted token.
+- **Validated before saving.** Like the PAT path, Forge proves the config works
+  before storing it: it mints an installation token and runs `git ls-remote` with
+  it. A bad key/app id/installation id, or an installation missing *Contents:
+  read*, is rejected with an actionable error (the key and token never appear in
+  it). Skip validation with `?validate=0`.
+- **Write-only key.** `github_app_private_key` is encrypted at rest with
+  `FORGE_SECRET_KEY` (the same `enc:v1:` envelope as tokens and SSO secrets) and
+  is **never** returned by `GET /api/v1/repo-registry`. That endpoint surfaces
+  `has_github_app`, `github_app_id` and `github_installation_id` only. To rotate
+  the key, POST again with a new `github_app_private_key`; omit it on an edit to
+  keep the stored one.
+- **Precedence.** If a connection has both an App and a static token configured,
+  the App is used.
+- **GitHub only.** App auth requires `provider: "github"`. Bitbucket keeps using
+  app passwords / tokens.
+
+### How tokens are minted (and kept safe)
+
+`internal/githubapp` signs an RS256 JWT (`iss` = app id, `iat` backdated 60s for
+clock skew, `exp` ≤ 10 min) with the private key, POSTs it to
+`/app/installations/{id}/access_tokens`, and caches the returned token in memory
+keyed by app+installation until it is within 5 minutes of expiry, then re-mints.
+Minting is thread-safe and serialized per installation. The private key and the
+minted tokens are never logged and never appear in returned errors. The GitHub
+API base is overridable via `GITHUB_API_BASE` (used only for testing against a
+stub; leave unset in production).
+
+> The full round-trip against **live** GitHub requires a real GitHub App and its
+> private key, so it is not exercised by Forge's automated tests. Those cover the
+> JWT signing, the mint/cache/refresh behavior, and the clone/status resolution
+> against an HTTP stub (a throwaway RSA key stands in for the App key). If a real
+> App is misconfigured, registration validation surfaces it before saving, and a
+> later mint failure is logged (token/key redacted) and treated like any other
+> transient/permanent VCS error.
+
 ## Behavior notes
 
 - The ref from the webhook drives `only`/`except`, so pushes to `main` and to
@@ -71,9 +178,11 @@ connect it to your VCS:
 
 ## Commit status write-back
 
-Once a repo is connected **with a token**, Forge posts the pipeline's status
-back to the origin VCS as the pipeline progresses, so the commit (and any PR
-built on it) shows Forge's result — the green tick / red X.
+Once a repo is connected **with a token or a GitHub App**, Forge posts the
+pipeline's status back to the origin VCS as the pipeline progresses, so the
+commit (and any PR built on it) shows Forge's result — the green tick / red X.
+For App-authed repos the same short-lived installation token used for cloning is
+reused for the status post (the App needs *Commit statuses: write*).
 
 - **What it posts:** on the commit SHA the pipeline ran, under the fixed context
   `forge-ci`, with a `target_url` linking to the Forge pipeline page
@@ -109,7 +218,8 @@ built on it) shows Forge's result — the green tick / red X.
     the token is never logged).
   - Bitbucket — a token / app password with **`repositories:write`**.
 - **Skipped silently** (logged at debug, nothing posted) when the repo has **no
-  token** or **provider `other`** (not every git host has a status API).
+  token and no GitHub App** or **provider `other`** (not every git host has a
+  status API).
 - **Disable:** set `COMMIT_STATUS=off` on `forge-server` to turn write-back off
   globally. It is on by default and only ever acts on repos that have a token.
 

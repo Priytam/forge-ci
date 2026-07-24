@@ -151,7 +151,8 @@ the dev experience):
 | `ADMIN_EMAILS` | comma-separated platform-admin emails (enforced once SSO is on) | — |
 | `EXTERNAL_URL` | server's public origin (SSO redirect + CSRF allow-list; commit-status `target_url` fallback) | `http://localhost:8080` |
 | `FRONTEND_URL` | dashboard origin (post-login redirect + CSRF allow-list; commit-status `target_url` base) | `http://localhost:5173` |
-| `COMMIT_STATUS` | `on` \| `off` — write pipeline status back to the origin VCS (GitHub commit status / Bitbucket build status). Only acts on connected repos that have a token with commit-status scope; `off` disables globally | `on` |
+| `COMMIT_STATUS` | `on` \| `off` — write pipeline status back to the origin VCS (GitHub commit status / Bitbucket build status). Only acts on connected repos authenticated by a token (or a GitHub App) with commit-status scope; `off` disables globally | `on` |
+| `GITHUB_API_BASE` | override the GitHub API host — used for **commit-status write-back** and **GitHub App installation-token minting**. For testing against a stub; leave unset in production | `https://api.github.com` |
 | `REDIS_URL` | Redis for the high-volume log tier (live buffer + pub/sub fan-out), e.g. `redis://localhost:6379/0` | — |
 | `LOG_BACKEND` | `redis` \| `postgres`; empty auto-selects redis when `REDIS_URL` is set+reachable, else postgres | — (auto) |
 | `MAX_JOB_LOG_BYTES` | per-job cumulative log cap; excess truncated with a notice | `10485760` (10 MiB) |
