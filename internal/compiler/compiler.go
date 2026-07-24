@@ -58,9 +58,10 @@ import (
 // Pipeline source values threaded into the rules if: context as
 // CI_PIPELINE_SOURCE.
 const (
-	SourceAPI     = "api"
-	SourceWebhook = "webhook"
-	SourcePush    = "push"
+	SourceAPI      = "api"
+	SourceWebhook  = "webhook"
+	SourcePush     = "push"
+	SourceSchedule = "schedule"
 )
 
 const (

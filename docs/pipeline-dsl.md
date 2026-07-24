@@ -18,7 +18,8 @@ include (templates) → extends (inheritance) → drop hidden jobs
 
 Compilation is ref- and source-aware: `Compile(yaml, ref, source, resolver)`.
 `source` is `CI_PIPELINE_SOURCE` (`api` for `POST /api/v1/pipelines`, `webhook`
-for a VCS webhook trigger, `push` for config validation on save).
+for a VCS webhook trigger, `schedule` for a cron-scheduled run — see
+[docs/schedules.md](docs/schedules.md), `push` for config validation on save).
 
 ---
 
@@ -96,7 +97,7 @@ The base context exposes:
 | --- | --- |
 | `CI_COMMIT_REF`, `CI_COMMIT_REF_NAME` | the pipeline ref |
 | `CI_COMMIT_BRANCH` | the pipeline ref (see limitation below) |
-| `CI_PIPELINE_SOURCE` | `api` \| `webhook` \| `push` |
+| `CI_PIPELINE_SOURCE` | `api` \| `webhook` \| `schedule` \| `push` |
 
 Plus the job's own `variables:` (and any variables set by an earlier resolved
 rule). **Limitation:** Forge cannot distinguish a tag ref from a branch ref at

@@ -25,7 +25,7 @@ Legend: ✅ shipped · 🟡 partial · ❌ not yet (roadmap).
 | Timeouts (per job + pipeline default) | ✅ | ✅ | runner group-kill + server backstop + queue timeout |
 | Retry policy | ✅ | ✅ | `retry: N` (0..10) + `default.retry`, attempt tracking; timeouts/cancels not retried |
 | Child/multi-project pipelines, triggers | ✅ | ❌ | |
-| Scheduled pipelines (cron) | ✅ | ❌ | easy: scheduler already ticks |
+| Scheduled pipelines (cron) | ✅ | ✅ | 5-field cron (UTC); replica-safe compare-and-set claim, catch-up = fire once then advance; `CI_PIPELINE_SOURCE == "schedule"` — see docs/schedules.md |
 
 ## Execution
 
@@ -103,4 +103,4 @@ serves the board on top of them (see [docs/environments.md](environments.md)):
 2. ~~Git clone step + commit-status write-back~~ ✅ shipped (makes it a *real* CI for GitHub/Bitbucket)
 3. Caching + k8s executor (speed and scale)
 4. ~~Environments board with deploy history/rollback~~ ✅ shipped (ArgoCD lens, GitLab skin — see docs/environments.md)
-5. ~~`rules:`/`include`/matrix (authoring power)~~ ✅ shipped (see docs/pipeline-dsl.md) · WebSocket logs · scheduled pipelines
+5. ~~`rules:`/`include`/matrix (authoring power)~~ ✅ shipped (see docs/pipeline-dsl.md) · ~~scheduled pipelines~~ ✅ shipped (see docs/schedules.md) · WebSocket logs

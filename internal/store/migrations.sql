@@ -424,6 +424,31 @@ CREATE TABLE IF NOT EXISTS deployments (
 -- Serves the board (latest-per-env) and the per-env history listing.
 CREATE INDEX IF NOT EXISTS deployments_repo_env_id_idx ON deployments (repo, environment, id DESC);
 
+-- Cron-scheduled pipelines. A schedule fires a pipeline for (repo, ref) on a
+-- 5-field cron cadence (evaluated in UTC). The scheduler finds enabled schedules
+-- whose next_run_at <= now(), then atomically CLAIMs each with a compare-and-set
+-- on next_run_at (advancing it to the next future slot) so two replicas can't
+-- double-fire and a missed window fires once rather than storm-firing (catch-up:
+-- fire once, advance to the next future slot, no backfill). Schedules are config,
+-- not run data — the retention sweep NEVER deletes them (only the pipelines they
+-- create are subject to RETENTION_DAYS). next_run_at is NOT NULL: it is computed
+-- from the cron expression at create/update time and always points at the next
+-- fire time.
+CREATE TABLE IF NOT EXISTS pipeline_schedules (
+    id          BIGSERIAL   PRIMARY KEY,
+    repo        TEXT        NOT NULL,
+    ref         TEXT        NOT NULL,
+    cron        TEXT        NOT NULL,
+    enabled     BOOLEAN     NOT NULL DEFAULT TRUE,
+    created_by  TEXT        NOT NULL DEFAULT '',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_run_at TIMESTAMPTZ,
+    next_run_at TIMESTAMPTZ NOT NULL
+);
+-- Serves the scheduler's due-schedule scan (enabled, next_run_at <= now).
+CREATE INDEX IF NOT EXISTS pipeline_schedules_due_idx
+    ON pipeline_schedules (next_run_at) WHERE enabled;
+
 -- Deployment freeze windows. While now() is within [starts_at, ends_at) for a
 -- matching (repo, environment) — repo='' is a global freeze — an environment-
 -- targeting job is HELD in 'created' by PromoteReadyJobs and not promoted to

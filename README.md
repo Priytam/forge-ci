@@ -254,6 +254,19 @@ Environments board (ArgoCD-style CD lens — see [docs/environments.md](docs/env
 - `POST /api/v1/deploy-freezes` `{repo, environment, starts_at, ends_at, reason}` — freeze deploys to an env for a window; matching env jobs are held in `created` until it passes (admin, audited)
 - `DELETE /api/v1/deploy-freezes/{id}` — remove a freeze window (admin, audited)
 
+Scheduled pipelines (cron — see [docs/schedules.md](docs/schedules.md)):
+
+- `GET  /api/v1/schedules[?repo=name]` — list schedules with `cron`, `enabled`, `last_run_at`, `next_run_at`
+- `POST /api/v1/schedules` `{repo, ref, cron, enabled}` — validate the 5-field cron (**400** on a bad expr), compute `next_run_at` (UTC), insert (admin, audited)
+- `PUT  /api/v1/schedules/{id}` `{cron?, ref?, enabled?}` — partial update; recomputes `next_run_at` (admin, audited)
+- `DELETE /api/v1/schedules/{id}` — remove a schedule (admin, audited)
+
+The scheduler fires due schedules (`next_run_at <= now`) via a replica-safe
+compare-and-set claim on `next_run_at`, so two replicas never double-fire and a
+missed window fires once then advances (no backfill). Scheduled runs compile with
+`CI_PIPELINE_SOURCE == "schedule"`. Schedules are config, not run data — the
+retention sweep never deletes them.
+
 Cancel and other mutating routes use the same authz as the rest of the API:
 open in bootstrap mode, admin session required once SSO is enforced.
 
@@ -398,5 +411,6 @@ provides the fallback CI. Full walkthrough: [docs/self-hosted-ci.md](docs/self-h
   re-masked on full-text reads as a backstop.
 - Secret encryption uses a single `FORGE_SECRET_KEY` (no per-key rotation or
   external KMS/Vault yet); rotating the key requires re-encrypting rows.
-- No scheduled (cron) pipelines yet. Caching, `rules:`, `include:`, `extends:`,
-  matrix, and retries are all supported — see [docs/pipeline-dsl.md](docs/pipeline-dsl.md).
+- Scheduled (cron) pipelines are supported — see [docs/schedules.md](docs/schedules.md).
+  Caching, `rules:`, `include:`, `extends:`, matrix, and retries are all supported
+  too — see [docs/pipeline-dsl.md](docs/pipeline-dsl.md).

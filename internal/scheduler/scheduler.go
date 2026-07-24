@@ -15,20 +15,22 @@ import (
 	"time"
 
 	"github.com/priytamjeepandey/forge-ci/internal/blob"
+	"github.com/priytamjeepandey/forge-ci/internal/cron"
 	"github.com/priytamjeepandey/forge-ci/internal/logstore"
 	"github.com/priytamjeepandey/forge-ci/internal/store"
 	"github.com/priytamjeepandey/forge-ci/internal/vcs"
 )
 
 type Scheduler struct {
-	store        *store.Store
-	blobs        blob.Store
-	logs         *logstore.Service
-	tick         time.Duration
-	staleAfter   time.Duration
-	gcEvery      time.Duration // retention GC cadence
-	archiveEvery time.Duration // log-archive safety-net sweep cadence
-	retention    time.Duration // RETENTION_DAYS as a duration; 0 = keep forever
+	store         *store.Store
+	blobs         blob.Store
+	logs          *logstore.Service
+	tick          time.Duration
+	staleAfter    time.Duration
+	gcEvery       time.Duration // retention GC cadence
+	archiveEvery  time.Duration // log-archive safety-net sweep cadence
+	scheduleEvery time.Duration // cron-schedule fire-check cadence
+	retention     time.Duration // RETENTION_DAYS as a duration; 0 = keep forever
 
 	// Commit-status write-back: post pipeline status back to the origin VCS.
 	poster        *vcs.Poster
@@ -47,6 +49,7 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Scheduler {
 		staleAfter:    90 * time.Second,
 		gcEvery:       time.Hour,
 		archiveEvery:  30 * time.Second,
+		scheduleEvery: 30 * time.Second,
 		retention:     retentionWindow(),
 		poster:        vcs.NewPoster(),
 		statusEnabled: os.Getenv("COMMIT_STATUS") != "off",
@@ -74,9 +77,15 @@ func (sc *Scheduler) Run(ctx context.Context) {
 	defer gc.Stop()
 	archive := time.NewTicker(sc.archiveEvery)
 	defer archive.Stop()
+	schedules := time.NewTicker(sc.scheduleEvery)
+	defer schedules.Stop()
 	// Run one GC pass shortly after startup so operators see it work without
 	// waiting a full hour.
 	firstGC := time.After(30 * time.Second)
+	// Fire due schedules shortly after startup too, so a schedule already past
+	// its next_run_at (e.g. while the server was down) fires promptly rather than
+	// waiting a full scheduleEvery interval.
+	firstSchedules := time.After(5 * time.Second)
 	for {
 		select {
 		case <-ctx.Done():
@@ -85,6 +94,10 @@ func (sc *Scheduler) Run(ctx context.Context) {
 			sc.step(ctx)
 		case <-archive.C:
 			sc.archivePending(ctx)
+		case <-firstSchedules:
+			sc.fireSchedules(ctx)
+		case <-schedules.C:
+			sc.fireSchedules(ctx)
 		case <-firstGC:
 			sc.gc(ctx)
 		case <-gc.C:
@@ -105,6 +118,58 @@ func (sc *Scheduler) archivePending(ctx context.Context) {
 	}
 	if n > 0 {
 		slog.Info("archived terminal-but-unflushed job logs", "jobs", n)
+	}
+}
+
+// fireSchedules finds enabled schedules whose next_run_at has passed and, for
+// each, atomically CLAIMs it (compare-and-set advancing next_run_at to the next
+// future slot and stamping last_run_at) before building a pipeline. The
+// claim-before-build order is what makes firing replica-safe AND catch-up-safe:
+//
+//   - single-fire across replicas: only the tick whose compare-and-set matches
+//     the value it read wins; every other replica/tick sees the advanced value
+//     and skips. This mirrors ClaimStatusPost's dedup role for commit statuses.
+//   - no storm on a missed window: next_run_at advances to the next slot AFTER
+//     now(), so a schedule that missed hours of windows fires once and resumes
+//     its cadence — it never backfills.
+//
+// A schedule whose repo has no registered config, or whose ref can't be
+// resolved to a sha, is skipped with a logged warning: the claim already
+// advanced next_run_at, so a broken schedule is retried on its next slot, not
+// re-hammered every tick.
+func (sc *Scheduler) fireSchedules(ctx context.Context) {
+	now := time.Now().UTC()
+	due, err := sc.store.DueSchedules(ctx, now)
+	if err != nil {
+		slog.Error("schedules: list due", "err", err)
+		return
+	}
+	for _, s := range due {
+		next, err := cron.Next(s.Cron, now)
+		if err != nil {
+			// A bad expression should never reach the DB (the API validates on
+			// create/update), but if one does, skip it rather than crash-loop.
+			slog.Error("schedules: bad cron expression, skipping",
+				"schedule", s.ID, "repo", s.Repo, "cron", s.Cron, "err", err)
+			continue
+		}
+		claimed, err := sc.store.ClaimScheduleFire(ctx, s.ID, s.NextRunAt, next, now)
+		if err != nil {
+			slog.Error("schedules: claim", "err", err, "schedule", s.ID)
+			continue
+		}
+		if !claimed {
+			continue // another tick/replica already fired this schedule
+		}
+		p, err := sc.store.BuildScheduledPipeline(ctx, s.Repo, s.Ref)
+		if err != nil {
+			slog.Warn("schedules: could not fire (skipped) — schedule advanced to next slot",
+				"schedule", s.ID, "repo", s.Repo, "ref", s.Ref, "next_run_at", next, "err", err)
+			continue
+		}
+		slog.Info("schedule fired pipeline",
+			"schedule", s.ID, "repo", s.Repo, "ref", s.Ref, "pipeline", p.ID,
+			"sha", shortSHA(p.SHA), "next_run_at", next)
 	}
 }
 

@@ -83,6 +83,7 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 
 	srv.registerSettingsRoutes()
 	srv.registerEnvironmentRoutes()
+	srv.registerScheduleRoutes()
 	srv.registerWebhookRoutes()
 	srv.registerAuthRoutes()
 	srv.registerRunnerTokenRoutes()

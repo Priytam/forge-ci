@@ -213,6 +213,22 @@ type CreatePipelineRequest struct {
 	TriggeredBy string `json:"triggered_by,omitempty"`
 }
 
+// Schedule is a cron-scheduled pipeline trigger for a (repo, ref). The cron
+// expression is a standard 5-field spec evaluated in UTC; next_run_at is the
+// server-computed next fire time and last_run_at the most recent fire (nil until
+// it first fires).
+type Schedule struct {
+	ID        int64      `json:"id"`
+	Repo      string     `json:"repo"`
+	Ref       string     `json:"ref"`
+	Cron      string     `json:"cron"`
+	Enabled   bool       `json:"enabled"`
+	CreatedBy string     `json:"created_by"`
+	CreatedAt time.Time  `json:"created_at"`
+	LastRunAt *time.Time `json:"last_run_at"`
+	NextRunAt time.Time  `json:"next_run_at"`
+}
+
 // Member is a repo membership row (RBAC).
 type Member struct {
 	ID       int64  `json:"id"`
