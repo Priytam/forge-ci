@@ -1,12 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import {
   artifactDownloadUrl,
   duration,
   getJobLogs,
+  getJobLogsIncremental,
   getPipeline,
   humanSize,
   isTerminalStatus,
+  jobLogStreamUrl,
   listArtifacts,
   type Artifact,
   type Job,
@@ -14,6 +16,140 @@ import {
 import { usePoll } from "../hooks/usePoll";
 import StatusBadge from "../components/StatusBadge";
 import ApprovalButtons from "../components/ApprovalButtons";
+
+/**
+ * Live job log: an SSE EventSource on /logs/stream?offset=0 that appends
+ * `log` chunks and settles on `eof`. If the stream can't be established
+ * (buffering proxies) it falls back to incremental polling from the byte
+ * cursor; a finished job that can't stream just renders its full log. On
+ * completion a final plain GET guarantees the complete log is shown.
+ */
+function useJobLog(
+  jobId: string,
+  terminalRef: React.MutableRefObject<boolean>
+) {
+  const [text, setText] = useState("");
+  const [streaming, setStreaming] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!jobId) return;
+
+    setText("");
+    setStreaming(false);
+    setError(null);
+
+    let cancelled = false;
+    let receivedAny = false;
+    let done = false;
+    let offset = 0;
+    let es: EventSource | null = null;
+    let pollTimer: number | null = null;
+
+    const append = (bytes: string, nextOffset: unknown) => {
+      if (bytes) setText((prev) => prev + bytes);
+      if (typeof nextOffset === "number") offset = nextOffset;
+    };
+
+    const finalize = async () => {
+      if (done) return;
+      done = true;
+      setStreaming(false);
+      es?.close();
+      if (pollTimer !== null) window.clearInterval(pollTimer);
+      // Guarantee the complete log with one authoritative plain GET.
+      try {
+        const full = await getJobLogs(jobId);
+        if (!cancelled) setText(full);
+      } catch {
+        /* keep whatever we streamed */
+      }
+    };
+
+    const startPolling = () => {
+      if (done || cancelled || pollTimer !== null) return;
+      const tick = async () => {
+        if (cancelled || done) return;
+        try {
+          const chunk = await getJobLogsIncremental(jobId, offset);
+          if (cancelled) return;
+          append(chunk.bytes, chunk.next_offset);
+          setError(null);
+          if (chunk.eof) await finalize();
+        } catch (err) {
+          if (!cancelled) {
+            setError(err instanceof Error ? err.message : String(err));
+          }
+        }
+      };
+      void tick();
+      pollTimer = window.setInterval(() => void tick(), 2000);
+    };
+
+    try {
+      es = new EventSource(jobLogStreamUrl(jobId, 0));
+    } catch {
+      // EventSource unavailable — go straight to a full GET / polling.
+      if (terminalRef.current) void finalize();
+      else startPolling();
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setStreaming(true);
+
+    es.addEventListener("log", (ev) => {
+      receivedAny = true;
+      setError(null);
+      try {
+        const d = JSON.parse((ev as MessageEvent).data);
+        append(d.bytes ?? "", d.next_offset);
+      } catch {
+        /* ignore malformed frame */
+      }
+    });
+
+    es.addEventListener("eof", (ev) => {
+      receivedAny = true;
+      try {
+        const d = JSON.parse((ev as MessageEvent).data);
+        if (typeof d.next_offset === "number") offset = d.next_offset;
+      } catch {
+        /* ignore */
+      }
+      void finalize();
+    });
+
+    es.onerror = () => {
+      if (done || cancelled) return;
+      // Never rely on EventSource auto-reconnect: our URL is fixed at
+      // offset=0, so a reconnect would resend the whole log. Close and
+      // recover deterministically from the byte cursor instead.
+      es?.close();
+      setStreaming(false);
+      if (terminalRef.current) {
+        // Error after terminal (or a finished job that couldn't stream):
+        // one final GET shows the complete log.
+        void finalize();
+      } else if (!receivedAny) {
+        // Never streamed a byte and still running (buffering proxy): poll.
+        startPolling();
+      } else {
+        // Streamed some, then dropped mid-run: resume from the cursor.
+        startPolling();
+      }
+    };
+
+    return () => {
+      cancelled = true;
+      es?.close();
+      if (pollTimer !== null) window.clearInterval(pollTimer);
+    };
+  }, [jobId, terminalRef]);
+
+  return { text, streaming, error };
+}
 
 export default function JobLog() {
   const { id } = useParams<{ id: string }>();
@@ -27,11 +163,7 @@ export default function JobLog() {
     data: detail,
     error: pipelineError,
     refresh: refreshPipeline,
-  } = usePoll(
-    () => getPipeline(pipelineId ?? ""),
-    2000,
-    Boolean(pipelineId)
-  );
+  } = usePoll(() => getPipeline(pipelineId ?? ""), 2000, Boolean(pipelineId));
 
   const job: Job | null = useMemo(() => {
     if (!detail) return null;
@@ -39,13 +171,15 @@ export default function JobLog() {
   }, [detail, jobId]);
 
   const jobStatus = job?.status ?? null;
-  // Poll logs while the job could still produce output; stop on terminal state.
-  const active = jobStatus === null || !isTerminalStatus(jobStatus);
 
-  const { data: logs, error: logsError } = usePoll(
-    () => getJobLogs(jobId),
-    2000,
-    active
+  // Latest terminal state, readable inside the stream effect without
+  // re-subscribing the EventSource on every status poll.
+  const terminalRef = useRef(false);
+  terminalRef.current = jobStatus !== null && isTerminalStatus(jobStatus);
+
+  const { text: logs, streaming, error: logsError } = useJobLog(
+    jobId,
+    terminalRef
   );
 
   // Artifacts uploaded by this job (fetched once metadata is known and
@@ -64,13 +198,18 @@ export default function JobLog() {
     if (repo) refreshArtifacts();
   }, [repo, jobStatus, refreshArtifacts]);
 
-  // Auto-scroll to the bottom while the job is running.
+  // Auto-scroll: stick to the bottom unless the user scrolled up.
   const termRef = useRef<HTMLPreElement>(null);
+  const stickRef = useRef(true);
+  const onTermScroll = () => {
+    const el = termRef.current;
+    if (!el) return;
+    stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+  };
   useEffect(() => {
-    if (jobStatus === "running" && termRef.current) {
-      termRef.current.scrollTop = termRef.current.scrollHeight;
-    }
-  }, [logs, jobStatus]);
+    const el = termRef.current;
+    if (el && stickRef.current) el.scrollTop = el.scrollHeight;
+  }, [logs]);
 
   const dur = job ? duration(job.started_at, job.finished_at) : null;
 
@@ -136,10 +275,14 @@ export default function JobLog() {
         </div>
       )}
 
-      {logsError && <div className="error-banner">Failed to load logs: {logsError}</div>}
+      {logsError && <div className="error-banner">Log stream error: {logsError}</div>}
 
-      <pre ref={termRef} className="terminal">
-        {logs ?? "Waiting for logs…"}
+      <div className="log-head">
+        <span className="artifacts-title">Log</span>
+        {streaming && <span className="log-live">● live</span>}
+      </div>
+      <pre ref={termRef} className="terminal" onScroll={onTermScroll}>
+        {logs || "Waiting for logs…"}
       </pre>
     </div>
   );

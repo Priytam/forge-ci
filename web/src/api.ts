@@ -574,6 +574,31 @@ export async function getJobLogs(id: number | string): Promise<string> {
   return res.text();
 }
 
+export interface LogChunk {
+  bytes: string;
+  next_offset: number;
+  eof: boolean;
+}
+
+/** Incremental log fetch from a byte offset (poll-fallback path). */
+export async function getJobLogsIncremental(
+  id: number | string,
+  offset: number
+): Promise<LogChunk> {
+  const res = await fetch(`${BASE}/jobs/${id}/logs?offset=${offset}`, {
+    headers: { Accept: "application/json" },
+  });
+  if (!res.ok) {
+    throw await parseError(res);
+  }
+  return (await res.json()) as LogChunk;
+}
+
+/** URL for the SSE log stream (EventSource can't set headers; cookie auth flows automatically). */
+export function jobLogStreamUrl(id: number | string, offset = 0): string {
+  return `${BASE}/jobs/${id}/logs/stream?offset=${offset}`;
+}
+
 export function submitApproval(
   jobId: number | string,
   body: ApprovalRequest
