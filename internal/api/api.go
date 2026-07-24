@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/priytamjeepandey/forge-ci/internal/blob"
@@ -41,12 +40,6 @@ type Server struct {
 	runnerAuth       string // RUNNER_AUTH: "on" | "off"
 	maxJobLogBytes   int64  // MAX_JOB_LOG_BYTES
 	maxArtifactBytes int64  // MAX_ARTIFACT_BYTES
-
-	// Per-job carry-over tail for chunk-boundary secret masking. Holds the
-	// trailing raw bytes of the last log chunk that could still be the prefix
-	// of a masked value completed by the next chunk.
-	maskMu  sync.Mutex
-	maskBuf map[int64]string
 }
 
 func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
@@ -58,7 +51,6 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 		runnerAuth:       runnerAuthMode(),
 		maxJobLogBytes:   envBytes("MAX_JOB_LOG_BYTES", defaultMaxJobLogBytes),
 		maxArtifactBytes: envBytes("MAX_ARTIFACT_BYTES", defaultMaxArtifactByte),
-		maskBuf:          map[int64]string{},
 	}
 	srv.initRunnerAuth()
 	m := srv.mux
@@ -460,17 +452,26 @@ func (s *Server) pushLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	// Redact masked variable values before the chunk is persisted. A secret can
 	// be split across chunk boundaries, so we carry the trailing bytes that
-	// could still be a partial match into the next chunk (see maskChunk). The
-	// GetLogs read path re-masks as a final backstop.
+	// could still be a partial match into the next chunk. The carry-over tail is
+	// held in SHARED state (the log tier / Redis), so masking is correct even
+	// when a job's consecutive chunk POSTs are load-balanced across replicas.
+	// The GetLogs read path re-masks as a final backstop.
 	masked, _ := s.store.MaskedValuesForJob(r.Context(), id)
-	chunk := s.maskChunk(id, string(body), masked)
-	if chunk == "" {
-		// Entire chunk was held back as a possible partial match; nothing to
+	prevTail, _ := s.logs.GetTail(r.Context(), id)
+	emit, keep := maskChunkTail(prevTail, string(body), masked)
+	// Advance the shared tail first so a subsequent chunk (possibly on another
+	// replica) never re-stitches these bytes; an Append failure below then only
+	// loses this window, never leaks a boundary-split secret.
+	if err := s.logs.SetTail(r.Context(), id, keep); err != nil {
+		slog.Error("set mask tail", "err", err, "job", id)
+	}
+	if emit == "" {
+		// Everything is still held back as a possible partial match; nothing to
 		// store yet. It will flush with the next chunk or at completion.
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
-	if _, err := s.logs.Append(r.Context(), id, []byte(chunk), s.maxJobLogBytes); err != nil {
+	if _, err := s.logs.Append(r.Context(), id, []byte(emit), s.maxJobLogBytes); err != nil {
 		// Degrade rather than hang the runner: a log-tier write failure (e.g.
 		// Redis blip) is logged and counted, but we still ACK so the job keeps
 		// running. The bytes for this window are lost; the job is not.
@@ -492,26 +493,24 @@ func maxMaskedLen(masked []string) int {
 	return n
 }
 
-// maskChunk masks masked values across chunk boundaries. It prepends the tail
-// carried from the previous chunk, masks the combined text, then holds back a
-// trailing window (up to maxLen-1 bytes) that could be the start of a masked
-// value completed by the next chunk. The held-back window is chosen so that no
-// masked value straddles the emitted/held boundary. Returns the text to store
-// now (possibly empty when everything is still uncertain).
-func (s *Server) maskChunk(jobID int64, chunk string, masked []string) string {
+// maskChunkTail masks masked values across a chunk boundary. Given prevTail
+// (carried from the previous chunk) and the new chunk, it masks the combined
+// text and splits it into `emit` (safe to store now) and `keep` (a trailing
+// window, up to maxLen-1 bytes, that could be the start of a masked value
+// completed by the next chunk). The split is chosen so no masked value straddles
+// the emit/keep boundary. Pure function: state (prevTail/keep) lives in the
+// shared log tier so it is correct across replicas.
+func maskChunkTail(prevTail, chunk string, masked []string) (emit, keep string) {
+	combined := prevTail + chunk
 	maxLen := maxMaskedLen(masked)
 	if maxLen == 0 {
-		return chunk // nothing to mask
+		return combined, "" // nothing to mask (prevTail is always "" in this case)
 	}
-	s.maskMu.Lock()
-	combined := s.maskBuf[jobID] + chunk
-	keep := maxLen - 1
-	if len(combined) <= keep {
-		s.maskBuf[jobID] = combined
-		s.maskMu.Unlock()
-		return ""
+	window := maxLen - 1
+	if len(combined) <= window {
+		return "", combined
 	}
-	split := len(combined) - keep
+	split := len(combined) - window
 	// Extend the split point rightward past any masked value that straddles it,
 	// so the emitted prefix never cuts through a match. Iterate to a fixpoint
 	// (an extension can pull in a further straddling match).
@@ -542,23 +541,18 @@ func (s *Server) maskChunk(jobID int64, chunk string, masked []string) string {
 	if split > len(combined) {
 		split = len(combined)
 	}
-	emit := maskAll(combined[:split], masked)
-	s.maskBuf[jobID] = combined[split:]
-	s.maskMu.Unlock()
-	return emit
+	return maskAll(combined[:split], masked), combined[split:]
 }
 
-// flushMaskTail masks and stores any bytes still held for a job, then drops its
-// buffer. Called when the job leaves 'running' (complete/cancel/requeue) so no
-// trailing output is lost.
+// flushMaskTail masks and stores any bytes still held for a job, then clears the
+// shared tail. Called when the job leaves 'running' (complete/cancel/requeue) so
+// no trailing output is lost.
 func (s *Server) flushMaskTail(ctx context.Context, jobID int64) {
-	s.maskMu.Lock()
-	tail := s.maskBuf[jobID]
-	delete(s.maskBuf, jobID)
-	s.maskMu.Unlock()
+	tail, _ := s.logs.GetTail(ctx, jobID)
 	if tail == "" {
 		return
 	}
+	_ = s.logs.SetTail(ctx, jobID, "")
 	masked, _ := s.store.MaskedValuesForJob(ctx, jobID)
 	if _, err := s.logs.Append(ctx, jobID, []byte(maskAll(tail, masked)), s.maxJobLogBytes); err != nil {
 		slog.Error("flush log tail", "err", err, "job", jobID)

@@ -2,6 +2,7 @@ package logstore
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/priytamjeepandey/forge-ci/internal/store"
@@ -11,11 +12,37 @@ import (
 // exactly as before. It has no pub/sub, so SSE degrades to a poll loop. Reads
 // go through the store's masked GetLogs; there is no separate archive step
 // (bodies are already durable in Postgres).
+//
+// The masking carry-over tail is kept in process memory here: the postgres
+// backend is the single-instance dev path, so there is no cross-replica
+// sharing to worry about (the redis backend handles that case in Redis).
 type pgBackend struct {
 	store *store.Store
+
+	tmu   sync.Mutex
+	tails map[int64]string
 }
 
-func newPGBackend(st *store.Store) *pgBackend { return &pgBackend{store: st} }
+func newPGBackend(st *store.Store) *pgBackend {
+	return &pgBackend{store: st, tails: map[int64]string{}}
+}
+
+func (b *pgBackend) GetTail(_ context.Context, jobID int64) (string, error) {
+	b.tmu.Lock()
+	defer b.tmu.Unlock()
+	return b.tails[jobID], nil
+}
+
+func (b *pgBackend) SetTail(_ context.Context, jobID int64, tail string) error {
+	b.tmu.Lock()
+	defer b.tmu.Unlock()
+	if tail == "" {
+		delete(b.tails, jobID)
+	} else {
+		b.tails[jobID] = tail
+	}
+	return nil
+}
 
 func (b *pgBackend) Kind() string { return "postgres" }
 

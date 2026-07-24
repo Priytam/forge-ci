@@ -25,6 +25,7 @@ type redisBackend struct {
 func bufKey(id int64) string   { return fmt.Sprintf("log:{%d}:buf", id) }
 func truncKey(id int64) string { return fmt.Sprintf("log:{%d}:trunc", id) }
 func chanKey(id int64) string  { return fmt.Sprintf("log:{%d}:ch", id) }
+func tailKey(id int64) string  { return fmt.Sprintf("log:{%d}:tail", id) }
 
 // appendScript enforces the cumulative byte cap atomically: it appends what
 // fits, writes the truncation notice once, sets the trunc flag, and refreshes
@@ -144,13 +145,31 @@ func (b *redisBackend) Truncated(ctx context.Context, jobID int64) (bool, error)
 
 func (b *redisBackend) Evict(ctx context.Context, jobID int64, ttl time.Duration) error {
 	if ttl <= 0 {
-		return b.rdb.Del(ctx, bufKey(jobID), truncKey(jobID)).Err()
+		return b.rdb.Del(ctx, bufKey(jobID), truncKey(jobID), tailKey(jobID)).Err()
 	}
 	pipe := b.rdb.Pipeline()
 	pipe.PExpire(ctx, bufKey(jobID), ttl)
 	pipe.PExpire(ctx, truncKey(jobID), ttl)
+	pipe.PExpire(ctx, tailKey(jobID), ttl)
 	_, err := pipe.Exec(ctx)
 	return err
+}
+
+// GetTail returns the carry-over masking tail (a Redis String); "" when unset.
+func (b *redisBackend) GetTail(ctx context.Context, jobID int64) (string, error) {
+	v, err := b.rdb.Get(ctx, tailKey(jobID)).Result()
+	if err == redis.Nil {
+		return "", nil
+	}
+	return v, err
+}
+
+// SetTail stores the carry-over masking tail with the running TTL; ""=delete.
+func (b *redisBackend) SetTail(ctx context.Context, jobID int64, tail string) error {
+	if tail == "" {
+		return b.rdb.Del(ctx, tailKey(jobID)).Err()
+	}
+	return b.rdb.Set(ctx, tailKey(jobID), tail, runningTTL).Err()
 }
 
 // redisSubscription adapts a Redis PubSub to the Subscription interface: it

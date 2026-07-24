@@ -84,6 +84,14 @@ type Backend interface {
 	Truncated(ctx context.Context, jobID int64) (bool, error)
 	// Evict schedules removal of the live buffer after ttl (<=0 removes now).
 	Evict(ctx context.Context, jobID int64, ttl time.Duration) error
+	// GetTail returns the carry-over masking tail held for a job ("" if none).
+	// This is the trailing bytes of the last chunk that could still be the prefix
+	// of a masked value completed by the next chunk. Held in SHARED state (Redis)
+	// so chunk-boundary masking is correct even when a job's consecutive chunk
+	// POSTs are load-balanced across server replicas.
+	GetTail(ctx context.Context, jobID int64) (string, error)
+	// SetTail stores the carry-over masking tail for a job (empty clears it).
+	SetTail(ctx context.Context, jobID int64, tail string) error
 	// Subscribe returns a wake stream for the job; ok=false when the backend has
 	// no native pub/sub and the caller must poll instead.
 	Subscribe(ctx context.Context, jobID int64) (sub Subscription, ok bool)
@@ -166,6 +174,16 @@ func (s *Service) Append(ctx context.Context, jobID int64, p []byte, capBytes in
 		s.metrics.Truncations.Add(1)
 	}
 	return res, nil
+}
+
+// GetTail returns the shared chunk-boundary masking tail for a job.
+func (s *Service) GetTail(ctx context.Context, jobID int64) (string, error) {
+	return s.backend.GetTail(ctx, jobID)
+}
+
+// SetTail stores the shared chunk-boundary masking tail for a job (""=clear).
+func (s *Service) SetTail(ctx context.Context, jobID int64, tail string) error {
+	return s.backend.SetTail(ctx, jobID, tail)
 }
 
 // maskBackstop re-masks a fully-assembled log body, matching the legacy
