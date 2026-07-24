@@ -127,6 +127,14 @@ func (sc *Scheduler) gc(ctx context.Context) {
 		slog.Info("gc: deleted expired webhook deliveries", "rows", n)
 	}
 
+	// Prune the append-only audit trail. This is the ONLY path that deletes
+	// audit rows (retention only); normal operation is insert/select.
+	if n, err := sc.store.DeleteExpiredAudit(ctx, sc.retention); err != nil {
+		slog.Error("gc: delete expired audit rows", "err", err)
+	} else if n > 0 {
+		slog.Info("gc: deleted expired audit rows", "rows", n)
+	}
+
 	// Delete artifact blobs and archived log objects first (we still have the DB
 	// rows to find their keys), then cascade-delete the pipeline rows.
 	keys, err := sc.store.ExpiredArtifactBlobKeys(ctx, sc.retention)

@@ -81,6 +81,7 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 	srv.registerWebhookRoutes()
 	srv.registerAuthRoutes()
 	srv.registerRunnerTokenRoutes()
+	srv.registerAuditRoutes()
 
 	return srv
 }
@@ -131,6 +132,14 @@ func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
 	if req.Repo == "" || req.Ref == "" || req.Config == "" {
 		writeErr(w, http.StatusBadRequest, "repo, ref and config are required")
 		return
+	}
+	// Identity-from-session: when SSO is enforced, the trigger identity is the
+	// authenticated user — a client-supplied triggered_by is ignored. This keeps
+	// the separation-of-duties self-approval check (pipeline author may not
+	// approve their own deployment) honest. Open bootstrap mode keeps the client
+	// value (webhook triggers use the pusher identity via triggerFromWebhook).
+	if actor := s.sessionActor(r); actor != "" {
+		req.TriggeredBy = actor
 	}
 	// Connected repos resolve the ref tip themselves — an explicit sha is an
 	// advanced override. Unconnected repos have nothing to resolve against.
@@ -314,10 +323,16 @@ func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	// With a live SSO session the approver is the AUTHENTICATED identity —
-	// the client-supplied name is ignored.
+	// Identity-from-session: with a live SSO session the approver is the
+	// AUTHENTICATED identity and the client-supplied name is ignored. When SSO
+	// is enforced a session is guaranteed by requireAuth, so a body approver can
+	// never be honored; in open bootstrap mode the client value is used.
 	if sess := s.currentSession(r); sess != nil {
 		req.Approver = sess.Email
+	} else if s.ssoEnforced(r.Context()) {
+		// Defense in depth: reach here only if the middleware were bypassed.
+		writeErr(w, http.StatusUnauthorized, "authentication required — sign in via SSO")
+		return
 	}
 	if req.Approver == "" {
 		writeErr(w, http.StatusBadRequest, "approver is required")
@@ -327,6 +342,7 @@ func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, `verdict must be "approved" or "rejected"`)
 		return
 	}
+	target := strconv.FormatInt(id, 10)
 	job, err := s.store.Approve(r.Context(), id, req)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
@@ -336,13 +352,17 @@ func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, store.ErrDuplicateVote):
 		writeErr(w, http.StatusConflict, "you have already voted on this job")
 	case errors.Is(err, store.ErrForbidden):
+		s.auditAs(r, req.Approver, "approval.vote", target, "", "denied", map[string]any{"verdict": req.Verdict})
 		writeErr(w, http.StatusForbidden, err.Error())
 	case errors.Is(err, store.ErrSelfApproval):
+		s.auditAs(r, req.Approver, "approval.vote", target, "", "denied", map[string]any{"verdict": req.Verdict})
 		writeErr(w, http.StatusForbidden, err.Error())
 	case err != nil:
 		slog.Error("approve", "err", err)
 		writeErr(w, http.StatusInternalServerError, "failed to record approval")
 	default:
+		// Actor is the resolved approver (session email when enforced).
+		s.auditAs(r, req.Approver, "approval.vote", target, "", "ok", map[string]any{"verdict": req.Verdict})
 		writeJSON(w, http.StatusOK, map[string]any{"job": job})
 	}
 }
@@ -369,6 +389,7 @@ func (s *Server) cancelPipeline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	slog.Info("pipeline cancel requested", "pipeline", id)
+	s.audit(r, "pipeline.cancel", strconv.FormatInt(id, 10), p.Repo, "ok", nil)
 	writeJSON(w, http.StatusOK, map[string]any{"pipeline": p, "jobs": jobs})
 }
 
@@ -394,6 +415,7 @@ func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	slog.Info("job cancel requested", "job", id, "status", job.Status)
+	s.audit(r, "job.cancel", strconv.FormatInt(id, 10), "", "ok", map[string]any{"status": job.Status})
 	writeJSON(w, http.StatusOK, map[string]any{"job": job})
 }
 

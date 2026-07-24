@@ -67,8 +67,9 @@ INSERT INTO protected_environments (repo, name, required_approvals)
 SELECT '', 'production', 1
 WHERE NOT EXISTS (SELECT 1 FROM protected_environments WHERE repo='' AND name='production');
 
--- Repo membership: who is what on a repo. Enforced at the approval endpoint
--- (identity is client-asserted until OIDC fronts the API — see docs).
+-- Repo membership: who is what on a repo. Enforced at the approval endpoint.
+-- When SSO is enforced the approver identity comes from the session (see
+-- docs/sso.md); in open bootstrap mode it is client-asserted.
 CREATE TABLE IF NOT EXISTS repo_members (
     id       BIGSERIAL PRIMARY KEY,
     repo     TEXT NOT NULL,
@@ -299,3 +300,29 @@ CREATE TABLE IF NOT EXISTS pipeline_status_posts (
     posted_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (pipeline_id, status)
 );
+
+-- Append-only audit trail of mutating admin/settings actions (and denied
+-- attempts). Written after a successful mutation, and on a 401/403 for an admin
+-- route. NEVER stores secret values, tokens or client secrets — detail carries
+-- only safe metadata. Rows are only ever INSERTed and SELECTed in normal paths;
+-- the retention sweep (RETENTION_DAYS) is the sole path that deletes, pruning
+-- rows older than the window. actor is the authenticated session email when SSO
+-- is enforced, else a fixed label ('bootstrap'/'webhook'/'runner'). result is
+-- 'ok' | 'denied' | 'error'. repo is duplicated out of detail for cheap
+-- filtering on GET /api/v1/audit-log?repo=.
+CREATE TABLE IF NOT EXISTS audit_log (
+    id         BIGSERIAL   PRIMARY KEY,
+    ts         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    actor      TEXT        NOT NULL DEFAULT '',
+    action     TEXT        NOT NULL,
+    target     TEXT        NOT NULL DEFAULT '',
+    repo       TEXT        NOT NULL DEFAULT '',
+    detail     JSONB       NOT NULL DEFAULT '{}',
+    source_ip  TEXT        NOT NULL DEFAULT '',
+    result     TEXT        NOT NULL DEFAULT 'ok'
+);
+-- Newest-first listing, optionally filtered by repo or actor.
+CREATE INDEX IF NOT EXISTS audit_log_id_idx    ON audit_log (id DESC);
+CREATE INDEX IF NOT EXISTS audit_log_ts_idx    ON audit_log (ts);
+CREATE INDEX IF NOT EXISTS audit_log_repo_idx  ON audit_log (repo);
+CREATE INDEX IF NOT EXISTS audit_log_actor_idx ON audit_log (actor);

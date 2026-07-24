@@ -33,6 +33,43 @@ admin-only navigation.
 > Footgun: enabling SSO with an empty `ADMIN_EMAILS` locks everyone out of
 > admin mutations. Set `ADMIN_EMAILS` **before** enabling a provider.
 
+## Identity from the session (no client-asserted identity when enforced)
+
+When SSO is enforced, the server derives the acting identity from the
+authenticated session — it never trusts an actor/author/approver value in the
+request body:
+
+- **Approvals** (`POST /jobs/{id}/approvals`): the approver is the session
+  email; a body `approver` is ignored. With enforcement on, a session is
+  guaranteed (the request is otherwise `401`).
+- **Config version author** (`PUT /repo-configs`, `POST /repo-configs/revert`):
+  the recorded `author` is the session email; a body `author` is ignored.
+
+In **open bootstrap mode** (no SSO enabled) there is no session, so a
+client-supplied approver/author is still accepted — this keeps CLI/dev bootstrap
+working. Mutating admin endpoints additionally require `requireAdmin`; with SSO
+enforced that means a session whose email is in `ADMIN_EMAILS`, and every
+mutating admin route is gated (unauthenticated → `401`, non-admin → `403`).
+
+## Audit log
+
+Every mutating admin/settings action is recorded in the append-only `audit_log`
+table, plus a `denied` entry whenever an admin route returns `401`/`403`.
+
+- **Read API**: `GET /api/v1/audit-log?limit=&offset=&repo=&actor=`
+  (admin-only, newest first, paginated; `limit` defaults to 50, capped at 200).
+- **Recorded fields**: `actor` (session email, or `bootstrap`/`anonymous`),
+  `action` (e.g. `variable.create`, `sso.upsert`, `member.add`,
+  `repo-config.push`, `runner-token.revoke`, `approval.vote`,
+  `admin.denied`), `target`, `repo`, `detail` (safe metadata only), `source_ip`
+  (`X-Forwarded-For` first hop, else `RemoteAddr`), and `result`
+  (`ok`/`denied`/`error`).
+- **Never logged**: secret values, tokens, client secrets or variable values —
+  `detail` carries only flags/names (e.g. `masked`, `has_token`, `token_suffix`).
+- **Retention**: rows are append-only in normal operation; the scheduler's
+  retention sweep prunes rows older than `RETENTION_DAYS` (default 30; `0`
+  disables pipeline/artifact/audit pruning).
+
 ## CSRF protection
 
 Cookie-authenticated state-changing requests (POST/PUT/DELETE carrying the

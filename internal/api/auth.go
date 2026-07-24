@@ -154,6 +154,13 @@ func (s *Server) requireAuth(w http.ResponseWriter, r *http.Request) bool {
 	if s.currentSession(r) != nil {
 		return true
 	}
+	// Record unauthenticated attempts to mutate as denied. Safe methods (GET/
+	// HEAD/OPTIONS) are not audited to avoid flooding the trail with anonymous
+	// reads that are simply bounced to the login flow.
+	switch r.Method {
+	case http.MethodPost, http.MethodPut, http.MethodDelete:
+		s.audit(r, "auth.denied", r.Method+" "+r.URL.Path, r.URL.Query().Get("repo"), "denied", nil)
+	}
 	writeErr(w, http.StatusUnauthorized, "authentication required — sign in via SSO")
 	return false
 }
@@ -330,6 +337,13 @@ func (s *Server) upsertSSO(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	slog.Info("sso config updated", "provider", p.Provider, "enabled", p.Enabled)
+	// NEVER record client_secret; only safe metadata.
+	s.audit(r, "sso.upsert", p.Provider, "", "ok", map[string]any{
+		"provider":       p.Provider,
+		"enabled":        p.Enabled,
+		"client_id_set":  p.ClientID != "",
+		"allowed_domain": p.AllowedDomain,
+	})
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -22,11 +22,15 @@ curl -X DELETE $FORGE/api/v1/members/<id>                     # remove
 > (anyone may approve). The moment the first member is added, enforcement
 > turns on. Add members before you rely on the gate.
 
-> **Identity caveat:** Forge does not yet authenticate users — the approver
-> name is client-asserted. The RBAC mechanism is fully enforced server-side,
-> but until an OIDC proxy fronts the API, identity itself is trust-based.
-> Front `forge-server` with an authenticating reverse proxy and map the
-> proxy's identity header before production use.
+> **Identity:** When SSO is enforced (any provider enabled — see
+> `docs/sso.md`), the approver is the **authenticated session email**; a body
+> `approver` is ignored and the endpoint is unreachable without a session
+> (`401`). RBAC membership should therefore use work emails as usernames. In
+> **open bootstrap mode** (no SSO enabled) there is no session, so the approver
+> name is client-asserted — enable SSO before relying on approver identity.
+> Every vote (and every denied vote) is recorded in `audit_log` as
+> `approval.vote` with the resolved approver as `actor` (see `docs/sso.md` →
+> Audit log).
 
 ## Approval rules (protected environments)
 

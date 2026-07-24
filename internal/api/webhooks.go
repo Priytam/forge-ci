@@ -88,6 +88,13 @@ func (s *Server) registerRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	slog.Info("repo registered", "repo", req.Repo, "provider", req.Provider)
+	// NEVER record the token.
+	s.audit(r, "repo-registry.register", req.Repo, req.Repo, "ok", map[string]any{
+		"provider":       req.Provider,
+		"clone_url":      req.CloneURL,
+		"default_branch": req.DefaultBranch,
+		"has_token":      req.Token != "",
+	})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -339,11 +346,22 @@ func (s *Server) putRepoConfig(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "config error: "+err.Error())
 		return
 	}
+	// Identity-from-session: when SSO is enforced the config author is the
+	// AUTHENTICATED identity — a client-supplied author is ignored. In open
+	// bootstrap mode the client value is preserved.
+	if actor := s.sessionActor(r); actor != "" {
+		req.Author = actor
+	}
 	version, err := s.store.SetRepoConfig(r.Context(), req.Repo, req.Config, req.Author, req.Message)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "failed to save config")
 		return
 	}
+	s.audit(r, "repo-config.push", req.Repo, req.Repo, "ok", map[string]any{
+		"version": version,
+		"author":  req.Author,
+		"message": req.Message,
+	})
 	writeJSON(w, http.StatusOK, map[string]any{"repo": req.Repo, "version": version})
 }
 
@@ -423,11 +441,21 @@ func (s *Server) revertRepoConfig(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "failed to load version")
 		return
 	}
+	// Identity-from-session: the revert author is the authenticated identity
+	// when SSO is enforced; the client value is kept only in open bootstrap mode.
+	if actor := s.sessionActor(r); actor != "" {
+		req.Author = actor
+	}
 	newVersion, err := s.store.SetRepoConfig(r.Context(), req.Repo, config, req.Author,
 		fmt.Sprintf("revert to v%d", req.Version))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "failed to revert")
 		return
 	}
+	s.audit(r, "repo-config.revert", req.Repo, req.Repo, "ok", map[string]any{
+		"version":     newVersion,
+		"reverted_to": req.Version,
+		"author":      req.Author,
+	})
 	writeJSON(w, http.StatusOK, map[string]any{"repo": req.Repo, "version": newVersion, "reverted_to": req.Version})
 }

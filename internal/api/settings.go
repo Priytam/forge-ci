@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/priytamjeepandey/forge-ci/internal/proto"
@@ -108,6 +109,13 @@ func (s *Server) createVariable(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "failed to create variable")
 		return
 	}
+	// NEVER record the variable value.
+	s.audit(r, "variable.create", v.Key, v.Repo, "ok", map[string]any{
+		"key":               v.Key,
+		"masked":            v.Masked,
+		"protected":         v.Protected,
+		"environment_scope": v.EnvironmentScope,
+	})
 	writeJSON(w, http.StatusCreated, v)
 }
 
@@ -140,6 +148,14 @@ func (s *Server) updateVariable(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "failed to update variable")
 		return
 	}
+	// NEVER record the variable value.
+	s.audit(r, "variable.update", v.Key, v.Repo, "ok", map[string]any{
+		"id":                v.ID,
+		"key":               v.Key,
+		"masked":            v.Masked,
+		"protected":         v.Protected,
+		"environment_scope": v.EnvironmentScope,
+	})
 	writeJSON(w, http.StatusOK, v)
 }
 
@@ -161,6 +177,7 @@ func (s *Server) deleteVariable(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "failed to delete variable")
 		return
 	}
+	s.audit(r, "variable.delete", strconv.FormatInt(id, 10), "", "ok", map[string]any{"id": id})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -187,7 +204,8 @@ func (s *Server) pauseRunner(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	runner, err := s.store.SetRunnerPaused(r.Context(), r.PathValue("rid"), req.Paused)
+	rid := r.PathValue("rid")
+	runner, err := s.store.SetRunnerPaused(r.Context(), rid, req.Paused)
 	if errors.Is(err, store.ErrNotFound) {
 		writeErr(w, http.StatusNotFound, "runner not found")
 		return
@@ -196,6 +214,11 @@ func (s *Server) pauseRunner(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "failed to update runner")
 		return
 	}
+	action := "runner.resume"
+	if req.Paused {
+		action = "runner.pause"
+	}
+	s.audit(r, action, rid, "", "ok", map[string]any{"paused": req.Paused})
 	writeJSON(w, http.StatusOK, runner)
 }
 
@@ -324,6 +347,9 @@ func (s *Server) putRepoSettings(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "failed to save repo settings")
 		return
 	}
+	s.audit(r, "repo-settings.update", req.Repo, req.Repo, "ok", map[string]any{
+		"default_runner_tags": req.DefaultRunnerTags,
+	})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -366,6 +392,10 @@ func (s *Server) addMember(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "failed to add member")
 		return
 	}
+	s.audit(r, "member.add", m.Username, m.Repo, "ok", map[string]any{
+		"username": m.Username,
+		"role":     m.Role,
+	})
 	writeJSON(w, http.StatusCreated, m)
 }
 
@@ -387,6 +417,7 @@ func (s *Server) removeMember(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "failed to remove member")
 		return
 	}
+	s.audit(r, "member.remove", strconv.FormatInt(id, 10), "", "ok", map[string]any{"id": id})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -425,5 +456,11 @@ func (s *Server) upsertProtectedEnv(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "failed to save approval rule")
 		return
 	}
+	s.audit(r, "protected-env.upsert", out.Name, out.Repo, "ok", map[string]any{
+		"name":                out.Name,
+		"required_approvals":  out.RequiredApprovals,
+		"approver_roles":      out.ApproverRoles,
+		"allow_self_approval": out.AllowSelfApproval,
+	})
 	writeJSON(w, http.StatusOK, out)
 }

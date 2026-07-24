@@ -137,13 +137,40 @@ func (s *Server) isAdmin(r *http.Request) bool {
 	return adminEmails()[strings.ToLower(sess.Email)]
 }
 
-// requireAdmin gates a mutating admin endpoint.
+// requireAdmin gates a mutating admin endpoint. On denial it records a "denied"
+// audit entry (centralized here so every admin 403 is captured) before writing
+// the 403.
 func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	if s.isAdmin(r) {
 		return true
 	}
+	s.audit(r, "admin.denied", r.Method+" "+r.URL.Path, r.URL.Query().Get("repo"), "denied", nil)
 	writeErr(w, http.StatusForbidden, "admin privileges required")
 	return false
+}
+
+// sessionActor returns the authenticated identity (session email) or "" when
+// there is no session. Callers use it to overwrite a client-asserted
+// actor/author/approver with the trusted identity WHEN SSO is enforced, while
+// preserving the client value in open bootstrap mode (no session).
+func (s *Server) sessionActor(r *http.Request) string {
+	if sess := s.currentSession(r); sess != nil {
+		return sess.Email
+	}
+	return ""
+}
+
+// maskTokenHandle returns a runner-token revoke handle safe to store in the
+// audit trail: a purely numeric id is kept verbatim; anything else is assumed to
+// be a raw token and is reduced to "token:…<last4>" so no secret is recorded.
+func maskTokenHandle(h string) string {
+	if _, err := strconv.ParseInt(h, 10, 64); err == nil {
+		return h
+	}
+	if len(h) >= 4 {
+		return "token:…" + h[len(h)-4:]
+	}
+	return "token:…"
 }
 
 // ---- CSRF protection (blocker 4) ----
@@ -228,6 +255,11 @@ func (s *Server) createRunnerToken(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "failed to create runner token")
 		return
 	}
+	// NEVER record the raw token; the last-4 suffix is safe metadata.
+	s.audit(r, "runner-token.create", strconv.FormatInt(rt.ID, 10), "", "ok", map[string]any{
+		"description":  rt.Description,
+		"token_suffix": rt.TokenSuffix,
+	})
 	// rt.Token is returned exactly once, here.
 	writeJSON(w, http.StatusCreated, rt)
 }
@@ -236,7 +268,8 @@ func (s *Server) revokeRunnerToken(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	err := s.store.RevokeRunnerToken(r.Context(), r.PathValue("tid"))
+	tid := r.PathValue("tid")
+	err := s.store.RevokeRunnerToken(r.Context(), tid)
 	if errors.Is(err, store.ErrNotFound) {
 		writeErr(w, http.StatusNotFound, "runner token not found")
 		return
@@ -245,5 +278,8 @@ func (s *Server) revokeRunnerToken(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "failed to revoke runner token")
 		return
 	}
+	// tid may be the numeric id or the raw token. Record the id verbatim but
+	// NEVER echo a token value: a non-numeric handle is masked to its last 4.
+	s.audit(r, "runner-token.revoke", maskTokenHandle(tid), "", "ok", nil)
 	w.WriteHeader(http.StatusNoContent)
 }
