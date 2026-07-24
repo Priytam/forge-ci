@@ -37,6 +37,10 @@ func (s *Server) registerSettingsRoutes() {
 	m.HandleFunc("GET /api/v1/artifacts/{id}/download", s.downloadArtifact)
 	m.HandleFunc("POST /api/v1/runner/jobs/{id}/artifacts", s.uploadArtifact)
 
+	// Test reports (JUnit). The runner POSTs XML; the server parses + stores it.
+	m.HandleFunc("POST /api/v1/runner/jobs/{id}/report", s.uploadReport)
+	m.HandleFunc("GET /api/v1/jobs/{id}/report", s.getReport)
+
 	// Cache (runner restore/save; shared across pipelines per repo+key).
 	m.HandleFunc("GET /api/v1/runner/jobs/{id}/cache", s.downloadCache)
 	m.HandleFunc("POST /api/v1/runner/jobs/{id}/cache", s.uploadCache)
@@ -313,6 +317,66 @@ func (s *Server) downloadArtifact(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/gzip")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name))
 	_, _ = io.Copy(w, rc)
+}
+
+// ---- test reports (JUnit) ----
+
+// maxReportBytes caps a single report upload so a runaway XML can't exhaust
+// memory. JUnit XML is text and small; 32 MiB is generous.
+const maxReportBytes = 32 << 20
+
+// uploadReport ingests a job's concatenated JUnit XML, parses it server-side,
+// and stores a per-job summary. Malformed or empty XML is NOT an error: the
+// server records no report and returns 200 {"parsed": false} so the runner
+// never fails a successful job over a bad report.
+func (s *Server) uploadReport(w http.ResponseWriter, r *http.Request) {
+	if !s.requireRunnerAuth(w, r) {
+		return
+	}
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxReportBytes))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "failed to read report body")
+		return
+	}
+	report, parsed := parseJUnit(body, id)
+	if !parsed {
+		// Empty/malformed/zero-test XML: not a job failure, just no report.
+		writeJSON(w, http.StatusOK, map[string]any{"parsed": false})
+		return
+	}
+	if err := s.store.SaveJUnitReport(r.Context(), report); err != nil {
+		slog.Error("save junit report", "err", err, "job", id)
+		writeErr(w, http.StatusInternalServerError, "failed to store report")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"parsed": true, "total": report.Total, "failed": report.Failed, "skipped": report.Skipped,
+	})
+}
+
+// getReport returns a job's parsed JUnit summary, or 404 when it has none.
+func (s *Server) getReport(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+	report, err := s.store.GetJUnitReport(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "no test report for this job")
+		return
+	}
+	if err != nil {
+		slog.Error("get junit report", "err", err, "job", id)
+		writeErr(w, http.StatusInternalServerError, "failed to load report")
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
 }
 
 // ---- cache ----

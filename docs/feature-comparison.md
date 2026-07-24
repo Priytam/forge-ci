@@ -16,7 +16,7 @@ Legend: ✅ shipped · 🟡 partial · ❌ not yet (roadmap).
 | DAG via `needs` | ✅ | ✅ | explicit must point to earlier stage |
 | Ref-conditional jobs (`only/except`, `rules:`) | ✅ rules engine | ✅ `only/except` globs + `rules:` engine | `rules: if/when` with a safe expr evaluator; `changes/exists` are documented no-ops (no checkout at compile time) — see docs/pipeline-dsl.md |
 | `variables` at job level | ✅ | ✅ | |
-| Artifacts (`paths`) | ✅ + expiry, reports | 🟡 paths only | add `expire_in`, junit test reports |
+| Artifacts (`paths`) | ✅ + expiry, reports | ✅ `paths` + `expire_in` + `reports.junit` | per-artifact TTL (server-side GC, independent of `RETENTION_DAYS`); JUnit XML parsed into a per-job pass/fail summary at `GET /jobs/{id}/report` — see docs/pipeline-dsl.md |
 | Caching (keyed, per-lockfile) | ✅ | ✅ | `cache: {key, paths, policy}`, literal or content-addressed `key.files`, shared across pipelines — see docs/pipeline-dsl.md |
 | Templates: `include`, `extends`, anchors | ✅ | 🟡 `include` (per-repo templates) + `extends` | anchors N/A; remote/URL includes out of scope (no network fetch) — see docs/pipeline-dsl.md |
 | Matrix builds (`parallel:`) | ✅ | ✅ | `parallel: N` and `parallel: {matrix}` with `needs` fan-in |

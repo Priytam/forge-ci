@@ -219,6 +219,34 @@ CREATE TABLE IF NOT EXISTS artifacts (
 );
 CREATE INDEX IF NOT EXISTS artifacts_job_idx ON artifacts (job_id);
 
+-- Per-artifact expiry (from artifacts.expire_in). The server stamps this at
+-- upload as now() + jobs.artifact_expire_seconds when that is > 0; NULL means no
+-- explicit expiry (the artifact relies on the RETENTION_DAYS sweep). The GC
+-- sweep deletes rows whose expires_at < now() INDEPENDENTLY of RETENTION_DAYS,
+-- so a short expire_in expires promptly even when retention is large or off.
+ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS artifacts_expires_idx ON artifacts (expires_at)
+    WHERE expires_at IS NOT NULL;
+
+-- artifact_expire_seconds carries a job's artifacts.expire_in to the upload
+-- handler; report_junit carries artifacts.reports.junit globs to the runner.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS artifact_expire_seconds INT   NOT NULL DEFAULT 0;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS report_junit            JSONB NOT NULL DEFAULT '[]';
+
+-- Per-job test report parsed server-side from uploaded JUnit XML (one row per
+-- job; a re-run's re-upload replaces it). failures is a JSON array of
+-- {name, classname, type, message} for the failed/errored cases.
+CREATE TABLE IF NOT EXISTS job_reports (
+    job_id           BIGINT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+    total            INT              NOT NULL,
+    passed           INT              NOT NULL,
+    failed           INT              NOT NULL,
+    skipped          INT              NOT NULL,
+    duration_seconds DOUBLE PRECISION NOT NULL DEFAULT 0,
+    failures         JSONB            NOT NULL DEFAULT '[]',
+    created_at       TIMESTAMPTZ      NOT NULL DEFAULT now()
+);
+
 -- Cache entries: the runner restores/saves per-job caches through the server.
 -- Unlike artifacts (per-job, per-pipeline), a cache is SHARED across pipelines
 -- for the same repo+key, so it survives the retention sweep of the pipeline that

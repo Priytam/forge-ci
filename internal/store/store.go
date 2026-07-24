@@ -267,6 +267,7 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 	for _, j := range jobs {
 		env, _ := json.Marshal(j.Env)
 		artifacts, _ := json.Marshal(j.ArtifactPaths)
+		reportJUnit, _ := json.Marshal(j.ReportJUnit)
 		cachePaths, _ := json.Marshal(j.CachePaths)
 		cacheKeyFiles, _ := json.Marshal(j.CacheKeyFiles)
 		services, _ := json.Marshal(j.Services)
@@ -296,9 +297,9 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 		}
 		var id int64
 		err = tx.QueryRow(ctx,
-			`INSERT INTO jobs (pipeline_id, name, stage, stage_idx, image, script, env, environment, tags, artifact_paths, cache_paths, cache_key, cache_key_files, cache_policy, services, timeout_seconds, max_attempts, status, manual, allow_failure, blocked_at)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) RETURNING id`,
-			p.ID, j.Name, j.Stage, j.StageIdx, image, j.Script, env, environment, tags, artifacts, cachePaths, j.CacheKey, cacheKeyFiles, j.CachePolicy, services, timeoutSec, j.Retry+1, status, j.Manual, j.AllowFailure, blockedAt).Scan(&id)
+			`INSERT INTO jobs (pipeline_id, name, stage, stage_idx, image, script, env, environment, tags, artifact_paths, artifact_expire_seconds, report_junit, cache_paths, cache_key, cache_key_files, cache_policy, services, timeout_seconds, max_attempts, status, manual, allow_failure, blocked_at)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23) RETURNING id`,
+			p.ID, j.Name, j.Stage, j.StageIdx, image, j.Script, env, environment, tags, artifacts, j.ArtifactExpireSeconds, reportJUnit, cachePaths, j.CacheKey, cacheKeyFiles, j.CachePolicy, services, timeoutSec, j.Retry+1, status, j.Manual, j.AllowFailure, blockedAt).Scan(&id)
 		if err != nil {
 			return nil, err
 		}
@@ -556,7 +557,7 @@ func (s *Store) GetPipeline(ctx context.Context, id int64) (*proto.Pipeline, []p
 		`SELECT j.id, j.pipeline_id, j.name, j.stage, j.stage_idx, j.image, j.environment,
 		        j.status,
 		        CASE WHEN j.status='failed' AND j.allow_failure THEN 'success' ELSE j.status END,
-		        j.started_at, j.finished_at, j.exit_code,
+		        j.started_at, j.finished_at, j.exit_code, j.manual, j.allow_failure,
 		        COALESCE(array_agg(n.needs_job_id) FILTER (WHERE n.needs_job_id IS NOT NULL), '{}')
 		 FROM jobs j LEFT JOIN job_needs n ON n.job_id = j.id
 		 WHERE j.pipeline_id = $1
@@ -575,7 +576,8 @@ func (s *Store) GetPipeline(ctx context.Context, id int64) (*proto.Pipeline, []p
 		// and stage status derivation, while j.Status keeps the true state.
 		var effective string
 		if err := rows.Scan(&j.ID, &j.PipelineID, &j.Name, &j.Stage, &j.StageIdx, &j.Image,
-			&j.Environment, &j.Status, &effective, &j.StartedAt, &j.FinishedAt, &j.ExitCode, &j.Needs); err != nil {
+			&j.Environment, &j.Status, &effective, &j.StartedAt, &j.FinishedAt, &j.ExitCode,
+			&j.Manual, &j.AllowFailure, &j.Needs); err != nil {
 			return nil, nil, err
 		}
 		jobs = append(jobs, j)
@@ -594,12 +596,13 @@ func (s *Store) GetJob(ctx context.Context, id int64) (*proto.Job, error) {
 	var j proto.Job
 	err := s.pool.QueryRow(ctx,
 		`SELECT j.id, j.pipeline_id, j.name, j.stage, j.stage_idx, j.image, j.environment,
-		        j.status, j.started_at, j.finished_at, j.exit_code,
+		        j.status, j.started_at, j.finished_at, j.exit_code, j.manual, j.allow_failure,
 		        COALESCE(array_agg(n.needs_job_id) FILTER (WHERE n.needs_job_id IS NOT NULL), '{}')
 		 FROM jobs j LEFT JOIN job_needs n ON n.job_id = j.id
 		 WHERE j.id = $1 GROUP BY j.id`, id).
 		Scan(&j.ID, &j.PipelineID, &j.Name, &j.Stage, &j.StageIdx, &j.Image,
-			&j.Environment, &j.Status, &j.StartedAt, &j.FinishedAt, &j.ExitCode, &j.Needs)
+			&j.Environment, &j.Status, &j.StartedAt, &j.FinishedAt, &j.ExitCode,
+			&j.Manual, &j.AllowFailure, &j.Needs)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -992,7 +995,7 @@ func (s *Store) AcquireJob(ctx context.Context, req proto.AcquireRequest) (*prot
 	}
 	var j proto.RunnerJob
 	var image, environment *string
-	var envRaw, artifactsRaw, cachePathsRaw, cacheKeyFilesRaw, servicesRaw []byte
+	var envRaw, artifactsRaw, reportJUnitRaw, cachePathsRaw, cacheKeyFilesRaw, servicesRaw []byte
 	var cachePolicy string
 	var repo, ref, sha string
 	err = s.pool.QueryRow(ctx,
@@ -1005,12 +1008,12 @@ func (s *Store) AcquireJob(ctx context.Context, req proto.AcquireRequest) (*prot
 		      pipelines p
 		 WHERE j.id = next.id AND p.id = j.pipeline_id
 		 RETURNING j.id, j.pipeline_id, j.name, j.image, j.script, j.env,
-		           j.artifact_paths, j.cache_paths, j.cache_key, j.cache_key_files,
+		           j.artifact_paths, j.report_junit, j.cache_paths, j.cache_key, j.cache_key_files,
 		           j.cache_policy, j.services, j.environment, j.timeout_seconds,
 		           p.repo, p.ref, p.sha`,
 		req.RunnerID, runnerTags).
 		Scan(&j.ID, &j.PipelineID, &j.Name, &image, &j.Script, &envRaw,
-			&artifactsRaw, &cachePathsRaw, &j.CacheKey, &cacheKeyFilesRaw,
+			&artifactsRaw, &reportJUnitRaw, &cachePathsRaw, &j.CacheKey, &cacheKeyFilesRaw,
 			&cachePolicy, &servicesRaw, &environment, &j.TimeoutSeconds, &repo, &ref, &sha)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -1051,6 +1054,8 @@ func (s *Store) AcquireJob(ctx context.Context, req proto.AcquireRequest) (*prot
 	}
 	j.ArtifactPaths = []string{}
 	_ = json.Unmarshal(artifactsRaw, &j.ArtifactPaths)
+	j.ReportJUnitPaths = []string{}
+	_ = json.Unmarshal(reportJUnitRaw, &j.ReportJUnitPaths)
 	j.CachePaths = []string{}
 	_ = json.Unmarshal(cachePathsRaw, &j.CachePaths)
 	j.CacheKeyFiles = []string{}

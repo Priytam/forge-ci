@@ -50,6 +50,11 @@ type Job struct {
 	FinishedAt  *time.Time `json:"finished_at"`
 	ExitCode    *int       `json:"exit_code"`
 	Needs       []int64    `json:"needs"`
+	// Manual is true for a when:manual gate (released via POST /jobs/{id}/play),
+	// distinguishing it from an environment-approval block. AllowFailure is true
+	// when the job's failure does not fail dependents or the pipeline.
+	Manual       bool `json:"manual"`
+	AllowFailure bool `json:"allow_failure"`
 }
 
 // RunnerJob is the payload handed to a runner when it acquires a job.
@@ -62,6 +67,10 @@ type RunnerJob struct {
 	Env        map[string]string `json:"env"`
 
 	ArtifactPaths []string `json:"artifact_paths"`
+
+	// ReportJUnitPaths are workspace globs of JUnit XML the runner collects after
+	// a successful job and POSTs to the report endpoint for server-side parsing.
+	ReportJUnitPaths []string `json:"report_junit_paths,omitempty"`
 
 	// Cache directives (GitLab-style). The runner restores the cache before the
 	// script and saves it after, keyed by repo+key and shared across pipelines.
@@ -158,6 +167,29 @@ type ArtifactInfo struct {
 	Name       string    `json:"name"`
 	SizeBytes  int64     `json:"size_bytes"`
 	CreatedAt  time.Time `json:"created_at"`
+	// ExpiresAt is the per-artifact expiry (from artifacts.expire_in); nil when
+	// the artifact has no explicit expiry and relies on the RETENTION_DAYS sweep.
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+}
+
+// JUnitReport is a per-job test summary parsed from uploaded JUnit XML.
+type JUnitReport struct {
+	JobID           int64          `json:"job_id"`
+	Total           int            `json:"total"`
+	Passed          int            `json:"passed"`
+	Failed          int            `json:"failed"`
+	Skipped         int            `json:"skipped"`
+	DurationSeconds float64        `json:"duration_seconds"`
+	Failures        []JUnitFailure `json:"failures"`
+	CreatedAt       time.Time      `json:"created_at"`
+}
+
+// JUnitFailure names one failed or errored test case.
+type JUnitFailure struct {
+	Name      string `json:"name"`
+	Classname string `json:"classname,omitempty"`
+	Type      string `json:"type"`              // "failure" | "error"
+	Message   string `json:"message,omitempty"` // trimmed failure/error message
 }
 
 // Variable is a repo-scoped CI/CD variable. Value is redacted ("") in list

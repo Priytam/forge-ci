@@ -110,6 +110,45 @@ per-stage `fail_fast`). Interactions:
 Leaving `fail_fast` unset (or `false`) preserves today's behavior: only jobs
 whose needs died are canceled, and independent siblings run to completion.
 
+### Artifacts (`paths`, `expire_in`, `reports.junit`)
+
+A job can archive workspace paths after it succeeds; downstream jobs that
+`needs:` it get them restored before their script runs (per-job, per-pipeline):
+
+```yaml
+jobs:
+  build:
+    stage: build
+    script: [make]
+    artifacts:
+      paths: [dist/, bin/]     # workspace paths tar'd + uploaded after success
+      expire_in: 7d            # optional per-artifact TTL (see units below)
+  test:
+    stage: test
+    script: [go test -v ./... 2>&1 | go-junit-report > report.xml]
+    artifacts:
+      reports:
+        junit: [report.xml, "**/junit-*.xml"]  # one or more globs
+```
+
+- **`expire_in`** — how long the artifact is kept. Accepts Go durations plus
+  day/week suffixes: `30m`, `24h`, `7d`, `2w` (and compound Go forms like
+  `1h30m`). The server stamps `expires_at = now() + expire_in` at upload; a
+  background sweep deletes the blob **and** the row once it elapses,
+  **independent of `RETENTION_DAYS`** — a short `expire_in` expires promptly even
+  when the retention window is large or disabled. A job with **no** `expire_in`
+  keeps today's behavior: the artifact lives until the `RETENTION_DAYS` backstop
+  sweeps its pipeline. The sweep cadence is `GC_INTERVAL` (default `1h`).
+- **`reports.junit`** — workspace globs of JUnit XML. After a successful job the
+  runner uploads the matched file(s); the **server** parses them (handling
+  `<testsuites>`/`<testsuite>` nesting and `<failure>`/`<error>`/`<skipped>`)
+  into a per-job summary: `total`, `passed`, `failed`, `skipped`, duration, and
+  the failed-test names. Fetch it at `GET /api/v1/jobs/{id}/report`
+  (`404` when the job has none). Malformed or empty XML is **not** a job failure
+  — no report is recorded and the job still succeeds.
+
+Both features are **opt-in**: a job without an `artifacts:` block is unaffected.
+
 ### Caching (GitLab-style)
 
 Jobs can restore a cache before the script and save it after, sharing warmed
@@ -187,7 +226,7 @@ HEALTHCHECK), but scripts should still poll the service protocol (e.g.
 `until pg_isready`). `$FORGE_SERVICE_ALIASES` lists the aliases in the job
 (docker). Everything is cleaned up on success, failure, timeout, and cancel —
 no leaked networks, containers, or pods. See
-[docs/pipeline-dsl.md](docs/pipeline-dsl.md#6-services--sidecar-containers).
+[docs/pipeline-dsl.md](docs/pipeline-dsl.md#7-services--sidecar-containers).
 
 ### Advanced authoring: rules, include, extends, parallel/matrix
 
@@ -240,6 +279,8 @@ Public:
   `?offset=N` → JSON `{bytes, next_offset, eof}` for incremental polling
 - `GET  /api/v1/jobs/{id}/logs/stream[?offset=N]` — SSE live tail (`text/event-stream`);
   `log` events then a final `eof` event on terminal state
+- `GET  /api/v1/jobs/{id}/report` — parsed JUnit test summary for the job
+  (`{total, passed, failed, skipped, duration_seconds, failures[]}`); `404` when the job has none
 - `POST /api/v1/jobs/{id}/approvals` `{approver, verdict: approved|rejected, comment}`
 - `PUT  /api/v1/repo-templates` `{repo, name, yaml}` — register a reusable fragment for `include:` (admin)
 - `GET  /api/v1/repo-templates?repo=name` — list a repo's registered template names
@@ -304,6 +345,7 @@ the dev experience):
 | `MAX_ARTIFACT_BYTES` | per-upload artifact cap (`413` + cleanup on overflow); `0` disables | `524288000` (500 MiB) |
 | `MAX_CACHE_BYTES` | per-save cache cap (`413` + cleanup on overflow; runner skips + continues); `0` disables | `524288000` (500 MiB) |
 | `RETENTION_DAYS` | delete pipelines, artifact blobs, cache blobs and webhook-dedup rows older than this; `0` = keep forever | `30` |
+| `GC_INTERVAL` | cadence of the retention/expiry sweep (also drives per-artifact `expire_in` GC); a Go duration | `1h` |
 | `RUNNER_DRAIN_GRACE` | (runner) on SIGINT/SIGTERM, how long to let in-flight jobs finish before requeuing them | `30s` |
 
 - **Runner auth** — see [docs/runners.md](docs/runners.md). In `on` mode with no
@@ -390,7 +432,9 @@ provides the fallback CI. Full walkthrough: [docs/self-hosted-ci.md](docs/self-h
   (running jobs stopped via the heartbeat channel); per-job `retry:` and
   redundant-pipeline `auto_cancel`.
 - **Artifacts** — `artifacts.paths` archived per job; local disk or any
-  S3-compatible store (S3/MinIO/GCS).
+  S3-compatible store (S3/MinIO/GCS). Optional per-artifact `expire_in` TTL
+  (GC'd independently of `RETENTION_DAYS`) and `reports.junit` test reports
+  parsed server-side into a per-job pass/fail summary (`GET /jobs/{id}/report`).
 - **Cache** — `cache.{key,paths,policy}` restored before / saved after the
   script, **shared across pipelines** per repo+key; literal or content-addressed
   (`key.files`) keys, capped by `MAX_CACHE_BYTES`, age-GC'd by `RETENTION_DAYS`.

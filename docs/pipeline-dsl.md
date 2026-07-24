@@ -427,7 +427,99 @@ log line.
 
 ---
 
-## 6. `services:` — sidecar containers
+## 6. `artifacts:` — archives, expiry & test reports
+
+Artifacts are the per-job, per-pipeline outputs a job archives after it
+succeeds. Downstream jobs that `needs:` it get them restored into the workspace
+before their script runs. (Contrast with `cache:`, which is keyed by repo+key
+and shared *across* pipelines — see §5.)
+
+```yaml
+jobs:
+  build:
+    stage: build
+    script: [make]
+    artifacts:
+      paths: [dist/, bin/]     # workspace paths tar'd + uploaded after success
+      expire_in: 7d            # optional per-artifact TTL
+  test:
+    stage: test
+    script: [go test -v ./... 2>&1 | go-junit-report > report.xml]
+    artifacts:
+      reports:
+        junit: [report.xml, "**/junit-*.xml"]   # one glob or a list
+```
+
+### `paths`
+
+Workspace paths (files or directories) tar'd and uploaded when the job
+succeeds. Unsafe paths (absolute, `..`) and paths missing at upload time are
+skipped with a log line. A job with no `paths` uploads no artifact archive.
+
+### `expire_in`
+
+A per-artifact time-to-live. Accepted units:
+
+| Suffix | Meaning | Example |
+|--------|---------|---------|
+| `s` / `m` / `h` | seconds / minutes / hours (Go duration) | `90s`, `30m`, `24h` |
+| compound Go form | any `time.ParseDuration` string | `1h30m` |
+| `d` | days | `7d` |
+| `w` | weeks | `2w` |
+
+The value is parsed at **compile time** into a whole number of seconds and
+stored on the job. At **upload time** the server stamps
+`artifacts.expires_at = now() + expire_in` (computed server-side, not trusted
+from the runner, so the TTL is authoritative and clock-consistent with GC).
+
+- **GC is independent of `RETENTION_DAYS`.** A background sweep (cadence
+  `GC_INTERVAL`, default `1h`) deletes the artifact **blob and row** once
+  `expires_at` passes — even when the retention window is much larger, or
+  retention is disabled (`RETENTION_DAYS=0`). So a short `expire_in` expires
+  promptly regardless of retention.
+- **No `expire_in` = unchanged behavior.** The artifact has a NULL `expires_at`
+  and lives until the `RETENTION_DAYS` sweep collects its pipeline (the
+  historical backstop).
+
+### `reports.junit`
+
+One or more workspace globs of JUnit XML. After the job succeeds the **runner**
+resolves the globs, concatenates the matched file(s), and uploads them; the
+**server** parses them (`encoding/xml`) into a per-job summary:
+
+- Handles a `<testsuites>` collection, a single `<testsuite>`, and nested
+  `<testsuite>` elements.
+- Each `<testcase>` is a pass unless it carries a `<failure>`, `<error>` (both
+  counted as failed, with the failing test name + message captured) or
+  `<skipped>` child.
+- Multiple concatenated documents (one per matched file, each with its own
+  `<?xml?>` prolog) are summed in a single pass.
+
+Fetch the summary at **`GET /api/v1/jobs/{id}/report`**:
+
+```json
+{ "job_id": 42, "total": 3, "passed": 2, "failed": 1, "skipped": 0,
+  "duration_seconds": 1.5,
+  "failures": [ { "name": "test_payment", "classname": "billing",
+                  "type": "failure", "message": "expected 200 got 500" } ] }
+```
+
+`404` when the job has no report. **Malformed or empty XML is not a job
+failure**: the server records no report and the job still reports `success`.
+
+`reports.junit` is independent of `paths` — a job can publish a test report
+without archiving any other artifact.
+
+### Merge (`extends` / `include`)
+
+Each artifacts sub-field merges independently (child overrides when it sets it):
+`paths`, `expire_in`, and `reports.junit` are each inherited from a base job
+unless the child redeclares that field — so a base template can set
+`expire_in`/`reports` that concrete jobs reuse.
+
+---
+
+## 7. `services:` — sidecar containers
 
 A job can declare **service containers** — databases, caches, message brokers —
 that start alongside it, are reachable over the network, and are torn down when

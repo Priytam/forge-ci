@@ -354,6 +354,11 @@ func runJob(execCtx, drainCtx context.Context, c *client, exec executor.Executor
 	if status == "success" && len(job.ArtifactPaths) > 0 {
 		uploadArtifacts(c, logs, job, workdir)
 	}
+	// JUnit test reports are independent of artifacts.paths: collect and upload
+	// them after a successful job so the server can parse pass/fail counts.
+	if status == "success" && len(job.ReportJUnitPaths) > 0 {
+		uploadJUnitReports(c, logs, job, workdir)
+	}
 	finish(status, exitCode)
 }
 
@@ -677,6 +682,63 @@ func uploadArtifacts(c *client, logs *logStreamer, job *proto.RunnerJob, workdir
 		return
 	}
 	logs.printf("artifacts: uploaded %d bytes (%s)\n", stat.Size(), strings.Join(existing, ", "))
+}
+
+// uploadJUnitReports resolves the job's reports.junit globs against the
+// workspace, concatenates every matched XML file into one body, and POSTs it to
+// the server's report endpoint for parsing. Missing/empty matches and any
+// upload failure are logged and swallowed — a report problem never fails a job
+// that already succeeded.
+func uploadJUnitReports(c *client, logs *logStreamer, job *proto.RunnerJob, workdir string) {
+	var combined bytes.Buffer
+	matched := 0
+	for _, pattern := range job.ReportJUnitPaths {
+		clean := strings.TrimSpace(pattern)
+		if clean == "" || strings.HasPrefix(clean, "/") || strings.HasPrefix(clean, "..") {
+			logs.printf("reports: skipping unsafe junit path %q\n", pattern)
+			continue
+		}
+		files, err := filepath.Glob(filepath.Join(workdir, clean))
+		if err != nil {
+			logs.printf("reports: bad junit glob %q: %v\n", clean, err)
+			continue
+		}
+		for _, f := range files {
+			data, err := os.ReadFile(f)
+			if err != nil {
+				logs.printf("reports: cannot read %q: %v\n", f, err)
+				continue
+			}
+			combined.Write(data)
+			combined.WriteByte('\n')
+			matched++
+		}
+	}
+	if matched == 0 {
+		logs.printf("reports: no junit files matched\n")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		fmt.Sprintf("%s/api/v1/runner/jobs/%d/report", c.base, job.ID), bytes.NewReader(combined.Bytes()))
+	if err != nil {
+		logs.printf("reports: request error: %v\n", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/xml")
+	resp, err := c.do(req)
+	if err != nil {
+		logs.printf("reports: upload failed: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		logs.printf("reports: upload rejected with status %d\n", resp.StatusCode)
+		return
+	}
+	logs.printf("reports: uploaded %d junit file(s)\n", matched)
 }
 
 // logStreamer batches log bytes and flushes them to the server periodically.

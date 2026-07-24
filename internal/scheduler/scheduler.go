@@ -47,7 +47,7 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Scheduler {
 		logs:          logs,
 		tick:          time.Second,
 		staleAfter:    90 * time.Second,
-		gcEvery:       time.Hour,
+		gcEvery:       gcInterval(),
 		archiveEvery:  30 * time.Second,
 		scheduleEvery: 30 * time.Second,
 		retention:     retentionWindow(),
@@ -56,6 +56,18 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Scheduler {
 		statusSem:     make(chan struct{}, 4),
 		inflight:      map[string]struct{}{},
 	}
+}
+
+// gcInterval reads GC_INTERVAL (a Go duration, default 1h) — the cadence of the
+// retention/expiry sweep. A shorter interval makes per-artifact expire_in take
+// effect promptly; the default matches the historical hourly sweep.
+func gcInterval() time.Duration {
+	if v := os.Getenv("GC_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return time.Hour
 }
 
 // retentionWindow reads RETENTION_DAYS (default 30). 0 disables pipeline/
@@ -80,8 +92,13 @@ func (sc *Scheduler) Run(ctx context.Context) {
 	schedules := time.NewTicker(sc.scheduleEvery)
 	defer schedules.Stop()
 	// Run one GC pass shortly after startup so operators see it work without
-	// waiting a full hour.
-	firstGC := time.After(30 * time.Second)
+	// waiting a full interval — but never later than the configured cadence
+	// (a sub-30s GC_INTERVAL fires its first sweep on that cadence instead).
+	firstGCDelay := 30 * time.Second
+	if sc.gcEvery < firstGCDelay {
+		firstGCDelay = sc.gcEvery
+	}
+	firstGC := time.After(firstGCDelay)
 	// Fire due schedules shortly after startup too, so a schedule already past
 	// its next_run_at (e.g. while the server was down) fires promptly rather than
 	// waiting a full scheduleEvery interval.
@@ -180,6 +197,30 @@ func (sc *Scheduler) gc(ctx context.Context) {
 		slog.Error("gc: delete expired sessions", "err", err)
 	} else if n > 0 {
 		slog.Info("gc: deleted expired sessions", "rows", n)
+	}
+
+	// Per-artifact expiry (artifacts.expire_in), INDEPENDENT of RETENTION_DAYS:
+	// delete blobs then rows for artifacts whose expires_at has passed. A short
+	// expire_in expires promptly even when retention is large or disabled;
+	// artifacts with no expire_in (NULL expires_at) are untouched here and fall
+	// back to the retention sweep below. Runs before the retention guard so it
+	// works even with RETENTION_DAYS=0 (retention off).
+	if keys, err := sc.store.ExpiredArtifactBlobKeysByExpiry(ctx); err != nil {
+		slog.Error("gc: list expire_in artifact blobs", "err", err)
+	} else {
+		expiredBlobs := 0
+		for _, k := range keys {
+			if err := sc.blobs.Delete(ctx, k); err != nil {
+				slog.Error("gc: delete expire_in artifact blob", "err", err, "key", k)
+				continue
+			}
+			expiredBlobs++
+		}
+		if n, err := sc.store.DeleteExpiredArtifactsByExpiry(ctx); err != nil {
+			slog.Error("gc: delete expire_in artifact rows", "err", err)
+		} else if n > 0 || expiredBlobs > 0 {
+			slog.Info("gc: expired artifacts (expire_in)", "rows", n, "blobs", expiredBlobs)
+		}
 	}
 
 	if sc.retention <= 0 {

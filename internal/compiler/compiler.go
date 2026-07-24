@@ -15,6 +15,16 @@
 //	    only: [main, release-*]  # optional; include job only for matching refs
 //	    except: [main]           # optional; exclude job for matching refs
 //	    retry: 2                 # optional; retry on failure up to N times (0..10)
+//	    artifacts:               # optional; archived after a successful job
+//	      paths: [dist/]         #   workspace paths tar'd + uploaded
+//	      expire_in: 7d          #   optional per-job artifact TTL (see below)
+//	      reports:               #   optional test reports parsed server-side
+//	        junit: [report.xml]  #     JUnit XML glob(s) -> pass/fail summary
+//
+// artifacts.expire_in accepts Go durations plus d/w suffixes: "30m", "24h",
+// "7d", "2w" (and compound Go forms like "1h30m"). An artifact with an
+// expire_in is deleted (blob + row) once it elapses, independent of
+// RETENTION_DAYS; no expire_in falls back to the RETENTION_DAYS backstop.
 //
 // Top-level keys:
 //
@@ -47,6 +57,7 @@ import (
 	"fmt"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -93,7 +104,15 @@ type jobSpec struct {
 }
 
 type artifactSpec struct {
-	Paths []string `yaml:"paths"`
+	Paths    []string    `yaml:"paths"`
+	ExpireIn string      `yaml:"expire_in"` // per-job artifact TTL; Go duration + d/w suffixes
+	Reports  reportsSpec `yaml:"reports"`
+}
+
+// reportsSpec models artifacts.reports: test reports collected by the runner
+// and parsed by the server into per-job summaries. Only JUnit is supported.
+type reportsSpec struct {
+	JUnit stringOrSlice `yaml:"junit"` // one or more workspace globs of JUnit XML
 }
 
 // cacheSpec models a per-job cache: block (GitLab-style):
@@ -245,6 +264,36 @@ func Options(yml string) (PipelineOptions, error) {
 	return PipelineOptions{AutoCancel: autoCancel, FailFast: failFast}, nil
 }
 
+// parseExpireIn parses artifacts.expire_in into whole seconds. It accepts any
+// Go duration (e.g. "30m", "24h", "1h30m") plus the day/week suffixes GitLab
+// authors expect ("7d", "2w") which time.ParseDuration does not understand. An
+// empty value yields 0 (no explicit expiry — falls back to RETENTION_DAYS).
+func parseExpireIn(where, v string) (int, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0, nil
+	}
+	if n := len(v); n >= 2 {
+		switch v[n-1] {
+		case 'd', 'w':
+			num, err := strconv.ParseFloat(v[:n-1], 64)
+			if err != nil || num < 0 {
+				return 0, fmt.Errorf("%s: invalid expire_in %q (want e.g. 30m, 24h, 7d, 2w)", where, v)
+			}
+			hours := 24.0
+			if v[n-1] == 'w' {
+				hours = 24.0 * 7.0
+			}
+			return int(num * hours * 3600), nil
+		}
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("%s: invalid expire_in %q (want e.g. 30m, 24h, 7d, 2w)", where, v)
+	}
+	return int(d.Seconds()), nil
+}
+
 func parseTimeout(where, v string) (int, error) {
 	if v == "" {
 		return 0, nil
@@ -267,6 +316,13 @@ type CompiledJob struct {
 	Needs         []string // job names in earlier stages
 	Tags          []string // runner routing: job runs only on runners with all these tags
 	ArtifactPaths []string // workspace paths archived after success
+	// ArtifactExpireSeconds is the per-job artifact TTL in seconds (0 = none;
+	// falls back to RETENTION_DAYS). The server stamps artifacts.expires_at =
+	// now()+this at upload time.
+	ArtifactExpireSeconds int
+	// ReportJUnit are workspace globs of JUnit XML the runner collects after a
+	// successful job; the server parses them into a per-job test summary.
+	ReportJUnit []string
 	// Cache (opt-in). CachePaths empty means the job declares no cache.
 	CachePaths    []string // workspace paths restored before / saved after the script
 	CacheKey      string   // literal key, or the prefix when CacheKeyFiles is set
@@ -534,6 +590,12 @@ func Compile(yml, ref, source string, tmpl TemplateFunc, extra ...map[string]str
 			return nil, err
 		}
 
+		// Artifacts: per-job expiry (0 = none). reports.junit is carried as-is.
+		expireSec, err := parseExpireIn(fmt.Sprintf("job %q", inst.orig), spec.Artifacts.ExpireIn)
+		if err != nil {
+			return nil, err
+		}
+
 		// Retry precedence: job retry > YAML default.retry > 0 (no retry).
 		retry, err := validateRetry(fmt.Sprintf("job %q", inst.orig), spec.Retry)
 		if err != nil {
@@ -586,15 +648,18 @@ func Compile(yml, ref, source string, tmpl TemplateFunc, extra ...map[string]str
 			Needs:         needs,
 			Tags:          spec.Tags,
 			ArtifactPaths: spec.Artifacts.Paths,
-			CachePaths:    spec.Cache.Paths,
-			CacheKey:      spec.Cache.Key.Literal,
-			CacheKeyFiles: spec.Cache.Key.Files,
-			CachePolicy:   cachePolicy,
-			TimeoutSec:    timeoutSec,
-			Retry:         retry,
-			Manual:        inst.manual,
-			AllowFailure:  inst.allowFailure,
-			Services:      services,
+
+			ArtifactExpireSeconds: expireSec,
+			ReportJUnit:           spec.Artifacts.Reports.JUnit,
+			CachePaths:            spec.Cache.Paths,
+			CacheKey:              spec.Cache.Key.Literal,
+			CacheKeyFiles:         spec.Cache.Key.Files,
+			CachePolicy:           cachePolicy,
+			TimeoutSec:            timeoutSec,
+			Retry:                 retry,
+			Manual:                inst.manual,
+			AllowFailure:          inst.allowFailure,
+			Services:              services,
 		})
 	}
 	return out, nil

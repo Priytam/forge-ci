@@ -94,6 +94,12 @@ func mergeSpec(parent, child jobSpec) jobSpec {
 	if child.Artifacts.Paths != nil {
 		out.Artifacts.Paths = child.Artifacts.Paths
 	}
+	if child.Artifacts.ExpireIn != "" {
+		out.Artifacts.ExpireIn = child.Artifacts.ExpireIn
+	}
+	if child.Artifacts.Reports.JUnit != nil {
+		out.Artifacts.Reports.JUnit = child.Artifacts.Reports.JUnit
+	}
 	// Services: child replaces the whole list when it declares one (arrays are
 	// replaced, not element-merged — same rule as script/needs/tags).
 	if child.Services != nil {
