@@ -446,7 +446,9 @@ export interface Deployment {
 }
 
 export interface Environment {
-  name: string;
+  /** the environment name (server field is `environment`) */
+  environment: string;
+  repo?: string;
   current: {
     sha: string;
     ref: string;
@@ -456,7 +458,8 @@ export interface Environment {
   } | null;
   deployment_count: number;
   drift: "in_sync" | "drifted" | "unknown";
-  ref_tip_sha: string;
+  ref_tip_sha?: string;
+  frozen?: boolean;
 }
 
 export interface Freeze {
@@ -508,8 +511,13 @@ export function rollbackEnvironment(
   });
 }
 
-export function listFreezes(repo: string, env: string): Promise<Freeze[]> {
-  return getJSON<Freeze[]>(envPath(repo, env, "freezes"));
+export async function listFreezes(repo: string, env: string): Promise<Freeze[]> {
+  try {
+    return await getJSON<Freeze[]>(envPath(repo, env, "freezes"));
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) return [];
+    throw err;
+  }
 }
 
 export function createFreeze(

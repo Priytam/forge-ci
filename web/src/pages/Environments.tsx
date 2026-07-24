@@ -24,7 +24,7 @@ function DriftBadge({ env }: { env: Environment }) {
   if (env.drift === "drifted") {
     return (
       <span className="badge badge-blocked">
-        drifted · tip {shortSha(env.ref_tip_sha)}
+        drifted{env.ref_tip_sha ? ` · tip ${shortSha(env.ref_tip_sha)}` : ""}
       </span>
     );
   }
@@ -281,7 +281,7 @@ function EnvCard({
   return (
     <div className="card env-card glow glow-neutral">
       <div className="env-card-top">
-        <span className="env-name">{env.name}</span>
+        <span className="env-name">{env.environment}</span>
         <DriftBadge env={env} />
       </div>
       {env.current ? (
@@ -289,7 +289,7 @@ function EnvCard({
           <span className="mono sha">{shortSha(env.current.sha)}</span>
           <span className="ref-tag">{env.current.ref}</span>
           <span className="muted">
-            deployed by {env.current.deployed_by},{" "}
+            deployed by {env.current.deployed_by || "unknown"},{" "}
             {relativeTime(env.current.deployed_at)}
           </span>
         </div>
@@ -301,7 +301,7 @@ function EnvCard({
         {env.deployment_count === 1 ? "" : "s"}
       </div>
 
-      <FreezePanel repo={repo} env={env.name} isAdmin={isAdmin} />
+      <FreezePanel repo={repo} env={env.environment} isAdmin={isAdmin} />
 
       <button
         type="button"
@@ -313,7 +313,7 @@ function EnvCard({
       {open && (
         <EnvHistory
           repo={repo}
-          env={env.name}
+          env={env.environment}
           onRolledBack={(pid) => navigate(`/pipelines/${pid}`)}
         />
       )}
@@ -357,7 +357,12 @@ export default function Environments() {
       {envs && envs.length > 0 && (
         <div className="env-grid">
           {envs.map((env) => (
-            <EnvCard key={env.name} repo={repo} env={env} isAdmin={isAdmin} />
+            <EnvCard
+              key={env.environment}
+              repo={repo}
+              env={env}
+              isAdmin={isAdmin}
+            />
           ))}
         </div>
       )}
