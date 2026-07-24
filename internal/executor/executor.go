@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 	"time"
 
@@ -95,6 +96,12 @@ type shellExecutor struct{}
 func (shellExecutor) Name() string { return "shell" }
 
 func (shellExecutor) Start(ctx context.Context, job *proto.RunnerJob, workdir string) (io.ReadCloser, func() int, error) {
+	// Services require a container runtime and a per-job network; the shell
+	// executor has neither. Reject rather than silently drop them.
+	if len(job.Services) > 0 {
+		return nil, nil, fmt.Errorf("shell executor cannot run service containers: "+
+			"this job declares %d service(s); route it to a docker or kubernetes runner (add matching runner tags)", len(job.Services))
+	}
 	cmd := exec.CommandContext(ctx, "sh", "-ce", job.Script)
 	cmd.Dir = workdir
 	cmd.Env = append(os.Environ(), ciEnv(job)...)
@@ -111,28 +118,168 @@ func (dockerExecutor) Start(ctx context.Context, job *proto.RunnerJob, workdir s
 		image = defaultImage
 	}
 	name := fmt.Sprintf("forge-job-%d", job.ID)
-	// The workspace is bind-mounted so artifacts land on the host for
-	// collection after the container exits.
-	args := []string{"run", "--rm", "--name", name, "--network", "none",
+
+	// No services: keep the original isolated path (--network none).
+	if len(job.Services) == 0 {
+		// The workspace is bind-mounted so artifacts land on the host for
+		// collection after the container exits.
+		args := []string{"run", "--rm", "--name", name, "--network", "none",
+			"-v", workdir + ":/workspace", "-w", "/workspace"}
+		for _, kv := range ciEnv(job) {
+			args = append(args, "-e", kv)
+		}
+		args = append(args, image, "sh", "-ce", job.Script)
+		pr, wait, err := start(exec.CommandContext(ctx, "docker", args...))
+		if err != nil {
+			return nil, nil, err
+		}
+		// Killing the docker CLI does not stop the container — remove it
+		// explicitly when the context ended (timeout/shutdown).
+		waitCleanup := func() int {
+			code := wait()
+			if ctx.Err() != nil {
+				rctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				_ = exec.CommandContext(rctx, "docker", "rm", "-f", name).Run()
+			}
+			return code
+		}
+		return pr, waitCleanup, nil
+	}
+
+	return startDockerWithServices(ctx, job, workdir, image, name)
+}
+
+// startDockerWithServices runs a job that declares sidecar services. It creates
+// a dedicated user-defined bridge network, starts each service container on it
+// with its alias as a network-alias (so the job reaches it by hostname, e.g.
+// `psql -h db`), waits for the containers to be running (and healthy when the
+// image ships a HEALTHCHECK), then runs the job container on the same network.
+// Everything — services, job container, network — is torn down in all exit
+// paths (success, failure, timeout, cancel, and any error during setup).
+func startDockerWithServices(ctx context.Context, job *proto.RunnerJob, workdir, image, name string) (io.ReadCloser, func() int, error) {
+	network := fmt.Sprintf("forge-net-%d", job.ID)
+
+	// Best-effort teardown of every resource this job created. Safe to call
+	// repeatedly; errors (already-gone resources) are ignored.
+	svcNames := make([]string, len(job.Services))
+	for i := range job.Services {
+		svcNames[i] = fmt.Sprintf("forge-svc-%d-%d", job.ID, i)
+	}
+	cleanup := func() {
+		rctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = exec.CommandContext(rctx, "docker", "rm", "-f", name).Run()
+		for _, sn := range svcNames {
+			_ = exec.CommandContext(rctx, "docker", "rm", "-f", sn).Run()
+		}
+		// Remove the network last, once nothing is attached.
+		_ = exec.CommandContext(rctx, "docker", "network", "rm", network).Run()
+	}
+
+	// Create the per-job network. A stale one from a crashed prior run is
+	// removed first so create doesn't fail.
+	_ = exec.CommandContext(ctx, "docker", "network", "rm", network).Run()
+	if out, err := exec.CommandContext(ctx, "docker", "network", "create", network).CombinedOutput(); err != nil {
+		return nil, nil, fmt.Errorf("create service network: %s", strings.TrimSpace(string(out)))
+	}
+
+	// Start each service container detached, attached to the network under its
+	// alias hostname.
+	for i, svc := range job.Services {
+		args := []string{"run", "-d", "--rm", "--name", svcNames[i],
+			"--network", network, "--network-alias", svc.Alias}
+		for k, v := range svc.Env {
+			args = append(args, "-e", k+"="+v)
+		}
+		args = append(args, svc.Image)
+		args = append(args, svc.Cmd...) // optional command override
+		if out, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput(); err != nil {
+			cleanup()
+			return nil, nil, fmt.Errorf("start service %q (%s): %s", svc.Alias, svc.Image, strings.TrimSpace(string(out)))
+		}
+	}
+
+	// Readiness: wait for each service container to report Running (and, when the
+	// image declares a HEALTHCHECK, healthy), bounded to 60s. The job script is
+	// still expected to poll the service protocol (e.g. `until pg_isready`) —
+	// container-running does not guarantee the service inside is accepting
+	// connections. See docs/pipeline-dsl.md.
+	for i, svc := range job.Services {
+		if err := waitServiceReady(ctx, svcNames[i], 60*time.Second); err != nil {
+			cleanup()
+			return nil, nil, fmt.Errorf("service %q (%s) not ready: %v", svc.Alias, svc.Image, err)
+		}
+	}
+
+	// Run the job container on the same network so the script resolves service
+	// aliases. A convenience env var lists the aliases available.
+	args := []string{"run", "--rm", "--name", name, "--network", network,
 		"-v", workdir + ":/workspace", "-w", "/workspace"}
 	for _, kv := range ciEnv(job) {
 		args = append(args, "-e", kv)
 	}
+	aliases := make([]string, len(job.Services))
+	for i, svc := range job.Services {
+		aliases[i] = svc.Alias
+	}
+	args = append(args, "-e", "FORGE_SERVICE_ALIASES="+strings.Join(aliases, ","))
 	args = append(args, image, "sh", "-ce", job.Script)
+
 	pr, wait, err := start(exec.CommandContext(ctx, "docker", args...))
 	if err != nil {
+		cleanup()
 		return nil, nil, err
 	}
-	// Killing the docker CLI does not stop the container — remove it
-	// explicitly when the context ended (timeout/shutdown).
 	waitCleanup := func() int {
 		code := wait()
-		if ctx.Err() != nil {
-			rctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			_ = exec.CommandContext(rctx, "docker", "rm", "-f", name).Run()
-		}
+		cleanup() // always tear down services + network (and the job container)
 		return code
 	}
 	return pr, waitCleanup, nil
+}
+
+// waitServiceReady polls `docker inspect` until the container is running (and,
+// if it has a healthcheck, healthy), or the timeout elapses.
+func waitServiceReady(ctx context.Context, container string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	const format = "{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}"
+	for {
+		out, err := exec.CommandContext(ctx, "docker", "inspect", "-f", format, container).CombinedOutput()
+		if err == nil {
+			fields := strings.Fields(strings.TrimSpace(string(out)))
+			if len(fields) == 2 {
+				running, health := fields[0], fields[1]
+				switch {
+				case running != "true":
+					// still starting or has already exited
+					if exited, _ := containerExited(ctx, container); exited {
+						return fmt.Errorf("container exited before becoming ready")
+					}
+				case health == "none" || health == "healthy":
+					return nil
+				case health == "unhealthy":
+					return fmt.Errorf("healthcheck reported unhealthy")
+				}
+			}
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out after %s", timeout)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// containerExited reports whether the container's state is no longer running and
+// it is not merely still being created (i.e. it ran and stopped).
+func containerExited(ctx context.Context, container string) (bool, error) {
+	out, err := exec.CommandContext(ctx, "docker", "inspect", "-f", "{{.State.Status}}", container).CombinedOutput()
+	if err != nil {
+		return false, err
+	}
+	status := strings.TrimSpace(string(out))
+	return status == "exited" || status == "dead", nil
 }

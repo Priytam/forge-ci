@@ -89,6 +89,22 @@ type RunnerJob struct {
 	// Artifacts of the jobs this job needs — restored into the workspace
 	// before the script runs (GitLab-style artifact passing).
 	Dependencies []DependencyArtifact `json:"dependencies,omitempty"`
+
+	// Services are GitLab-style sidecar containers started alongside the job and
+	// reachable from the script by their alias hostname (docker: a per-job
+	// network with network-aliases; kubernetes: extra containers in the same pod
+	// with the alias mapped to 127.0.0.1 via hostAliases). Empty = no services,
+	// and the docker executor keeps its --network none isolation. The shell
+	// executor rejects any job that declares services. See docs/pipeline-dsl.md.
+	Services []ServiceSpec `json:"services,omitempty"`
+}
+
+// ServiceSpec is one sidecar service container attached to a job.
+type ServiceSpec struct {
+	Image string            `json:"image"`         // container image (required)
+	Alias string            `json:"alias"`         // network hostname the job reaches it by
+	Env   map[string]string `json:"env,omitempty"` // environment for the service container
+	Cmd   []string          `json:"cmd,omitempty"` // optional command override (docker CMD / k8s command)
 }
 
 // DependencyArtifact points a runner at an upstream job's artifact archive.

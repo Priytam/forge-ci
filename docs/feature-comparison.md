@@ -38,7 +38,7 @@ Legend: ✅ shipped · 🟡 partial · ❌ not yet (roadmap).
 | Tag-based routing | ✅ | ✅ | |
 | Pause/drain runners | ✅ | ✅ | |
 | Job logs: live streaming | ✅ | ✅ | SSE live tail + Redis buffer + object-storage archive |
-| Services (sidecar containers, e.g. postgres for tests) | ✅ | ❌ | |
+| Services (sidecar containers, e.g. postgres for tests) | ✅ | ✅ | docker (per-job network) + kubernetes (pod containers + hostAliases); shell rejects; up to 5/job |
 | Git clone of the source into the job | ✅ (owns repo) | ✅ | shallow clone at the pipeline SHA via the registry token |
 | Interruptible/auto-cancel superseded pipelines | ✅ | ✅ | `auto_cancel` (default true), per repo+ref |
 

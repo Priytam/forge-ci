@@ -348,6 +348,76 @@ log line.
 
 ---
 
+## 6. `services:` — sidecar containers
+
+A job can declare **service containers** — databases, caches, message brokers —
+that start alongside it, are reachable over the network, and are torn down when
+the job finishes. This is the GitLab `services:` model.
+
+```yaml
+jobs:
+  integration:
+    stage: test
+    image: postgres:16-alpine
+    services:
+      - image: postgres:16-alpine   # long form ('name:' is also accepted)
+        alias: db                    # network hostname (optional)
+        env: {POSTGRES_PASSWORD: pw}
+        cmd: [postgres, -c, max_connections=50]  # optional command override
+      - redis:7                      # shorthand: scalar = image
+    script:
+      - until pg_isready -h db -U postgres; do sleep 1; done
+      - PGPASSWORD=pw psql -h db -U postgres -c 'select 1'
+```
+
+### Fields
+
+- **`image`** *(required)* — the service container image. `name:` is accepted as
+  a synonym for `image:` (GitLab long-form compatibility).
+- **`alias`** — the hostname the job reaches the service by. Defaults to the
+  image's short name with the tag stripped and sanitized to a DNS label
+  (`postgres:16-alpine` → `postgres`, `docker.io/library/redis:7` → `redis`).
+  Must be a lowercase RFC1123 label (`[a-z0-9]` and `-`, 1–63 chars) and unique
+  within the job.
+- **`env`** — environment variables for the service container (e.g.
+  `POSTGRES_PASSWORD`).
+- **`cmd`** — optional command/args override (docker CMD / k8s container args).
+
+### Executor support
+
+| Executor | Mechanism | How the script reaches a service |
+|----------|-----------|----------------------------------|
+| **docker** | A dedicated per-job bridge network `forge-net-<id>`. Each service runs as `forge-svc-<id>-<i>` attached with `--network-alias <alias>`. The **job container joins the same network** (replacing `--network none`). | By alias via docker DNS: `psql -h db`. `$FORGE_SERVICE_ALIASES` lists the aliases. |
+| **kubernetes** | Extra containers in the job's pod (`svc-<i>`), sharing the pod network namespace. `spec.hostAliases` maps every alias to `127.0.0.1`. | By alias (→ `127.0.0.1`) **or** `localhost:<port>` — the same `-h <alias>` script works on both executors. |
+| **shell** | **Unsupported** — no container runtime. | The job **fails immediately** with `shell executor cannot run service containers…`; route it to a docker/kubernetes runner (matching tags). |
+
+### Readiness, cleanup & caps
+
+- **Readiness** is best-effort: the executor waits for each service container to
+  be *running* (docker: bounded to 60s; k8s: `kubectl wait --for=condition=Ready`
+  covers all pod containers, bounded to 180s), and for *healthy* when the image
+  ships a `HEALTHCHECK`. Container-running does **not** guarantee the service
+  inside is accepting connections, so **scripts should still poll** the protocol
+  (`until pg_isready`, `redis-cli ping`, …).
+- **Cleanup is guaranteed** on every exit path — success, failure, timeout, and
+  cancel. Docker tears down the job container, every service container, and the
+  network; Kubernetes deletes the pod (which removes all its containers). No
+  networks, containers, or pods are leaked.
+- **Caps** — at most **5 services per job**. Each service requires an image and a
+  valid, unique alias; violations are compile-time errors.
+- **Isolation preserved** — a job that declares **no** services is unchanged: the
+  docker executor keeps `--network none`, and the k8s executor keeps its
+  single-container `kubectl run` pod.
+
+### Merge & matrix
+
+`services:` participates in `extends`/`include` deep-merge like other arrays: a
+child's list **replaces** the parent's wholesale (arrays are not element-merged).
+Services survive `parallel`/`matrix` expansion — every generated instance carries
+the same resolved services.
+
+---
+
 ## `allow_failure`
 
 `allow_failure: true` (job-level, or from a matching rule) means the job's

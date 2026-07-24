@@ -182,6 +182,10 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cache_paths     JSONB NOT NULL DEFAULT
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cache_key       TEXT  NOT NULL DEFAULT '';
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cache_key_files JSONB NOT NULL DEFAULT '[]';
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cache_policy    TEXT  NOT NULL DEFAULT '';
+-- Per-job sidecar service containers (GitLab-style services: list). Each entry
+-- is {image, alias, env, cmd}; the runner starts them alongside the job and the
+-- script reaches them by alias. '[]' = no services. docker/kubernetes only.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS services        JSONB NOT NULL DEFAULT '[]';
 
 -- Runner registry: runners self-register on their first acquire and update
 -- last_contact_at on every poll. Paused runners receive no jobs.

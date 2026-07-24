@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -75,6 +76,73 @@ func posixQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+// servicesPodManifest builds a Pod manifest (JSON) for a job with sidecar
+// services: the main "job" container parked on sleep, one container per service,
+// and a hostAliases entry mapping every service alias to 127.0.0.1. All
+// containers share the pod network namespace, so services listen on localhost
+// and the alias hostnames resolve there — the same `-h <alias>` the docker
+// executor supports. Pod deletion (cleanup) tears everything down.
+func servicesPodManifest(pod, image string, services []proto.ServiceSpec) (string, error) {
+	type k8sEnv struct {
+		Name  string `json:"name"`
+		Value string `json:"value"`
+	}
+	type k8sContainer struct {
+		Name    string   `json:"name"`
+		Image   string   `json:"image"`
+		Command []string `json:"command,omitempty"`
+		Args    []string `json:"args,omitempty"`
+		Env     []k8sEnv `json:"env,omitempty"`
+	}
+	type hostAlias struct {
+		IP        string   `json:"ip"`
+		Hostnames []string `json:"hostnames"`
+	}
+
+	containers := []k8sContainer{{
+		Name:    "job",
+		Image:   image,
+		Command: []string{"sleep", "7200"},
+	}}
+	aliases := make([]string, 0, len(services))
+	for i, svc := range services {
+		c := k8sContainer{
+			Name:  fmt.Sprintf("svc-%d", i),
+			Image: svc.Image,
+			Args:  svc.Cmd, // optional command override -> container args
+		}
+		keys := make([]string, 0, len(svc.Env))
+		for k := range svc.Env {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			c.Env = append(c.Env, k8sEnv{Name: key, Value: svc.Env[key]})
+		}
+		containers = append(containers, c)
+		aliases = append(aliases, svc.Alias)
+	}
+
+	manifest := map[string]any{
+		"apiVersion": "v1",
+		"kind":       "Pod",
+		"metadata": map[string]any{
+			"name":   pod,
+			"labels": map[string]string{"app": "forge-ci-job"},
+		},
+		"spec": map[string]any{
+			"restartPolicy": "Never",
+			"containers":    containers,
+			"hostAliases":   []hostAlias{{IP: "127.0.0.1", Hostnames: aliases}},
+		},
+	}
+	b, err := json.Marshal(manifest)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
 func (k *kubeExecutor) Start(ctx context.Context, job *proto.RunnerJob, workdir string) (io.ReadCloser, func() int, error) {
 	image := job.Image
 	if image == "" {
@@ -82,24 +150,50 @@ func (k *kubeExecutor) Start(ctx context.Context, job *proto.RunnerJob, workdir 
 	}
 	pod := fmt.Sprintf("forge-job-%d", job.ID)
 
-	// 1. Ephemeral pod, parked on sleep. Bounded so an orphaned pod
-	//    self-terminates even if cleanup never runs.
-	if err := k.runQuiet(ctx, "run", pod, "--image", image, "--restart=Never",
-		"--labels=app=forge-ci-job", "--command", "--", "sleep", "7200"); err != nil {
-		return nil, nil, err
-	}
 	cleanup := func() {
 		dctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		_ = k.runQuiet(dctx, "delete", "pod", pod, "--wait=false", "--ignore-not-found")
 	}
 
-	// 2. Wait for the pod, 3. ship the workspace in.
+	// 1. Ephemeral pod, parked on sleep. Bounded so an orphaned pod
+	//    self-terminates even if cleanup never runs.
+	//
+	//    With services, the pod holds extra containers (one per service) sharing
+	//    the pod's network namespace, and hostAliases map each alias to 127.0.0.1
+	//    so the SAME script (`psql -h db`) works on docker and kubernetes: the
+	//    alias resolves to localhost, where the service listens. The main
+	//    container is named "job" so cp/exec target it explicitly. Without
+	//    services we keep the simpler single-container `kubectl run`.
+	container := "" // container flag for cp/exec; empty = pod's only container
+	if len(job.Services) == 0 {
+		if err := k.runQuiet(ctx, "run", pod, "--image", image, "--restart=Never",
+			"--labels=app=forge-ci-job", "--command", "--", "sleep", "7200"); err != nil {
+			return nil, nil, err
+		}
+	} else {
+		container = "job"
+		manifest, err := servicesPodManifest(pod, image, job.Services)
+		if err != nil {
+			return nil, nil, err
+		}
+		apply := k.kubectl(ctx, "apply", "-f", "-")
+		apply.Stdin = strings.NewReader(manifest)
+		if out, aerr := apply.CombinedOutput(); aerr != nil {
+			return nil, nil, fmt.Errorf("create pod with services: %s", strings.TrimSpace(string(out)))
+		}
+	}
+
+	// 2. Wait for the pod (all containers Ready), 3. ship the workspace in.
 	if err := k.runQuiet(ctx, "wait", "--for=condition=Ready", "--timeout=180s", "pod/"+pod); err != nil {
 		cleanup()
 		return nil, nil, err
 	}
-	if err := k.runQuiet(ctx, "cp", workdir+"/.", pod+":/workspace"); err != nil {
+	cpArgs := []string{"cp", workdir + "/.", pod + ":/workspace"}
+	if container != "" {
+		cpArgs = append(cpArgs, "-c", container)
+	}
+	if err := k.runQuiet(ctx, cpArgs...); err != nil {
 		cleanup()
 		return nil, nil, err
 	}
@@ -121,7 +215,12 @@ func (k *kubeExecutor) Start(ctx context.Context, job *proto.RunnerJob, workdir 
 	sb.WriteString("cd /workspace\n")
 	sb.WriteString(job.Script)
 
-	cmd := k.kubectl(ctx, "exec", "-i", pod, "--", "sh", "-ce", sb.String())
+	execArgs := []string{"exec", "-i", pod}
+	if container != "" {
+		execArgs = append(execArgs, "-c", container)
+	}
+	execArgs = append(execArgs, "--", "sh", "-ce", sb.String())
+	cmd := k.kubectl(ctx, execArgs...)
 	pr, wait, err := start(cmd)
 	if err != nil {
 		cleanup()
@@ -139,7 +238,11 @@ func (k *kubeExecutor) Start(ctx context.Context, job *proto.RunnerJob, workdir 
 					continue
 				}
 				// Missing paths are tolerated; uploadArtifacts logs skips.
-				_ = k.runQuiet(cctx, "cp", pod+":/workspace/"+clean, workdir+"/"+clean)
+				cpOut := []string{"cp", pod + ":/workspace/" + clean, workdir + "/" + clean}
+				if container != "" {
+					cpOut = append(cpOut, "-c", container)
+				}
+				_ = k.runQuiet(cctx, cpOut...)
 			}
 			cancel()
 		}

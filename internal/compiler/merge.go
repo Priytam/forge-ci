@@ -39,7 +39,7 @@ func (s *stringOrSlice) UnmarshalYAML(n *yaml.Node) error {
 // Merge rules per field:
 //   - scalars (stage/image/environment/timeout/when): child non-empty overrides
 //   - pointers (retry/allowFailure/parallel): child non-nil overrides
-//   - slices (script/needs/only/except/tags/rules/artifact paths): child
+//   - slices (script/needs/only/except/tags/rules/artifact paths/services): child
 //     non-nil replaces (GitLab replaces arrays; it does not element-merge them)
 //   - cache (block): child replaces the whole block when it declares one
 //     (signaled by cache.paths being set)
@@ -93,6 +93,11 @@ func mergeSpec(parent, child jobSpec) jobSpec {
 	}
 	if child.Artifacts.Paths != nil {
 		out.Artifacts.Paths = child.Artifacts.Paths
+	}
+	// Services: child replaces the whole list when it declares one (arrays are
+	// replaced, not element-merged — same rule as script/needs/tags).
+	if child.Services != nil {
+		out.Services = child.Services
 	}
 	// Cache is replaced wholesale (like artifacts/arrays) when the child declares
 	// one — presence is signaled by cache.paths being set.

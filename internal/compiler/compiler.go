@@ -48,6 +48,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/priytamjeepandey/forge-ci/internal/proto"
 )
 
 // Pipeline source values threaded into the rules if: context as
@@ -75,6 +77,7 @@ type jobSpec struct {
 	Tags         []string          `yaml:"tags"`
 	Artifacts    artifactSpec      `yaml:"artifacts"`
 	Cache        cacheSpec         `yaml:"cache"`
+	Services     []serviceSpec     `yaml:"services"`
 	Timeout      string            `yaml:"timeout"` // Go duration, e.g. "30m", "2h"
 	Retry        *int              `yaml:"retry"`   // 0..10; nil = inherit default
 	Rules        []ruleSpec        `yaml:"rules"`
@@ -262,6 +265,8 @@ type CompiledJob struct {
 	Retry         int      // additional attempts on failure (0..10); 0 = no retry
 	Manual        bool     // when: manual — starts gated, released by a manual "play"
 	AllowFailure  bool     // failure does not block dependents or fail the pipeline
+	// Services are sidecar containers started alongside the job (docker/k8s only).
+	Services []proto.ServiceSpec
 }
 
 // buildContext assembles the base variable context for rules if: expressions.
@@ -490,6 +495,12 @@ func Compile(yml, ref, source string, tmpl TemplateFunc) ([]CompiledJob, error) 
 			return nil, err
 		}
 
+		// Services: resolve aliases and validate (count cap, image required).
+		services, err := validateServices(fmt.Sprintf("job %q", inst.orig), spec.Services)
+		if err != nil {
+			return nil, err
+		}
+
 		// Retry precedence: job retry > YAML default.retry > 0 (no retry).
 		retry, err := validateRetry(fmt.Sprintf("job %q", inst.orig), spec.Retry)
 		if err != nil {
@@ -550,6 +561,7 @@ func Compile(yml, ref, source string, tmpl TemplateFunc) ([]CompiledJob, error) 
 			Retry:         retry,
 			Manual:        inst.manual,
 			AllowFailure:  inst.allowFailure,
+			Services:      services,
 		})
 	}
 	return out, nil

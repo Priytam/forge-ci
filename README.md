@@ -122,6 +122,52 @@ failure **never fails the job** — it logs and continues. See
 [docs/pipeline-dsl.md](docs/pipeline-dsl.md#5-cache--gitlab-style-caching) for
 scoping and limitations.
 
+### Services (GitLab-style sidecar containers)
+
+A job can declare **service containers** that start alongside it, are reachable
+over the network by an alias hostname, and are torn down when the job finishes:
+
+```yaml
+jobs:
+  integration:
+    stage: test
+    image: postgres:16-alpine     # the job image (needs psql for this example)
+    services:
+      - image: postgres:16-alpine # long form
+        alias: db                 # hostname the script reaches it by (optional)
+        env: {POSTGRES_PASSWORD: pw}
+        cmd: [postgres, -c, max_connections=50]  # optional command override
+      - redis:7                   # shorthand: scalar = image, alias defaults to "redis"
+    script:
+      - until pg_isready -h db -U postgres; do sleep 1; done
+      - PGPASSWORD=pw psql -h db -U postgres -c 'select 1'
+```
+
+- **`image`** (required; `name:` is also accepted, matching GitLab).
+- **`alias`** — the network hostname. Defaults to the image's short name
+  (`postgres:16-alpine` → `postgres`). Must be a lowercase DNS label; aliases
+  must be unique within a job.
+- **`env`** — environment passed to the service container.
+- **`cmd`** — optional command/args override for the service container.
+- Up to **5 services** per job.
+
+**Executor support:** `docker` and `kubernetes` only.
+
+| Executor | How services run | Reachability |
+|----------|------------------|--------------|
+| **docker** | dedicated per-job network `forge-net-<id>`; each service attached with its alias as a network-alias; the job container joins the same network (replacing `--network none`) | `<alias>` resolves via docker DNS, e.g. `psql -h db` |
+| **kubernetes** | extra containers in the job's pod; `hostAliases` map each alias to `127.0.0.1` | `<alias>` (→ localhost) **and** `localhost:<port>` |
+| **shell** | **not supported** — the job fails fast with an explanatory log line | — |
+
+Jobs **without** services are unaffected: the docker executor keeps its
+`--network none` isolation. Readiness is best-effort — the executor waits for
+each service container to be running (and *healthy* when the image ships a
+HEALTHCHECK), but scripts should still poll the service protocol (e.g.
+`until pg_isready`). `$FORGE_SERVICE_ALIASES` lists the aliases in the job
+(docker). Everything is cleaned up on success, failure, timeout, and cancel —
+no leaked networks, containers, or pods. See
+[docs/pipeline-dsl.md](docs/pipeline-dsl.md#6-services--sidecar-containers).
+
 ### Advanced authoring: rules, include, extends, parallel/matrix
 
 On top of the core DSL above, Forge supports GitLab-style authoring power:
