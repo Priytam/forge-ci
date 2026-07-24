@@ -17,7 +17,7 @@ Legend: ✅ shipped · 🟡 partial · ❌ not yet (roadmap).
 | Ref-conditional jobs (`only/except`, `rules:`) | ✅ rules engine | ✅ `only/except` globs + `rules:` engine | `rules: if/when` with a safe expr evaluator; `changes/exists` are documented no-ops (no checkout at compile time) — see docs/pipeline-dsl.md |
 | `variables` at job level | ✅ | ✅ | |
 | Artifacts (`paths`) | ✅ + expiry, reports | 🟡 paths only | add `expire_in`, junit test reports |
-| Caching (keyed, per-lockfile) | ✅ | ❌ | biggest perceived-speed feature — high priority |
+| Caching (keyed, per-lockfile) | ✅ | ✅ | `cache: {key, paths, policy}`, literal or content-addressed `key.files`, shared across pipelines — see docs/pipeline-dsl.md |
 | Templates: `include`, `extends`, anchors | ✅ | 🟡 `include` (per-repo templates) + `extends` | anchors N/A; remote/URL includes out of scope (no network fetch) — see docs/pipeline-dsl.md |
 | Matrix builds (`parallel:`) | ✅ | ✅ | `parallel: N` and `parallel: {matrix}` with `needs` fan-in |
 | Manual jobs (`when: manual`) | ✅ | ✅ | `rules`/job `when: manual` → gated `blocked`; `POST /jobs/{id}/play` releases; composes with env approval |
@@ -47,14 +47,14 @@ Legend: ✅ shipped · 🟡 partial · ❌ not yet (roadmap).
 | Feature | GitLab CI | Forge | Notes |
 |---|---|---|---|
 | CI variables: protected / masked / env-scoped | ✅ | ✅ | same three axes |
-| Secrets storage | encrypted at rest, Vault integration | 🟡 plaintext DB | envelope-encrypt, then Vault |
+| Secrets storage | encrypted at rest, Vault integration | ✅ (envelope AES-GCM) | FORGE_SECRET_KEY envelope-encrypts variables/tokens/SSO/App keys at rest (`enc:v1:`); KMS/Vault backend + key rotation still roadmap |
 | Protected environments + approvers | ✅ (Premium) | ✅ | roles: admin/owner/developer |
 | Separation of duties (no self-approval) | ✅ | ✅ | pinned to `triggered_by` |
 | Approval audit trail | ✅ | ✅ | append-only `job_approvals` |
 | Built-in security scan templates (SAST/dependency/container/secrets) | ✅ (CI templates) | ✅ | one-line `include: [{template: security/sast}]` — semgrep/trivy/gitleaks, `allow_failure` by default; built-ins resolve as a fallback after per-repo templates — see docs/pipeline-dsl.md |
 | AuthN (SSO/OIDC) + real RBAC identity | ✅ | ✅ | SSO (Google/Microsoft/GitHub) enforces session identity; RBAC maps to it — see docs/sso.md |
 | OIDC / keyless cloud auth (AWS STS, GCP WIF) | ✅ (ID tokens) | ✅ | short-lived per-job ID token (`FORGE_OIDC_TOKEN`/`CI_JOB_JWT`), public discovery+JWKS, no static cloud keys — see [oidc.md](oidc.md) |
-| Audit log (all setting changes) | ✅ | ❌ | |
+| Audit log (all setting changes) | ✅ | ✅ | append-only `audit_log` of every mutating admin action + denials; `GET /api/v1/audit-log` — see docs/sso.md |
 
 ## Integration (standalone-CI specific)
 
