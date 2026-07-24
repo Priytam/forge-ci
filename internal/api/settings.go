@@ -1,6 +1,8 @@
 package api
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,6 +36,10 @@ func (s *Server) registerSettingsRoutes() {
 	m.HandleFunc("GET /api/v1/artifacts", s.listArtifacts)
 	m.HandleFunc("GET /api/v1/artifacts/{id}/download", s.downloadArtifact)
 	m.HandleFunc("POST /api/v1/runner/jobs/{id}/artifacts", s.uploadArtifact)
+
+	// Cache (runner restore/save; shared across pipelines per repo+key).
+	m.HandleFunc("GET /api/v1/runner/jobs/{id}/cache", s.downloadCache)
+	m.HandleFunc("POST /api/v1/runner/jobs/{id}/cache", s.uploadCache)
 
 	// Repo settings (runner-group selection by tags).
 	m.HandleFunc("GET /api/v1/repo-settings", s.getRepoSettings)
@@ -306,6 +312,145 @@ func (s *Server) downloadArtifact(w http.ResponseWriter, r *http.Request) {
 	defer rc.Close()
 	w.Header().Set("Content-Type", "application/gzip")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name))
+	_, _ = io.Copy(w, rc)
+}
+
+// ---- cache ----
+
+// cacheBlobKey derives a deterministic, filesystem-safe blob key for a repo's
+// cache under a given cache key. The repo segment is sanitized for readability;
+// a sha256 of repo+key guarantees uniqueness (repo/key may contain slashes or
+// other unsafe characters). Being deterministic, a repeat save for the same
+// (repo, key) overwrites the same object.
+func cacheBlobKey(repo, key string) string {
+	sum := sha256.Sum256([]byte(repo + "\x00" + key))
+	return "cache/" + sanitizeSegment(repo) + "/" + hex.EncodeToString(sum[:]) + ".tar.gz"
+}
+
+// sanitizeSegment reduces a string to a safe single path segment: characters
+// outside [A-Za-z0-9._-] become '-'. Empty input becomes "_".
+func sanitizeSegment(s string) string {
+	if s == "" {
+		return "_"
+	}
+	b := []byte(s)
+	for i, c := range b {
+		switch {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9',
+			c == '.', c == '_', c == '-':
+		default:
+			b[i] = '-'
+		}
+	}
+	return string(b)
+}
+
+// uploadCache stores a job's cache archive under repo+key. The repo is resolved
+// server-side from the job so the runner cannot write outside its repo's cache
+// namespace. Enforces MAX_CACHE_BYTES: an over-cap upload is rejected (413) and
+// the partial blob cleaned up — the runner treats this as non-fatal and the job
+// still succeeds.
+func (s *Server) uploadCache(w http.ResponseWriter, r *http.Request) {
+	if !s.requireRunnerAuth(w, r) {
+		return
+	}
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+	key := r.URL.Query().Get("key")
+	if key == "" {
+		writeErr(w, http.StatusBadRequest, "cache key is required")
+		return
+	}
+	repo, err := s.store.RepoForJob(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "job not found")
+		return
+	}
+	if err != nil {
+		slog.Error("cache: resolve repo for job", "err", err, "job", id)
+		writeErr(w, http.StatusInternalServerError, "failed to resolve job")
+		return
+	}
+	blobKey := cacheBlobKey(repo, key)
+	body := r.Body
+	if s.maxCacheBytes > 0 {
+		body = io.NopCloser(io.LimitReader(r.Body, s.maxCacheBytes+1))
+	}
+	size, err := s.blobs.Put(r.Context(), blobKey, body)
+	if err != nil {
+		slog.Error("store cache blob", "err", err)
+		writeErr(w, http.StatusInternalServerError, "failed to store cache")
+		return
+	}
+	if s.maxCacheBytes > 0 && size > s.maxCacheBytes {
+		if derr := s.blobs.Delete(r.Context(), blobKey); derr != nil {
+			slog.Error("cleanup oversize cache blob", "err", derr, "key", blobKey)
+		}
+		writeErr(w, http.StatusRequestEntityTooLarge,
+			fmt.Sprintf("cache exceeds MAX_CACHE_BYTES (%d bytes)", s.maxCacheBytes))
+		return
+	}
+	if err := s.store.SaveCache(r.Context(), repo, key, blobKey, size); err != nil {
+		slog.Error("save cache meta", "err", err)
+		writeErr(w, http.StatusInternalServerError, "failed to record cache")
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"repo": repo, "key": key, "size_bytes": size})
+}
+
+// downloadCache streams a job's cache archive. The runner passes the primary
+// key as ?key= and any fallback keys as repeated ?fallback= params; the server
+// tries them in order (exact key, then prefix/default) and returns the first
+// hit. A miss is 404 (the runner logs "cache miss" and continues). The matched
+// key is returned in the X-Cache-Key response header.
+func (s *Server) downloadCache(w http.ResponseWriter, r *http.Request) {
+	if !s.requireRunnerAuth(w, r) {
+		return
+	}
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+	key := r.URL.Query().Get("key")
+	if key == "" {
+		writeErr(w, http.StatusBadRequest, "cache key is required")
+		return
+	}
+	keys := append([]string{key}, r.URL.Query()["fallback"]...)
+	repo, err := s.store.RepoForJob(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "job not found")
+		return
+	}
+	if err != nil {
+		slog.Error("cache: resolve repo for job", "err", err, "job", id)
+		writeErr(w, http.StatusInternalServerError, "failed to resolve job")
+		return
+	}
+	blobKey, matched, err := s.store.LookupCache(r.Context(), repo, keys)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "cache miss")
+		return
+	}
+	if err != nil {
+		slog.Error("cache: lookup", "err", err)
+		writeErr(w, http.StatusInternalServerError, "failed to look up cache")
+		return
+	}
+	rc, err := s.blobs.Get(r.Context(), blobKey)
+	if err != nil {
+		// Metadata row exists but the blob is gone (e.g. mid-GC). Treat as a miss.
+		slog.Warn("cache: blob missing for entry", "err", err, "key", blobKey)
+		writeErr(w, http.StatusNotFound, "cache miss")
+		return
+	}
+	defer rc.Close()
+	w.Header().Set("Content-Type", "application/gzip")
+	w.Header().Set("X-Cache-Key", matched)
 	_, _ = io.Copy(w, rc)
 }
 

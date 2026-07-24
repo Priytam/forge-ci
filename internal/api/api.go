@@ -25,6 +25,7 @@ const (
 
 	defaultMaxJobLogBytes  = 10 << 20  // MAX_JOB_LOG_BYTES  (10 MiB)
 	defaultMaxArtifactByte = 500 << 20 // MAX_ARTIFACT_BYTES (500 MiB)
+	defaultMaxCacheByte    = 500 << 20 // MAX_CACHE_BYTES    (500 MiB)
 
 	defaultPageLimit = 50  // GET list endpoints default page size
 	maxPageLimit     = 200 // hard cap on ?limit=
@@ -40,6 +41,7 @@ type Server struct {
 	runnerAuth       string // RUNNER_AUTH: "on" | "off"
 	maxJobLogBytes   int64  // MAX_JOB_LOG_BYTES
 	maxArtifactBytes int64  // MAX_ARTIFACT_BYTES
+	maxCacheBytes    int64  // MAX_CACHE_BYTES
 }
 
 func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
@@ -51,6 +53,7 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 		runnerAuth:       runnerAuthMode(),
 		maxJobLogBytes:   envBytes("MAX_JOB_LOG_BYTES", defaultMaxJobLogBytes),
 		maxArtifactBytes: envBytes("MAX_ARTIFACT_BYTES", defaultMaxArtifactByte),
+		maxCacheBytes:    envBytes("MAX_CACHE_BYTES", defaultMaxCacheByte),
 	}
 	srv.initRunnerAuth()
 	m := srv.mux

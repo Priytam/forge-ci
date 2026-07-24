@@ -30,11 +30,28 @@ configuration is needed. See
 [log-ingestion-design.md](log-ingestion-design.md). The postgres log backend
 keeps log bodies in the database and writes no log objects.
 
+## The store also holds job caches
+
+Job caches (the [`cache:`](pipeline-dsl.md#5-cache--gitlab-style-caching) block)
+are written to this **same** blob store, keyed
+`cache/<repo>/<sha256(repo,key)>.tar.gz`. Unlike artifacts — which are per-job
+and per-pipeline — a cache is keyed by **repo + cache-key** and **shared across
+pipelines** of that repo, so it survives the retention sweep of the pipeline
+that last wrote it. A `cache_entries` table (`repo, cache_key, blob_key,
+size_bytes, updated_at`, unique on `repo+key`) tracks each cache; a re-save for
+the same key overwrites the same object. So the configured backend can hold a
+**third** kind of object — cache archives (`cache/…`) — with no extra config.
+The runner restores the cache before the script and saves it after (subject to
+`policy`); it talks to the server, never the blob store directly.
+
 ## Size cap and retention GC
 
 - **`MAX_ARTIFACT_BYTES`** caps a single artifact upload. Oversize uploads are
   rejected with `413` and the partial blob is deleted, so a runaway job cannot
   fill the store.
+- **`MAX_CACHE_BYTES`** (default `524288000`, 500 MiB, `0` disables) caps a
+  single cache save the same way (`413` + partial-blob cleanup). A rejected save
+  is non-fatal — the runner logs it and the job still succeeds.
 - **`MAX_JOB_LOG_BYTES`** (default `10485760`, 10 MiB) caps cumulative job log
   bytes: once exceeded, a single truncation notice is written and further log
   chunks are dropped.
@@ -42,7 +59,9 @@ keeps log bodies in the database and writes no log objects.
   retention GC on the server: expired login sessions are always collected, and
   pipelines older than the window are deleted (cascading their jobs, logs and
   artifact rows) **and their artifact blobs *and archived log objects* are
-  removed from the blob store**.
+  removed from the blob store**. Cache entries are swept on the same schedule
+  but by their **own age** (`updated_at`, not tied to any pipeline): caches not
+  updated within the window have their blobs and `cache_entries` rows removed.
 
 ## Option A — local disk (default, dev)
 

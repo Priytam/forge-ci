@@ -89,6 +89,39 @@ creating a new pipeline for the same repo **and ref** (via API or webhook)
 cancels older non-terminal pipelines for that same repo+ref. Different refs are
 never affected. Set `auto_cancel: false` to let redundant pipelines run.
 
+### Caching (GitLab-style)
+
+Jobs can restore a cache before the script and save it after, sharing warmed
+dependency directories **across pipelines** for the same repo:
+
+```yaml
+jobs:
+  build:
+    stage: build
+    script: [go build ./...]
+    cache:
+      key:                     # literal string, OR content-addressed:
+        files: [go.sum, go.mod]  # hash of these files' contents -> the key
+        prefix: v1               # optional prefix on the hashed key
+      paths: [vendor/, .cache/go-build]  # workspace dirs to cache
+      policy: pull-push        # pull-push (default) | pull | push
+```
+
+- **`key`** — a literal string (`key: v1-deps`), or a `{files: [...], prefix}`
+  map. With `files:`, the runner hashes the listed files' contents (after
+  checkout) into the key, so a **changed lockfile misses cleanly** and an
+  unchanged one hits. The restore falls back from the exact hashed key to the
+  bare prefix, so a first build can still warm from a previous cache.
+- **`paths`** — workspace paths tar'd into the cache. Required when caching.
+- **`policy`** — `pull-push` (restore before, save after — default), `pull`
+  (restore only), or `push` (save only).
+
+Cache is **shared across pipelines** for the same `repo`+`key` (unlike
+artifacts, which are per-job and per-pipeline). A cache miss or a cache-store
+failure **never fails the job** — it logs and continues. See
+[docs/pipeline-dsl.md](docs/pipeline-dsl.md#5-cache--gitlab-style-caching) for
+scoping and limitations.
+
 ### Advanced authoring: rules, include, extends, parallel/matrix
 
 On top of the core DSL above, Forge supports GitLab-style authoring power:
@@ -178,7 +211,8 @@ the dev experience):
 | `LOG_BACKEND` | `redis` \| `postgres`; empty auto-selects redis when `REDIS_URL` is set+reachable, else postgres | — (auto) |
 | `MAX_JOB_LOG_BYTES` | per-job cumulative log cap; excess truncated with a notice | `10485760` (10 MiB) |
 | `MAX_ARTIFACT_BYTES` | per-upload artifact cap (`413` + cleanup on overflow); `0` disables | `524288000` (500 MiB) |
-| `RETENTION_DAYS` | delete pipelines, artifact blobs and webhook-dedup rows older than this; `0` = keep forever | `30` |
+| `MAX_CACHE_BYTES` | per-save cache cap (`413` + cleanup on overflow; runner skips + continues); `0` disables | `524288000` (500 MiB) |
+| `RETENTION_DAYS` | delete pipelines, artifact blobs, cache blobs and webhook-dedup rows older than this; `0` = keep forever | `30` |
 | `RUNNER_DRAIN_GRACE` | (runner) on SIGINT/SIGTERM, how long to let in-flight jobs finish before requeuing them | `30s` |
 
 - **Runner auth** — see [docs/runners.md](docs/runners.md). In `on` mode with no
@@ -218,6 +252,10 @@ the dev experience):
   redundant-pipeline `auto_cancel`.
 - **Artifacts** — `artifacts.paths` archived per job; local disk or any
   S3-compatible store (S3/MinIO/GCS).
+- **Cache** — `cache.{key,paths,policy}` restored before / saved after the
+  script, **shared across pipelines** per repo+key; literal or content-addressed
+  (`key.files`) keys, capped by `MAX_CACHE_BYTES`, age-GC'd by `RETENTION_DAYS`.
+  Never fails a job.
 - **RBAC approvals** — repo members (admin/owner/developer), per-repo
   protected-environment rules (required approvals, allowed roles,
   self-approval block, timeout), append-only audit trail.

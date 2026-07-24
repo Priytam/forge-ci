@@ -168,9 +168,30 @@ func (sc *Scheduler) gc(ctx context.Context) {
 		slog.Error("gc: delete expired pipelines", "err", err)
 		return
 	}
-	if n > 0 || blobsDeleted > 0 || logsDeleted > 0 {
+
+	// Caches are shared across pipelines, so they are GC'd on their own age
+	// (updated_at) rather than cascading with a pipeline. Delete the blobs, then
+	// the rows.
+	cacheKeys, err := sc.store.ExpiredCacheBlobKeys(ctx, sc.retention)
+	if err != nil {
+		slog.Error("gc: list expired cache blobs", "err", err)
+		return
+	}
+	cachesDeleted := 0
+	for _, k := range cacheKeys {
+		if err := sc.blobs.Delete(ctx, k); err != nil {
+			slog.Error("gc: delete cache blob", "err", err, "key", k)
+			continue
+		}
+		cachesDeleted++
+	}
+	if _, err := sc.store.DeleteExpiredCache(ctx, sc.retention); err != nil {
+		slog.Error("gc: delete expired cache rows", "err", err)
+	}
+
+	if n > 0 || blobsDeleted > 0 || logsDeleted > 0 || cachesDeleted > 0 {
 		slog.Info("gc: retention sweep", "pipelines", n, "artifact_blobs", blobsDeleted,
-			"log_objects", logsDeleted, "retention", sc.retention)
+			"log_objects", logsDeleted, "cache_blobs", cachesDeleted, "retention", sc.retention)
 	}
 }
 

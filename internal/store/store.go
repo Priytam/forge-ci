@@ -251,6 +251,8 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 	for _, j := range jobs {
 		env, _ := json.Marshal(j.Env)
 		artifacts, _ := json.Marshal(j.ArtifactPaths)
+		cachePaths, _ := json.Marshal(j.CachePaths)
+		cacheKeyFiles, _ := json.Marshal(j.CacheKeyFiles)
 		tags := j.Tags
 		if len(tags) == 0 {
 			tags = defaultTags
@@ -277,9 +279,9 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 		}
 		var id int64
 		err = tx.QueryRow(ctx,
-			`INSERT INTO jobs (pipeline_id, name, stage, stage_idx, image, script, env, environment, tags, artifact_paths, timeout_seconds, max_attempts, status, manual, allow_failure, blocked_at)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id`,
-			p.ID, j.Name, j.Stage, j.StageIdx, image, j.Script, env, environment, tags, artifacts, timeoutSec, j.Retry+1, status, j.Manual, j.AllowFailure, blockedAt).Scan(&id)
+			`INSERT INTO jobs (pipeline_id, name, stage, stage_idx, image, script, env, environment, tags, artifact_paths, cache_paths, cache_key, cache_key_files, cache_policy, timeout_seconds, max_attempts, status, manual, allow_failure, blocked_at)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) RETURNING id`,
+			p.ID, j.Name, j.Stage, j.StageIdx, image, j.Script, env, environment, tags, artifacts, cachePaths, j.CacheKey, cacheKeyFiles, j.CachePolicy, timeoutSec, j.Retry+1, status, j.Manual, j.AllowFailure, blockedAt).Scan(&id)
 		if err != nil {
 			return nil, err
 		}
@@ -973,7 +975,8 @@ func (s *Store) AcquireJob(ctx context.Context, req proto.AcquireRequest) (*prot
 	}
 	var j proto.RunnerJob
 	var image, environment *string
-	var envRaw, artifactsRaw []byte
+	var envRaw, artifactsRaw, cachePathsRaw, cacheKeyFilesRaw []byte
+	var cachePolicy string
 	var repo, ref, sha string
 	err = s.pool.QueryRow(ctx,
 		`UPDATE jobs j
@@ -985,11 +988,13 @@ func (s *Store) AcquireJob(ctx context.Context, req proto.AcquireRequest) (*prot
 		      pipelines p
 		 WHERE j.id = next.id AND p.id = j.pipeline_id
 		 RETURNING j.id, j.pipeline_id, j.name, j.image, j.script, j.env,
-		           j.artifact_paths, j.environment, j.timeout_seconds,
+		           j.artifact_paths, j.cache_paths, j.cache_key, j.cache_key_files,
+		           j.cache_policy, j.environment, j.timeout_seconds,
 		           p.repo, p.ref, p.sha`,
 		req.RunnerID, runnerTags).
 		Scan(&j.ID, &j.PipelineID, &j.Name, &image, &j.Script, &envRaw,
-			&artifactsRaw, &environment, &j.TimeoutSeconds, &repo, &ref, &sha)
+			&artifactsRaw, &cachePathsRaw, &j.CacheKey, &cacheKeyFilesRaw,
+			&cachePolicy, &environment, &j.TimeoutSeconds, &repo, &ref, &sha)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -1018,6 +1023,11 @@ func (s *Store) AcquireJob(ctx context.Context, req proto.AcquireRequest) (*prot
 	j.Env = resolved
 	j.ArtifactPaths = []string{}
 	_ = json.Unmarshal(artifactsRaw, &j.ArtifactPaths)
+	j.CachePaths = []string{}
+	_ = json.Unmarshal(cachePathsRaw, &j.CachePaths)
+	j.CacheKeyFiles = []string{}
+	_ = json.Unmarshal(cacheKeyFilesRaw, &j.CacheKeyFiles)
+	j.CachePolicy = cachePolicy
 
 	// Source checkout info when the repo is registered against a real VCS.
 	cloneURL, token, err := s.cloneAuth(ctx, repo)

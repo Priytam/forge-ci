@@ -41,6 +41,8 @@ func (s *stringOrSlice) UnmarshalYAML(n *yaml.Node) error {
 //   - pointers (retry/allowFailure/parallel): child non-nil overrides
 //   - slices (script/needs/only/except/tags/rules/artifact paths): child
 //     non-nil replaces (GitLab replaces arrays; it does not element-merge them)
+//   - cache (block): child replaces the whole block when it declares one
+//     (signaled by cache.paths being set)
 //   - variables (map): union-merged, child key wins (GitLab deep-merges hashes)
 //
 // extends is intentionally NOT inherited — it is the directive being resolved.
@@ -91,6 +93,11 @@ func mergeSpec(parent, child jobSpec) jobSpec {
 	}
 	if child.Artifacts.Paths != nil {
 		out.Artifacts.Paths = child.Artifacts.Paths
+	}
+	// Cache is replaced wholesale (like artifacts/arrays) when the child declares
+	// one — presence is signaled by cache.paths being set.
+	if child.Cache.Paths != nil {
+		out.Cache = child.Cache
 	}
 
 	// Variables: union, child wins per key.

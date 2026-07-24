@@ -74,6 +74,7 @@ type jobSpec struct {
 	Except       []string          `yaml:"except"`
 	Tags         []string          `yaml:"tags"`
 	Artifacts    artifactSpec      `yaml:"artifacts"`
+	Cache        cacheSpec         `yaml:"cache"`
 	Timeout      string            `yaml:"timeout"` // Go duration, e.g. "30m", "2h"
 	Retry        *int              `yaml:"retry"`   // 0..10; nil = inherit default
 	Rules        []ruleSpec        `yaml:"rules"`
@@ -85,6 +86,85 @@ type jobSpec struct {
 
 type artifactSpec struct {
 	Paths []string `yaml:"paths"`
+}
+
+// cacheSpec models a per-job cache: block (GitLab-style):
+//
+//	cache:
+//	  key: v1-deps                # literal key, OR:
+//	  key: { files: [go.sum], prefix: v1 }  # content-addressed by file hashes
+//	  paths: [vendor/, .cache/]   # workspace globs restored/saved
+//	  policy: pull-push           # pull-push (default) | pull | push
+//
+// Cache is opt-in: a job with no paths declares no cache. Unlike artifacts
+// (per-job, per-pipeline), cache is shared ACROSS pipelines for the same
+// repo+key, so a dependency cache warmed by one run speeds up the next.
+type cacheSpec struct {
+	Key    cacheKey `yaml:"key"`
+	Paths  []string `yaml:"paths"`
+	Policy string   `yaml:"policy"` // pull-push (default) | pull | push
+}
+
+// cacheKey accepts either a scalar literal key or a mapping with content-
+// addressed hashing:
+//
+//	key: my-literal-key
+//	key: { files: [go.sum, go.mod], prefix: v1 }
+//
+// In the mapping form the runner hashes the listed files' contents (available
+// after checkout) and appends the hash to the optional prefix, so a changed
+// lockfile misses cleanly and an unchanged one hits.
+type cacheKey struct {
+	Literal string   // scalar key, or the prefix of a files: key
+	Files   []string // files whose contents are hashed into the key (runner-side)
+}
+
+func (k *cacheKey) UnmarshalYAML(n *yaml.Node) error {
+	switch n.Kind {
+	case yaml.ScalarNode:
+		return n.Decode(&k.Literal)
+	case yaml.MappingNode:
+		var raw struct {
+			Files  []string `yaml:"files"`
+			Prefix string   `yaml:"prefix"`
+		}
+		if err := n.Decode(&raw); err != nil {
+			return err
+		}
+		if len(raw.Files) == 0 {
+			return fmt.Errorf("cache.key.files must be a non-empty list of files")
+		}
+		k.Files = raw.Files
+		k.Literal = raw.Prefix
+		return nil
+	default:
+		return fmt.Errorf("cache.key must be a string or a {files: [...]} mapping")
+	}
+}
+
+// cachePolicies are the accepted policy values; "" defaults to pull-push.
+var cachePolicies = map[string]bool{"pull": true, "push": true, "pull-push": true}
+
+// validateCache checks a job's cache block and returns the resolved policy.
+// A block with no paths means "no cache" and is accepted (returns "").
+func validateCache(where string, c cacheSpec) (string, error) {
+	if len(c.Paths) == 0 {
+		if c.Key.Literal != "" || len(c.Key.Files) > 0 || c.Policy != "" {
+			return "", fmt.Errorf("%s: cache declares a key/policy but no paths", where)
+		}
+		return "", nil
+	}
+	if c.Key.Literal == "" && len(c.Key.Files) == 0 {
+		return "", fmt.Errorf("%s: cache requires a key (a literal string or {files: [...]})", where)
+	}
+	policy := c.Policy
+	if policy == "" {
+		policy = "pull-push"
+	}
+	if !cachePolicies[policy] {
+		return "", fmt.Errorf("%s: cache.policy must be pull, push or pull-push", where)
+	}
+	return policy, nil
 }
 
 func refMatches(patterns []string, ref string) bool {
@@ -173,6 +253,11 @@ type CompiledJob struct {
 	Needs         []string // job names in earlier stages
 	Tags          []string // runner routing: job runs only on runners with all these tags
 	ArtifactPaths []string // workspace paths archived after success
+	// Cache (opt-in). CachePaths empty means the job declares no cache.
+	CachePaths    []string // workspace paths restored before / saved after the script
+	CacheKey      string   // literal key, or the prefix when CacheKeyFiles is set
+	CacheKeyFiles []string // files whose contents the runner hashes into the key
+	CachePolicy   string   // pull | push | pull-push (empty when no cache)
 	TimeoutSec    int      // 0 = server default
 	Retry         int      // additional attempts on failure (0..10); 0 = no retry
 	Manual        bool     // when: manual — starts gated, released by a manual "play"
@@ -399,6 +484,12 @@ func Compile(yml, ref, source string, tmpl TemplateFunc) ([]CompiledJob, error) 
 			}
 		}
 
+		// Cache: validate the block and resolve the policy (default pull-push).
+		cachePolicy, err := validateCache(fmt.Sprintf("job %q", inst.orig), spec.Cache)
+		if err != nil {
+			return nil, err
+		}
+
 		// Retry precedence: job retry > YAML default.retry > 0 (no retry).
 		retry, err := validateRetry(fmt.Sprintf("job %q", inst.orig), spec.Retry)
 		if err != nil {
@@ -451,6 +542,10 @@ func Compile(yml, ref, source string, tmpl TemplateFunc) ([]CompiledJob, error) 
 			Needs:         needs,
 			Tags:          spec.Tags,
 			ArtifactPaths: spec.Artifacts.Paths,
+			CachePaths:    spec.Cache.Paths,
+			CacheKey:      spec.Cache.Key.Literal,
+			CacheKeyFiles: spec.Cache.Key.Files,
+			CachePolicy:   cachePolicy,
 			TimeoutSec:    timeoutSec,
 			Retry:         retry,
 			Manual:        inst.manual,

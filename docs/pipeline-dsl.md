@@ -2,8 +2,9 @@
 
 This is the reference for Forge's GitLab-style authoring extensions. The core
 DSL (`stages`, `default`, `auto_cancel`, per-job `stage`/`image`/`script`/
-`needs`/`environment`/`variables`/`only`/`except`/`tags`/`artifacts`/`timeout`/
-`retry`) is documented in the [README](../README.md#pipeline-dsl). Everything
+`needs`/`environment`/`variables`/`only`/`except`/`tags`/`artifacts`/`cache`/
+`timeout`/`retry`) is documented in the [README](../README.md#pipeline-dsl).
+Everything
 here is **backward compatible**: a config that uses none of these features
 compiles to exactly the same DAG as before.
 
@@ -199,6 +200,7 @@ jobs:
 | scalars (`stage`, `image`, `environment`, `timeout`, `when`) | child non-empty overrides |
 | pointers (`retry`, `allow_failure`, `parallel`) | child value overrides when set |
 | lists (`script`, `needs`, `only`, `except`, `tags`, `rules`, artifact paths) | child replaces when set (arrays are not element-merged) |
+| `cache` (block) | child replaces the whole block when it declares one (signaled by `cache.paths`) |
 | `variables` (map) | union-merged, child key wins |
 
 ---
@@ -269,6 +271,83 @@ instances.
 
 ---
 
+## 5. `cache:` — GitLab-style caching
+
+A job can restore a cache before its script and save it after, so warmed
+dependency directories persist **across pipelines**. This is the key difference
+from artifacts: artifacts are per-job and per-pipeline (passed to downstream
+jobs via `needs`), whereas a cache is keyed by **repo + cache-key** and shared
+by every pipeline of that repo that uses the same key.
+
+```yaml
+jobs:
+  build:
+    stage: build
+    script: [go build ./...]
+    cache:
+      key:
+        files: [go.sum, go.mod]   # content-addressed; hash of these files
+        prefix: v1                # optional prefix on the hashed key
+      paths: [vendor/, .cache/go-build]
+      policy: pull-push           # pull-push (default) | pull | push
+```
+
+### `key`
+
+- **Literal** — `key: my-key` uses the string verbatim.
+- **Content-addressed** — `key: {files: [<lockfiles>], prefix: <optional>}`. The
+  **runner** hashes the listed files' contents (they only exist after checkout,
+  so hashing happens runner-side, not at compile time) and forms the key as
+  `<prefix>-<hash>`. A **changed lockfile produces a different key** (a clean
+  miss); an **unchanged one hits**. Missing key-files are excluded from the hash
+  with a log note.
+- **Fallback chain** — a `files:` restore tries the exact hashed key first, then
+  falls back to the bare `prefix` (or `default` when no prefix), so a first-ever
+  build for a new lockfile can still warm from the last prefix cache. A save
+  always writes the exact (hashed) key.
+- An empty/omitted key defaults to `default`.
+
+### `paths`
+
+Workspace paths (files or directories) tar'd into the cache. **Required** when a
+cache is declared — a `cache:` with a key/policy but no `paths` is a compile
+error. Unsafe paths (absolute, `..`, or missing at save time) are skipped with a
+log line.
+
+### `policy`
+
+- `pull-push` (default) — restore before the script **and** save after success.
+- `pull` — restore only (e.g. a test job that consumes but never updates a cache).
+- `push` — save only (e.g. a dedicated warm-the-cache job).
+
+### Scoping, storage & safety
+
+- **Blob storage** — caches live in the same blob store as artifacts, under
+  `cache/{repo}/{sha256(repo,key)}.tar.gz`. A `cache_entries` table
+  (`repo, cache_key, blob_key, size_bytes, updated_at`, unique on `repo+key`)
+  tracks them for listing and retention. A save overwrites the previous cache
+  for that key.
+- **Server-scoped repo** — the runner sends only the resolved key + job id; the
+  server derives the repo from the job, so a runner can never write outside its
+  repo's cache namespace.
+- **Never fails the job** — a cache miss, a restore failure, or a save failure
+  (including exceeding `MAX_CACHE_BYTES`, which returns `413`) is **logged and
+  swallowed**. The job runs and reports its real status regardless.
+- **Caps & retention** — `MAX_CACHE_BYTES` (default 500 MiB, `0` disables) caps
+  each save; over-cap saves are rejected and the partial blob cleaned up. The
+  retention sweep deletes cache blobs + rows not updated within `RETENTION_DAYS`
+  (age-based and independent of pipelines, since a cache outlives them).
+
+### Limitations
+
+- Keys hash **file contents**, not globs — list concrete lockfiles.
+- There is no per-path cache; all `paths` share one archive under one key.
+- Caches are best-effort and may be evicted by retention at any time; treat a
+  hit as an optimization, never a correctness dependency.
+- No cross-repo cache sharing (the repo dimension is enforced server-side).
+
+---
+
 ## `allow_failure`
 
 `allow_failure: true` (job-level, or from a matching rule) means the job's
@@ -307,3 +386,5 @@ The compiler rejects, with clear messages:
   colliding matrix combinations;
 - `include:` of an unregistered template, a non-`{template}` include form, and
   over-deep include nesting.
+- `cache:` with `paths` but no `key`, a `key`/`policy` with no `paths`, an empty
+  `key.files` list, or an invalid `policy` (not `pull`/`push`/`pull-push`).

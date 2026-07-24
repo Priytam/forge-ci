@@ -175,6 +175,13 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS tags TEXT[] NOT NULL DEFAULT '{}';
 -- Per-job execution timeout; 0 = use the server default.
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS timeout_seconds INT NOT NULL DEFAULT 0;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS artifact_paths JSONB NOT NULL DEFAULT '[]';
+-- Per-job cache directives (GitLab-style cache: block). cache_key is the literal
+-- key or the prefix; cache_key_files are hashed by the runner into a
+-- content-addressed key; cache_policy is pull|push|pull-push ('' = no cache).
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cache_paths     JSONB NOT NULL DEFAULT '[]';
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cache_key       TEXT  NOT NULL DEFAULT '';
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cache_key_files JSONB NOT NULL DEFAULT '[]';
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cache_policy    TEXT  NOT NULL DEFAULT '';
 
 -- Runner registry: runners self-register on their first acquire and update
 -- last_contact_at on every poll. Paused runners receive no jobs.
@@ -199,6 +206,23 @@ CREATE TABLE IF NOT EXISTS artifacts (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS artifacts_job_idx ON artifacts (job_id);
+
+-- Cache entries: the runner restores/saves per-job caches through the server.
+-- Unlike artifacts (per-job, per-pipeline), a cache is SHARED across pipelines
+-- for the same repo+key, so it survives the retention sweep of the pipeline that
+-- last wrote it. blob_key points at the tar.gz in the blob store; (repo, key) is
+-- unique so a save overwrites the previous cache for that key. updated_at drives
+-- age-based retention GC (independent of pipelines).
+CREATE TABLE IF NOT EXISTS cache_entries (
+    id         BIGSERIAL   PRIMARY KEY,
+    repo       TEXT        NOT NULL,
+    cache_key  TEXT        NOT NULL,
+    blob_key   TEXT        NOT NULL,
+    size_bytes BIGINT      NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (repo, cache_key)
+);
+CREATE INDEX IF NOT EXISTS cache_entries_updated_idx ON cache_entries (updated_at);
 
 -- CI/CD variables, scoped to a repo (GitLab Settings -> CI/CD -> Variables).
 -- protected: only injected when the pipeline ref matches a protected ref.

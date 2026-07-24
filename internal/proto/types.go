@@ -63,6 +63,15 @@ type RunnerJob struct {
 
 	ArtifactPaths []string `json:"artifact_paths"`
 
+	// Cache directives (GitLab-style). The runner restores the cache before the
+	// script and saves it after, keyed by repo+key and shared across pipelines.
+	// CachePaths empty means the job declares no cache. CacheKeyFiles, when set,
+	// are hashed by the runner (after checkout) into a content-addressed key.
+	CachePaths    []string `json:"cache_paths,omitempty"`
+	CacheKey      string   `json:"cache_key,omitempty"`
+	CacheKeyFiles []string `json:"cache_key_files,omitempty"`
+	CachePolicy   string   `json:"cache_policy,omitempty"` // pull | push | pull-push
+
 	// TimeoutSeconds is the resolved execution timeout (job value clamped to
 	// the server cap, or the server default). The runner kills the job when
 	// it elapses; the scheduler backstops with a grace period.

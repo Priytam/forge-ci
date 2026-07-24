@@ -6,14 +6,19 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	osexec "os/exec"
 	"os/signal"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -296,6 +301,13 @@ func runJob(execCtx, drainCtx context.Context, c *client, exec executor.Executor
 		}
 	}
 
+	// Cache restore (GitLab-style): before the script, when the policy allows a
+	// pull. A miss or any failure is non-fatal — the job runs regardless.
+	primaryCacheKey, restoreCacheKeys := resolveCacheKey(logs, job, workdir)
+	if len(job.CachePaths) > 0 && cachePolicyRestores(job.CachePolicy) {
+		restoreCache(jobCtx, c, logs, job, workdir, restoreCacheKeys)
+	}
+
 	logs.printf("$ %s\n", job.Script)
 	out, wait, err := exec.Start(jobCtx, job, workdir)
 	if err != nil {
@@ -330,6 +342,13 @@ func runJob(execCtx, drainCtx context.Context, c *client, exec executor.Executor
 		default:
 			logs.printf("\nJob exited with code %d\n", exitCode)
 		}
+	}
+
+	// Cache save (GitLab-style): after a successful script, when the policy
+	// allows a push. Never blocks the job — a store failure is logged and the job
+	// still reports success.
+	if status == "success" && len(job.CachePaths) > 0 && cachePolicySaves(job.CachePolicy) {
+		saveCache(c, logs, job, workdir, primaryCacheKey)
 	}
 
 	if status == "success" && len(job.ArtifactPaths) > 0 {
@@ -409,6 +428,192 @@ func restoreDependency(ctx context.Context, c *client, logs *logStreamer, dep pr
 	}
 	logs.printf("Restored artifacts of job %q (%s)\n", dep.JobName, dep.Name)
 	return nil
+}
+
+// cachePolicyRestores reports whether the policy restores the cache before the
+// script (pull, pull-push, or an empty policy which defaults to pull-push).
+func cachePolicyRestores(policy string) bool {
+	return policy == "" || policy == "pull" || policy == "pull-push"
+}
+
+// cachePolicySaves reports whether the policy saves the cache after success
+// (push, pull-push, or an empty policy which defaults to pull-push).
+func cachePolicySaves(policy string) bool {
+	return policy == "" || policy == "push" || policy == "pull-push"
+}
+
+// resolveCacheKey turns a job's cache key directives into the primary key (the
+// one a save writes to) and the ordered list of keys a restore should try.
+//
+//   - literal key only:  primary = key (or "default"); restore tries [key].
+//   - files: hashing:    primary = "<prefix>-<hash>"; restore tries the exact
+//     hashed key first, then the bare prefix as a fallback so a changed lockfile
+//     misses cleanly and an unchanged one hits, while a first-ever build can
+//     still warm from a previous prefix cache.
+//
+// The hash is computed here because the workspace files only exist after
+// checkout. Returns ("","",nil) shape via empty slice when the job has no cache.
+func resolveCacheKey(logs *logStreamer, job *proto.RunnerJob, workdir string) (primary string, restore []string) {
+	if len(job.CachePaths) == 0 {
+		return "", nil
+	}
+	base := job.CacheKey
+	if base == "" {
+		base = "default"
+	}
+	if len(job.CacheKeyFiles) == 0 {
+		return base, []string{base}
+	}
+	hash := hashCacheFiles(logs, workdir, job.CacheKeyFiles)
+	primary = base + "-" + hash
+	// Fallback chain: exact content-addressed key, then the bare prefix.
+	return primary, []string{primary, base}
+}
+
+// hashCacheFiles returns a short hex digest of the listed files' contents
+// (relative to workdir), computed deterministically over the sorted file list.
+// Missing files are skipped with a log note (they simply don't contribute),
+// which still changes the digest when a file appears or disappears because the
+// path is only mixed in when present.
+func hashCacheFiles(logs *logStreamer, workdir string, files []string) string {
+	sorted := append([]string(nil), files...)
+	sort.Strings(sorted)
+	h := sha256.New()
+	for _, f := range sorted {
+		clean := strings.TrimSpace(f)
+		if clean == "" || strings.HasPrefix(clean, "/") || strings.HasPrefix(clean, "..") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(workdir, clean))
+		if err != nil {
+			logs.printf("cache: key file %q not found, excluded from hash\n", clean)
+			continue
+		}
+		fmt.Fprintf(h, "%s\x00%d\x00", clean, len(data))
+		h.Write(data)
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+// restoreCache downloads the repo+key cache from the server and untars it into
+// the workspace. A miss (404) or any failure is logged and swallowed — the job
+// never blocks on the cache. The primary key is passed as ?key= and remaining
+// keys as ?fallback= so the server tries the fallback chain.
+func restoreCache(ctx context.Context, c *client, logs *logStreamer, job *proto.RunnerJob, workdir string, keys []string) {
+	if len(keys) == 0 {
+		return
+	}
+	q := url.Values{}
+	q.Set("key", keys[0])
+	for _, k := range keys[1:] {
+		q.Add("fallback", k)
+	}
+	rctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	req, err := http.NewRequestWithContext(rctx, http.MethodGet,
+		fmt.Sprintf("%s/api/v1/runner/jobs/%d/cache?%s", c.base, job.ID, q.Encode()), nil)
+	if err != nil {
+		logs.printf("cache: restore request error: %v (continuing)\n", err)
+		return
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		logs.printf("cache: restore failed: %v (continuing)\n", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		logs.printf("cache miss (key %s)\n", keys[0])
+		return
+	}
+	if resp.StatusCode != http.StatusOK {
+		logs.printf("cache: restore returned status %d (continuing)\n", resp.StatusCode)
+		return
+	}
+	cmd := osexec.CommandContext(rctx, "tar", "-xzf", "-", "-C", workdir)
+	cmd.Stdin = resp.Body
+	if out, err := cmd.CombinedOutput(); err != nil {
+		logs.printf("cache: untar failed: %s (continuing)\n", strings.TrimSpace(string(out)))
+		return
+	}
+	matched := resp.Header.Get("X-Cache-Key")
+	if matched == "" {
+		matched = keys[0]
+	}
+	logs.printf("cache restored (key %s)\n", matched)
+}
+
+// saveCache archives the declared cache paths and uploads them to the server
+// keyed by repo+key. Missing paths are skipped. Any failure (including an
+// over-cap rejection) is logged and swallowed — the job already succeeded and
+// must not be failed by a cache-store problem.
+func saveCache(c *client, logs *logStreamer, job *proto.RunnerJob, workdir, key string) {
+	if key == "" {
+		return
+	}
+	var existing []string
+	for _, p := range job.CachePaths {
+		clean := strings.TrimSuffix(strings.TrimSpace(p), "/")
+		if clean == "" || strings.HasPrefix(clean, "/") || strings.HasPrefix(clean, "..") {
+			logs.printf("cache: skipping unsafe path %q\n", p)
+			continue
+		}
+		if _, err := os.Stat(workdir + "/" + clean); err != nil {
+			logs.printf("cache: path %q not found in workspace, skipping\n", clean)
+			continue
+		}
+		existing = append(existing, clean)
+	}
+	if len(existing) == 0 {
+		logs.printf("cache: nothing to save\n")
+		return
+	}
+
+	archive, err := os.CreateTemp("", "forge-cache-*.tar.gz")
+	if err != nil {
+		logs.printf("cache: temp file error: %v (continuing)\n", err)
+		return
+	}
+	archive.Close()
+	defer os.Remove(archive.Name())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	tarArgs := append([]string{"-czf", archive.Name(), "-C", workdir}, existing...)
+	if out, err := osexec.CommandContext(ctx, "tar", tarArgs...).CombinedOutput(); err != nil {
+		logs.printf("cache: tar failed: %v: %s (continuing)\n", err, out)
+		return
+	}
+	f, err := os.Open(archive.Name())
+	if err != nil {
+		logs.printf("cache: open archive: %v (continuing)\n", err)
+		return
+	}
+	defer f.Close()
+	stat, _ := f.Stat()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		fmt.Sprintf("%s/api/v1/runner/jobs/%d/cache?key=%s", c.base, job.ID, url.QueryEscape(key)), f)
+	if err != nil {
+		logs.printf("cache: save request error: %v (continuing)\n", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/gzip")
+	resp, err := c.do(req)
+	if err != nil {
+		logs.printf("cache: save failed: %v (continuing)\n", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusRequestEntityTooLarge {
+		logs.printf("cache: skipped — archive exceeds the server cache size cap (MAX_CACHE_BYTES)\n")
+		return
+	}
+	if resp.StatusCode >= 300 {
+		logs.printf("cache: save rejected with status %d (continuing)\n", resp.StatusCode)
+		return
+	}
+	logs.printf("cache saved (key %s, %d bytes: %s)\n", key, stat.Size(), strings.Join(existing, ", "))
 }
 
 // uploadArtifacts archives the declared workspace paths with tar and streams
