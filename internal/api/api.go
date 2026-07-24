@@ -88,6 +88,7 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 	srv.registerAuthRoutes()
 	srv.registerRunnerTokenRoutes()
 	srv.registerAuditRoutes()
+	srv.registerOIDCRoutes()
 
 	return srv
 }

@@ -449,6 +449,21 @@ CREATE TABLE IF NOT EXISTS pipeline_schedules (
 CREATE INDEX IF NOT EXISTS pipeline_schedules_due_idx
     ON pipeline_schedules (next_run_at) WHERE enabled;
 
+-- OIDC signing key for keyless cloud auth. Forge signs a short-lived ID token
+-- per job (see internal/oidc) that jobs exchange for AWS/GCP credentials with no
+-- static cloud keys. The RSA signing key must be STABLE across restarts so the
+-- published JWKS (and its kid) don't change under a cloud provider's feet. When
+-- OIDC_PRIVATE_KEY (PEM) is set in the env it wins and this table is unused;
+-- otherwise Forge generates an RSA-2048 key on first start and persists it here,
+-- encrypted at rest with FORGE_SECRET_KEY exactly like other secrets (enc:v1:
+-- prefix; re-encrypted by MigrateSecrets on start). Only one row is ever kept:
+-- the oldest by created_at is the active key (single-key model for v1).
+CREATE TABLE IF NOT EXISTS oidc_keys (
+    kid                 TEXT        PRIMARY KEY,
+    private_key_pem_enc TEXT        NOT NULL,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- Deployment freeze windows. While now() is within [starts_at, ends_at) for a
 -- matching (repo, environment) — repo='' is a global freeze — an environment-
 -- targeting job is HELD in 'created' by PromoteReadyJobs and not promoted to

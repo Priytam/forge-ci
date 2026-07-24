@@ -292,7 +292,9 @@ the dev experience):
 | `RUNNER_TOKEN` | (runner) token sent to an `RUNNER_AUTH=on` server | — |
 | `FORGE_SECRET_KEY` | base64 32-byte AES-256-GCM key; encrypts variables, VCS tokens and SSO secrets at rest | — (passthrough) |
 | `ADMIN_EMAILS` | comma-separated platform-admin emails (enforced once SSO is on) | — |
-| `EXTERNAL_URL` | server's public origin (SSO redirect + CSRF allow-list; commit-status `target_url` fallback) | `http://localhost:8080` |
+| `EXTERNAL_URL` | server's public origin (SSO redirect + CSRF allow-list; commit-status `target_url` fallback; **OIDC token issuer + JWKS origin**) | `http://localhost:8080` |
+| `OIDC_PRIVATE_KEY` | RSA PEM (PKCS#1/PKCS#8) signing the per-job OIDC ID tokens; when unset Forge generates one on first start and persists it encrypted (stable JWKS across restarts) — see [docs/oidc.md](docs/oidc.md) | — (generated) |
+| `OIDC_AUDIENCE` | `aud` claim of minted OIDC tokens (set per cloud, e.g. `sts.amazonaws.com` for AWS) | `forge-ci` |
 | `FRONTEND_URL` | dashboard origin (post-login redirect + CSRF allow-list; commit-status `target_url` base) | `http://localhost:5173` |
 | `COMMIT_STATUS` | `on` \| `off` — write pipeline status back to the origin VCS (GitHub commit status / Bitbucket build status). Only acts on connected repos authenticated by a token (or a GitHub App) with commit-status scope; `off` disables globally | `on` |
 | `GITHUB_API_BASE` | override the GitHub API host — used for **commit-status write-back** and **GitHub App installation-token minting**. For testing against a stub; leave unset in production | `https://api.github.com` |
@@ -316,6 +318,12 @@ the dev experience):
   plaintext rows are re-encrypted on startup once a key is present. Without a key
   the server runs in plaintext passthrough and logs a loud warning if secrets
   exist. Generate a key with `head -c 32 /dev/urandom | base64`.
+- **Keyless cloud auth (OIDC)** — Forge mints a short-lived, signed OIDC ID token
+  per job (`FORGE_OIDC_TOKEN` / `CI_JOB_JWT`, masked from logs) that jobs exchange
+  for AWS STS / GCP Workload Identity credentials with **no static cloud keys**.
+  The public discovery + JWKS endpoints (`/.well-known/openid-configuration`,
+  `/.well-known/jwks.json`) are auth-exempt so cloud providers can validate
+  tokens. See [docs/oidc.md](docs/oidc.md) for AWS/GCP trust setup.
 
 ## Testing
 
@@ -366,6 +374,7 @@ provides the fallback CI. Full walkthrough: [docs/self-hosted-ci.md](docs/self-h
 - [High-volume log architecture (Redis live buffer, blob archive, SSE)](docs/log-ingestion-design.md)
 - [Roles, membership & approval rules](docs/rbac-approvals.md)
 - [SSO setup: Google, Microsoft, GitHub](docs/sso.md)
+- [OIDC / keyless cloud auth (AWS STS & GCP Workload Identity)](docs/oidc.md)
 - [Cloud deployment (Helm chart + Terraform/OpenTofu for AWS & GCP)](docs/cloud-deployment.md)
 - [Feature comparison vs GitLab CI + roadmap](docs/feature-comparison.md)
 - [Self-hosting Forge's own CI (Forge builds Forge)](docs/self-hosted-ci.md)

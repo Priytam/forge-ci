@@ -52,7 +52,8 @@ Legend: ✅ shipped · 🟡 partial · ❌ not yet (roadmap).
 | Separation of duties (no self-approval) | ✅ | ✅ | pinned to `triggered_by` |
 | Approval audit trail | ✅ | ✅ | append-only `job_approvals` |
 | Built-in security scan templates (SAST/dependency/container/secrets) | ✅ (CI templates) | ✅ | one-line `include: [{template: security/sast}]` — semgrep/trivy/gitleaks, `allow_failure` by default; built-ins resolve as a fallback after per-repo templates — see docs/pipeline-dsl.md |
-| AuthN (SSO/OIDC) + real RBAC identity | ✅ | ❌ | identity is client-asserted today — REQUIRED before real use |
+| AuthN (SSO/OIDC) + real RBAC identity | ✅ | ✅ | SSO (Google/Microsoft/GitHub) enforces session identity; RBAC maps to it — see docs/sso.md |
+| OIDC / keyless cloud auth (AWS STS, GCP WIF) | ✅ (ID tokens) | ✅ | short-lived per-job ID token (`FORGE_OIDC_TOKEN`/`CI_JOB_JWT`), public discovery+JWKS, no static cloud keys — see [oidc.md](oidc.md) |
 | Audit log (all setting changes) | ✅ | ❌ | |
 
 ## Integration (standalone-CI specific)
@@ -99,7 +100,7 @@ serves the board on top of them (see [docs/environments.md](environments.md)):
 
 ## Suggested build order (impact-ranked)
 
-1. OIDC authn + map RBAC to real identities (unblocks everything trust-related)
+1. ~~OIDC authn + map RBAC to real identities~~ ✅ shipped (SSO — docs/sso.md) · ~~OIDC/keyless cloud auth (AWS STS / GCP WIF)~~ ✅ shipped (docs/oidc.md)
 2. ~~Git clone step + commit-status write-back~~ ✅ shipped (makes it a *real* CI for GitHub/Bitbucket)
 3. Caching + k8s executor (speed and scale)
 4. ~~Environments board with deploy history/rollback~~ ✅ shipped (ArgoCD lens, GitLab skin — see docs/environments.md)

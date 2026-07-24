@@ -21,6 +21,7 @@ import (
 
 	"github.com/priytamjeepandey/forge-ci/internal/compiler"
 	"github.com/priytamjeepandey/forge-ci/internal/githubapp"
+	"github.com/priytamjeepandey/forge-ci/internal/oidc"
 	"github.com/priytamjeepandey/forge-ci/internal/proto"
 	"github.com/priytamjeepandey/forge-ci/internal/secret"
 )
@@ -37,9 +38,10 @@ var (
 )
 
 type Store struct {
-	pool      *pgxpool.Pool
-	cipher    *secret.Cipher    // envelope encryption for secrets at rest
-	appMinter *githubapp.Minter // mints/caches GitHub App installation tokens
+	pool       *pgxpool.Pool
+	cipher     *secret.Cipher    // envelope encryption for secrets at rest
+	appMinter  *githubapp.Minter // mints/caches GitHub App installation tokens
+	oidcSigner *oidc.Signer      // mints per-job OIDC ID tokens (keyless cloud auth)
 
 	// Execution-timeout policy (env-configured, see New).
 	defaultJobTimeout time.Duration // DEFAULT_JOB_TIMEOUT, jobs without timeout:
@@ -112,8 +114,17 @@ func New(ctx context.Context, dsn string) (*Store, error) {
 	if err := s.initSecrets(ctx); err != nil {
 		return nil, err
 	}
+	signer, err := s.loadOrCreateOIDCSigner(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("oidc signing key: %w", err)
+	}
+	s.oidcSigner = signer
 	return s, nil
 }
+
+// OIDCSigner returns the process-wide OIDC signer (for the JWKS/discovery
+// endpoints). Never nil after New succeeds.
+func (s *Store) OIDCSigner() *oidc.Signer { return s.oidcSigner }
 
 // initSecrets either re-encrypts any plaintext secret rows (when a key is
 // configured) or warns loudly that secrets are stored in the clear (when it is
@@ -151,7 +162,8 @@ func (s *Store) countPlaintextSecrets(ctx context.Context) (int, error) {
 		  (SELECT count(*) FROM repo_variables WHERE value <> '' AND value NOT LIKE 'enc:v1:%') +
 		  (SELECT count(*) FROM repo_registry  WHERE token <> '' AND token NOT LIKE 'enc:v1:%') +
 		  (SELECT count(*) FROM repo_registry  WHERE github_app_private_key <> '' AND github_app_private_key NOT LIKE 'enc:v1:%') +
-		  (SELECT count(*) FROM sso_providers  WHERE client_secret <> '' AND client_secret NOT LIKE 'enc:v1:%')`).
+		  (SELECT count(*) FROM sso_providers  WHERE client_secret <> '' AND client_secret NOT LIKE 'enc:v1:%') +
+		  (SELECT count(*) FROM oidc_keys      WHERE private_key_pem_enc <> '' AND private_key_pem_enc NOT LIKE 'enc:v1:%')`).
 		Scan(&n)
 	return n, err
 }
@@ -172,6 +184,7 @@ func (s *Store) MigrateSecrets(ctx context.Context) (int, error) {
 		{"repo_registry", "repo", "token"},
 		{"repo_registry", "repo", "github_app_private_key"},
 		{"sso_providers", "provider", "client_secret"},
+		{"oidc_keys", "kid", "private_key_pem_enc"},
 	} {
 		rows, err := s.pool.Query(ctx, fmt.Sprintf(
 			`SELECT %s, %s FROM %s WHERE %s <> '' AND %s NOT LIKE 'enc:v1:%%'`,
@@ -1025,6 +1038,17 @@ func (s *Store) AcquireJob(ctx context.Context, req proto.AcquireRequest) (*prot
 		resolved[k] = v
 	}
 	j.Env = resolved
+
+	// Keyless cloud auth: mint a short-lived, per-job OIDC ID token and inject it
+	// as FORGE_OIDC_TOKEN (with the GitLab-style CI_JOB_JWT alias). The job
+	// exchanges it for AWS/GCP credentials — no static cloud keys. It is a
+	// secret-equivalent, so it is added to RedactValues to mask it from logs.
+	// Minting never fails job acquisition (empty token when unavailable).
+	if tok := s.mintJobOIDCToken(repo, ref, sha, env, j.PipelineID, j.ID); tok != "" {
+		j.Env["FORGE_OIDC_TOKEN"] = tok
+		j.Env["CI_JOB_JWT"] = tok
+		j.RedactValues = append(j.RedactValues, tok)
+	}
 	j.ArtifactPaths = []string{}
 	_ = json.Unmarshal(artifactsRaw, &j.ArtifactPaths)
 	j.CachePaths = []string{}
