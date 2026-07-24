@@ -79,6 +79,8 @@ CREATE TABLE IF NOT EXISTS repo_members (
 );
 
 ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS triggered_by TEXT NOT NULL DEFAULT '';
+-- Trigger source: api | push | webhook | merge_request | schedule.
+ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'api';
 
 -- Registered pipeline YAML per repo (Forge doesn't host the repo; webhooks
 -- carry only repo/ref/sha, the config lives here).

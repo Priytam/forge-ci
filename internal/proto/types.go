@@ -13,8 +13,10 @@ type Pipeline struct {
 	Stages []StageStatus `json:"stages"`
 	// ConfigVersion is the registered config version this pipeline ran;
 	// nil means a one-off custom config was supplied at run time.
-	ConfigVersion *int      `json:"config_version"`
-	CreatedAt     time.Time `json:"created_at"`
+	ConfigVersion *int `json:"config_version"`
+	// Source is the trigger: api | push | webhook | merge_request | schedule.
+	Source    string    `json:"source"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // StageStatus is the derived status of one stage, for the mini per-stage
@@ -253,6 +255,9 @@ type CreatePipelineRequest struct {
 	// ConfigSource notes where Config came from for audit/retry ('repo' =
 	// in-repo .forge-ci.yml, else 'registered'). Empty defaults to 'registered'.
 	ConfigSource string `json:"config_source,omitempty"`
+	// Source is the trigger (api | push | webhook | merge_request | schedule).
+	// Empty defaults to 'api'.
+	Source string `json:"source,omitempty"`
 }
 
 // Schedule is a cron-scheduled pipeline trigger for a (repo, ref). The cron

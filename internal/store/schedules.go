@@ -179,6 +179,6 @@ func (s *Store) BuildScheduledPipeline(ctx context.Context, repo, ref string) (*
 		return nil, err
 	}
 	return s.CreatePipeline(ctx,
-		proto.CreatePipelineRequest{Repo: repo, Ref: ref, SHA: sha, Config: config, TriggeredBy: "schedule", ConfigSource: cfgSource},
+		proto.CreatePipelineRequest{Repo: repo, Ref: ref, SHA: sha, Config: config, TriggeredBy: "schedule", ConfigSource: cfgSource, Source: compiler.SourceSchedule},
 		jobs, configVersion, opts.AutoCancel, opts.FailFast)
 }

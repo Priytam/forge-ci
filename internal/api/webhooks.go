@@ -294,7 +294,7 @@ func (s *Server) triggerFromWebhook(w http.ResponseWriter, r *http.Request, repo
 		return false
 	}
 	p, err := s.store.CreatePipeline(r.Context(),
-		proto.CreatePipelineRequest{Repo: repo, Ref: ref, SHA: sha, Config: config, TriggeredBy: author, ConfigSource: cfgSource},
+		proto.CreatePipelineRequest{Repo: repo, Ref: ref, SHA: sha, Config: config, TriggeredBy: author, ConfigSource: cfgSource, Source: source},
 		jobs, configVersion, opts.AutoCancel, opts.FailFast)
 	if err != nil {
 		slog.Error("webhook pipeline create", "err", err)

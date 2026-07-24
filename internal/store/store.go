@@ -262,15 +262,22 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 	if configSource == "" {
 		configSource = "registered"
 	}
+	// source is the trigger (api|push|webhook|merge_request|schedule); untouched
+	// callers (manual API path) default to 'api'.
+	source := req.Source
+	if source == "" {
+		source = "api"
+	}
 
 	var p proto.Pipeline
 	p.Repo, p.Ref, p.SHA = req.Repo, req.Ref, req.SHA
 	p.Status = "created"
 	p.ConfigVersion = configVersion
+	p.Source = source
 	err = tx.QueryRow(ctx,
-		`INSERT INTO pipelines (repo, ref, sha, config_yaml, triggered_by, config_version, fail_fast, config_source)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id, created_at`,
-		req.Repo, req.Ref, req.SHA, req.Config, req.TriggeredBy, configVersion, failFast, configSource).Scan(&p.ID, &p.CreatedAt)
+		`INSERT INTO pipelines (repo, ref, sha, config_yaml, triggered_by, config_version, fail_fast, config_source, source)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id, created_at`,
+		req.Repo, req.Ref, req.SHA, req.Config, req.TriggeredBy, configVersion, failFast, configSource, source).Scan(&p.ID, &p.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -413,7 +420,7 @@ type stageJob struct {
 // its derived overall status and per-stage statuses.
 func (s *Store) ListPipelines(ctx context.Context, repo string) ([]proto.Pipeline, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT p.id, p.repo, p.ref, p.sha, p.config_version, p.created_at,
+		`SELECT p.id, p.repo, p.ref, p.sha, p.config_version, p.source, p.created_at,
 		        COALESCE(json_agg(json_build_object(
 		            'stage', j.stage, 'idx', j.stage_idx, 'status', CASE WHEN j.status='failed' AND j.allow_failure THEN 'success' ELSE j.status END
 		        ) ORDER BY j.stage_idx) FILTER (WHERE j.id IS NOT NULL), '[]')
@@ -429,7 +436,7 @@ func (s *Store) ListPipelines(ctx context.Context, repo string) ([]proto.Pipelin
 	for rows.Next() {
 		var p proto.Pipeline
 		var raw []byte
-		if err := rows.Scan(&p.ID, &p.Repo, &p.Ref, &p.SHA, &p.ConfigVersion, &p.CreatedAt, &raw); err != nil {
+		if err := rows.Scan(&p.ID, &p.Repo, &p.Ref, &p.SHA, &p.ConfigVersion, &p.Source, &p.CreatedAt, &raw); err != nil {
 			return nil, err
 		}
 		var sjs []stageJob
@@ -457,7 +464,7 @@ func (s *Store) ListPipelinesPage(ctx context.Context, repo string, limit, offse
 		return nil, 0, err
 	}
 	rows, err := s.pool.Query(ctx,
-		`SELECT p.id, p.repo, p.ref, p.sha, p.config_version, p.created_at,
+		`SELECT p.id, p.repo, p.ref, p.sha, p.config_version, p.source, p.created_at,
 		        COALESCE(json_agg(json_build_object(
 		            'stage', j.stage, 'idx', j.stage_idx, 'status', CASE WHEN j.status='failed' AND j.allow_failure THEN 'success' ELSE j.status END
 		        ) ORDER BY j.stage_idx) FILTER (WHERE j.id IS NOT NULL), '[]')
@@ -473,7 +480,7 @@ func (s *Store) ListPipelinesPage(ctx context.Context, repo string, limit, offse
 	for rows.Next() {
 		var p proto.Pipeline
 		var raw []byte
-		if err := rows.Scan(&p.ID, &p.Repo, &p.Ref, &p.SHA, &p.ConfigVersion, &p.CreatedAt, &raw); err != nil {
+		if err := rows.Scan(&p.ID, &p.Repo, &p.Ref, &p.SHA, &p.ConfigVersion, &p.Source, &p.CreatedAt, &raw); err != nil {
 			return nil, 0, err
 		}
 		var sjs []stageJob
@@ -556,8 +563,8 @@ func (s *Store) ListRepos(ctx context.Context) ([]proto.RepoSummary, error) {
 func (s *Store) GetPipeline(ctx context.Context, id int64) (*proto.Pipeline, []proto.Job, error) {
 	var p proto.Pipeline
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, repo, ref, sha, config_version, created_at FROM pipelines WHERE id=$1`, id).
-		Scan(&p.ID, &p.Repo, &p.Ref, &p.SHA, &p.ConfigVersion, &p.CreatedAt)
+		`SELECT id, repo, ref, sha, config_version, source, created_at FROM pipelines WHERE id=$1`, id).
+		Scan(&p.ID, &p.Repo, &p.Ref, &p.SHA, &p.ConfigVersion, &p.Source, &p.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil, ErrNotFound
 	}
