@@ -391,3 +391,42 @@ CREATE INDEX IF NOT EXISTS audit_log_id_idx    ON audit_log (id DESC);
 CREATE INDEX IF NOT EXISTS audit_log_ts_idx    ON audit_log (ts);
 CREATE INDEX IF NOT EXISTS audit_log_repo_idx  ON audit_log (repo);
 CREATE INDEX IF NOT EXISTS audit_log_actor_idx ON audit_log (actor);
+
+-- ArgoCD-style deployment history. One row is recorded — transactionally, in
+-- CompleteJob, at the moment an environment-targeting job flips to 'success' —
+-- so the deployment record and the job's terminal state commit together
+-- (crash-safe). UNIQUE(job_id) makes recording idempotent: a duplicate/late
+-- runner report (or a re-run of CompleteJob) inserts nothing (ON CONFLICT DO
+-- NOTHING), so a given job's success is deployed at most once. deployed_by is
+-- the environment's approver when the job was approval-gated, else the pipeline's
+-- triggered_by. Rows cascade away with the pipeline under the retention sweep.
+CREATE TABLE IF NOT EXISTS deployments (
+    id          BIGSERIAL   PRIMARY KEY,
+    repo        TEXT        NOT NULL,
+    environment TEXT        NOT NULL,
+    sha         TEXT        NOT NULL,
+    ref         TEXT        NOT NULL,
+    pipeline_id BIGINT      NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
+    job_id      BIGINT      NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    deployed_by TEXT        NOT NULL DEFAULT '',
+    deployed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    status      TEXT        NOT NULL DEFAULT 'success',
+    UNIQUE (job_id)
+);
+-- Serves the board (latest-per-env) and the per-env history listing.
+CREATE INDEX IF NOT EXISTS deployments_repo_env_id_idx ON deployments (repo, environment, id DESC);
+
+-- Deployment freeze windows. While now() is within [starts_at, ends_at) for a
+-- matching (repo, environment) — repo='' is a global freeze — an environment-
+-- targeting job is HELD in 'created' by PromoteReadyJobs and not promoted to
+-- pending/blocked until the window passes (self-releasing on a later tick).
+CREATE TABLE IF NOT EXISTS deploy_freezes (
+    id          BIGSERIAL   PRIMARY KEY,
+    repo        TEXT        NOT NULL DEFAULT '',
+    environment TEXT        NOT NULL,
+    starts_at   TIMESTAMPTZ NOT NULL,
+    ends_at     TIMESTAMPTZ NOT NULL,
+    reason      TEXT        NOT NULL DEFAULT '',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS deploy_freezes_lookup_idx ON deploy_freezes (environment, repo);

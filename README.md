@@ -224,6 +224,15 @@ Public:
 - `GET  /api/v1/repo-templates?repo=name` — list a repo's registered template names
 - `GET  /api/v1/metrics` — Prometheus-format log-tier counters (auth-exempt)
 
+Environments board (ArgoCD-style CD lens — see [docs/environments.md](docs/environments.md)):
+
+- `GET  /api/v1/environments?repo=name` — one card per environment: current (latest successful) deployment, deployment count, `drift` (`in_sync`\|`drifted`\|`unknown`, deployed sha vs live ref tip), `frozen`
+- `GET  /api/v1/environments/{repo}/{env}/deployments[?limit=&offset=]` — deployment history, newest first; `X-Total-Count`/`X-Has-More`
+- `POST /api/v1/environments/{repo}/{env}/rollback` `{to_pipeline_id | to_sha}` — re-deploy a prior SHA by creating a NEW pipeline from the registered config; goes through the normal flow **including the approval gate** (admin, audited)
+- `GET  /api/v1/deploy-freezes[?repo=name]` — list deploy-freeze windows
+- `POST /api/v1/deploy-freezes` `{repo, environment, starts_at, ends_at, reason}` — freeze deploys to an env for a window; matching env jobs are held in `created` until it passes (admin, audited)
+- `DELETE /api/v1/deploy-freezes/{id}` — remove a freeze window (admin, audited)
+
 Cancel and other mutating routes use the same authz as the rest of the API:
 open in bootstrap mode, admin session required once SSO is enforced.
 

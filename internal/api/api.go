@@ -82,6 +82,7 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 	m.HandleFunc("POST /api/v1/runner/jobs/{id}/complete", srv.complete)
 
 	srv.registerSettingsRoutes()
+	srv.registerEnvironmentRoutes()
 	srv.registerWebhookRoutes()
 	srv.registerAuthRoutes()
 	srv.registerRunnerTokenRoutes()

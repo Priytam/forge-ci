@@ -221,6 +221,59 @@ type Member struct {
 	Role     string `json:"role"` // admin | owner | developer
 }
 
+// Deployment is one recorded deployment: an environment-targeting job that
+// reached success. It is the atom of the ArgoCD-style environments board.
+type Deployment struct {
+	ID          int64     `json:"id"`
+	Repo        string    `json:"repo"`
+	Environment string    `json:"environment"`
+	SHA         string    `json:"sha"`
+	Ref         string    `json:"ref"`
+	PipelineID  int64     `json:"pipeline_id"`
+	JobID       int64     `json:"job_id"`
+	DeployedBy  string    `json:"deployed_by"`
+	DeployedAt  time.Time `json:"deployed_at"`
+	Status      string    `json:"status"`
+}
+
+// Drift indicator values for an environment card.
+const (
+	DriftInSync  = "in_sync"  // deployed sha == ref tip
+	DriftDrifted = "drifted"  // deployed sha != ref tip
+	DriftUnknown = "unknown"  // ref tip could not be resolved (repo not connected)
+)
+
+// EnvironmentBoard is one card on the per-repo environments board: the current
+// deployment plus derived indicators.
+type EnvironmentBoard struct {
+	Repo            string      `json:"repo"`
+	Environment     string      `json:"environment"`
+	Current         *Deployment `json:"current"`          // latest successful deployment
+	DeploymentCount int         `json:"deployment_count"` // total successful deployments to this env
+	Drift           string      `json:"drift"`            // in_sync | drifted | unknown
+	RefTipSHA       string      `json:"ref_tip_sha,omitempty"`
+	Frozen          bool        `json:"frozen"` // an active deploy freeze covers this env now
+}
+
+// RollbackRequest targets a prior deployment to re-deploy. Exactly one of the
+// two fields is used: ToPipelineID takes precedence when > 0, else ToSHA.
+type RollbackRequest struct {
+	ToPipelineID int64  `json:"to_pipeline_id,omitempty"`
+	ToSHA        string `json:"to_sha,omitempty"`
+}
+
+// DeployFreeze is a window during which deployments to an environment are held.
+// Repo="" makes the freeze global (applies to every repo).
+type DeployFreeze struct {
+	ID          int64     `json:"id"`
+	Repo        string    `json:"repo"`
+	Environment string    `json:"environment"`
+	StartsAt    time.Time `json:"starts_at"`
+	EndsAt      time.Time `json:"ends_at"`
+	Reason      string    `json:"reason"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
 // ProtectedEnvironment is a per-repo (or global, repo="") approval rule.
 type ProtectedEnvironment struct {
 	ID                   int64    `json:"id"`

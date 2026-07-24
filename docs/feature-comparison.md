@@ -72,31 +72,34 @@ Legend: ✅ shipped · 🟡 partial · ❌ not yet (roadmap).
 | Pipeline graph: stage & job-dependency grouping, pill cards, curved edges | ✅ | ✅ | |
 | Live log viewer | ✅ | ✅ | |
 | Settings → CI/CD sections (variables, runners, artifacts, members) | ✅ | ✅ | |
-| Environments/deployments board | ✅ | ❌ | see ArgoCD section |
+| Environments/deployments board | ✅ | ✅ | board + history + drift + rollback + freezes — API shipped ([docs/environments.md](environments.md)); web view is a later pass |
 
 ## ArgoCD-inspired direction (CD depth)
 
 ArgoCD's value is the **environment lens**: what's deployed where, is it
-healthy, what's the diff. Forge already has the two primitives that matter —
-`environment:` on jobs and the approval gate. Roadmap to an ArgoCD-flavored CD
-view in GitLab's visual language:
+healthy, what's the diff. Forge already had the two primitives that matter —
+`environment:` on jobs and the approval gate — and now records deployments and
+serves the board on top of them (see [docs/environments.md](environments.md)):
 
-1. **Environments board** — one card per environment per repo: currently
-   deployed SHA (last successful `environment:` job), who approved, when,
-   history of deployments with one-click rollback (re-run old pipeline's
-   deploy job). *(Mostly derivable from existing data.)*
-2. **Deployment freezes** — freeze windows per environment (GitLab has this;
-   maps cleanly onto the scheduler's blocked logic).
-3. **Sync/health status** — ArgoCD's killer feature needs a k8s connection:
-   after a deploy job, poll the cluster (Deployment rollout status) and show
-   Healthy/Progressing/Degraded on the environment card.
-4. **Drift awareness** — "deployed SHA ≠ latest main" indicator per env
-   (pure DB query), the lightweight cousin of ArgoCD's OutOfSync.
+1. **Environments board** — ✅ shipped. One card per environment per repo:
+   currently deployed SHA (last successful `environment:` job), who deployed
+   (env approver, else pipeline trigger), when, deployment count, and full
+   history with one-click rollback. Deployments are recorded transactionally in
+   `CompleteJob` when an `environment:` job flips to success (deduped by job_id).
+2. **Deployment freezes** — ✅ shipped. Per-env (or global) freeze windows; a
+   deploy job targeting a frozen env is held in `created` by the scheduler until
+   the window passes (self-releasing), rather than running mid-freeze.
+3. **Sync/health status** — ❌ not yet. ArgoCD's killer feature needs a k8s
+   connection: after a deploy job, poll the cluster (Deployment rollout status)
+   and show Healthy/Progressing/Degraded on the environment card.
+4. **Drift awareness** — ✅ shipped. Per-env `drift` = deployed SHA vs the live
+   tip of its ref (via `git ls-remote` on the registered clone URL);
+   `unknown` for unconnected repos. The lightweight cousin of ArgoCD's OutOfSync.
 
 ## Suggested build order (impact-ranked)
 
 1. OIDC authn + map RBAC to real identities (unblocks everything trust-related)
 2. ~~Git clone step + commit-status write-back~~ ✅ shipped (makes it a *real* CI for GitHub/Bitbucket)
 3. Caching + k8s executor (speed and scale)
-4. Environments board with deploy history/rollback (ArgoCD lens, GitLab skin)
+4. ~~Environments board with deploy history/rollback~~ ✅ shipped (ArgoCD lens, GitLab skin — see docs/environments.md)
 5. ~~`rules:`/`include`/matrix (authoring power)~~ ✅ shipped (see docs/pipeline-dsl.md) · WebSocket logs · scheduled pipelines

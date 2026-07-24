@@ -1108,10 +1108,15 @@ func (s *Store) CompleteJob(ctx context.Context, jobID int64, status string, exi
 
 	var attempt, maxAttempts int
 	var cancelReq bool
+	var environment *string
+	var pipelineID int64
+	var repo, ref, sha, triggeredBy string
 	err = tx.QueryRow(ctx,
-		`SELECT attempt, max_attempts, cancel_requested FROM jobs
-		 WHERE id=$1 AND status='running' FOR UPDATE`, jobID).
-		Scan(&attempt, &maxAttempts, &cancelReq)
+		`SELECT j.attempt, j.max_attempts, j.cancel_requested, j.environment,
+		        p.id, p.repo, p.ref, p.sha, p.triggered_by
+		 FROM jobs j JOIN pipelines p ON p.id = j.pipeline_id
+		 WHERE j.id=$1 AND j.status='running' FOR UPDATE OF j`, jobID).
+		Scan(&attempt, &maxAttempts, &cancelReq, &environment, &pipelineID, &repo, &ref, &sha, &triggeredBy)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", "", ErrNotFound
 	}
@@ -1156,6 +1161,27 @@ func (s *Store) CompleteJob(ctx context.Context, jobID int64, status string, exi
 		`UPDATE jobs SET status=$2, exit_code=$3, finished_at=now()
 		 WHERE id=$1`, jobID, status, exitCode); err != nil {
 		return "", "", err
+	}
+
+	// Deployment record: when an environment-targeting job flips to success, that
+	// IS a deployment. Insert it in the SAME transaction as the status flip so the
+	// two commit together (crash-safe). UNIQUE(job_id) + ON CONFLICT DO NOTHING
+	// dedupes: a given job's success is recorded at most once, even on a late or
+	// duplicated runner report. deployed_by is the environment approver when the
+	// job was approval-gated, otherwise the pipeline's triggered_by.
+	if status == "success" && environment != nil && *environment != "" {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO deployments
+			     (repo, environment, sha, ref, pipeline_id, job_id, deployed_by, status)
+			 VALUES ($1,$2,$3,$4,$5,$6,
+			         COALESCE((SELECT approver FROM job_approvals
+			                   WHERE job_id=$6 AND verdict='approved'
+			                   ORDER BY id DESC LIMIT 1), $7),
+			         'success')
+			 ON CONFLICT (job_id) DO NOTHING`,
+			repo, *environment, sha, ref, pipelineID, jobID, triggeredBy); err != nil {
+			return "", "", err
+		}
 	}
 	return status, "", tx.Commit(ctx)
 }
@@ -1325,16 +1351,26 @@ const protectedFor = `EXISTS (
 	SELECT 1 FROM protected_environments pe, pipelines p
 	WHERE p.id = j.pipeline_id AND pe.name = j.environment AND pe.repo IN ('', p.repo))`
 
+// frozenEnv is true when the job targets an environment currently inside a
+// deploy-freeze window (repo-specific or global). A frozen job is left in
+// 'created' (not promoted) until the window passes, at which point a later tick
+// promotes it normally — self-releasing, crash-safe, no extra state.
+const frozenEnv = `EXISTS (
+	SELECT 1 FROM deploy_freezes df, pipelines p
+	WHERE p.id = j.pipeline_id AND df.environment = j.environment
+	  AND df.repo IN ('', p.repo)
+	  AND now() >= df.starts_at AND now() < df.ends_at)`
+
 func (s *Store) PromoteReadyJobs(ctx context.Context) (int64, error) {
 	blocked, err := s.pool.Exec(ctx,
 		`UPDATE jobs j SET status='blocked', blocked_at=now()
-		 WHERE j.status='created' AND `+protectedFor+` AND NOT `+needsUnmet)
+		 WHERE j.status='created' AND `+protectedFor+` AND NOT `+needsUnmet+` AND NOT `+frozenEnv)
 	if err != nil {
 		return 0, err
 	}
 	pending, err := s.pool.Exec(ctx,
 		`UPDATE jobs j SET status='pending'
-		 WHERE j.status='created' AND NOT `+protectedFor+` AND NOT `+needsUnmet)
+		 WHERE j.status='created' AND NOT `+protectedFor+` AND NOT `+needsUnmet+` AND NOT `+frozenEnv)
 	if err != nil {
 		return 0, err
 	}
