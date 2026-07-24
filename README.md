@@ -46,6 +46,8 @@ editing pipeline YAML in a PR cannot weaken the gate. Votes are append-only in
 ```yaml
 auto_cancel: true            # optional (default true): a newer pipeline for the
                              # same repo+ref cancels this one's non-terminal jobs
+fail_fast: true              # optional (default false): the first genuine job
+                             # failure cancels this pipeline's other jobs
 default:
   timeout: 1h                # per-job TTL for jobs without their own
   retry: 0                   # per-job retry count for jobs without their own
@@ -88,6 +90,25 @@ are preserved with an `attempt N/M` separator.
 creating a new pipeline for the same repo **and ref** (via API or webhook)
 cancels older non-terminal pipelines for that same repo+ref. Different refs are
 never affected. Set `auto_cancel: false` to let redundant pipelines run.
+
+`fail_fast` (default `false`, opt-in — GitLab is *not* fail-fast by default)
+stops the whole run on the first genuine failure. As soon as any job reaches a
+final `failed` state that is **not** `allow_failure`, the scheduler cancels this
+pipeline's other non-terminal jobs — not just downstream dependents:
+created/pending/blocked jobs go straight to `canceled`, and running jobs are
+asked to stop via the same heartbeat cancel path as a manual cancel (the runner
+kills the process and reports `canceled`). Scope is pipeline-level (there is no
+per-stage `fail_fast`). Interactions:
+
+- **`allow_failure: true`** jobs failing do **not** trigger fail-fast (an allowed
+  failure is not a pipeline failure). A running `allow_failure` job *is* canceled
+  once some other genuine failure trips fail-fast — the run is already doomed.
+- **`retry`** — only a *final* failure trips fail-fast. A failing attempt with
+  retries left is requeued (`pending`) and never counts, so siblings keep running
+  until retries are exhausted.
+
+Leaving `fail_fast` unset (or `false`) preserves today's behavior: only jobs
+whose needs died are canceled, and independent siblings run to completion.
 
 ### Caching (GitLab-style)
 

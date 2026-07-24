@@ -206,7 +206,7 @@ func (s *Server) rollback(w http.ResponseWriter, r *http.Request, repo, env stri
 		Config:      config,
 		TriggeredBy: s.sessionActor(r), // "" in open bootstrap mode
 	}
-	p, err := s.store.CreatePipeline(r.Context(), createReq, jobs, configVersion, opts.AutoCancel)
+	p, err := s.store.CreatePipeline(r.Context(), createReq, jobs, configVersion, opts.AutoCancel, opts.FailFast)
 	if err != nil {
 		slog.Error("rollback create pipeline", "err", err)
 		writeErr(w, http.StatusInternalServerError, "failed to create rollback pipeline")

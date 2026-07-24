@@ -143,7 +143,7 @@ func makePipeline(t *testing.T, ctx context.Context, st *store.Store, repo, sha 
 	jobs := []compiler.CompiledJob{{Name: "build", Stage: "build", StageIdx: 0, Script: "echo hi"}}
 	p, err := st.CreatePipeline(ctx,
 		proto.CreatePipelineRequest{Repo: repo, Ref: "main", SHA: sha, Config: "jobs:\n  build:\n    script: echo hi"},
-		jobs, nil, false)
+		jobs, nil, false, false)
 	if err != nil {
 		t.Fatalf("CreatePipeline: %v", err)
 	}

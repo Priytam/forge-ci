@@ -272,7 +272,7 @@ func (s *Server) triggerFromWebhook(w http.ResponseWriter, r *http.Request, repo
 	}
 	p, err := s.store.CreatePipeline(r.Context(),
 		proto.CreatePipelineRequest{Repo: repo, Ref: ref, SHA: sha, Config: config, TriggeredBy: author},
-		jobs, configVersion, opts.AutoCancel)
+		jobs, configVersion, opts.AutoCancel, opts.FailFast)
 	if err != nil {
 		slog.Error("webhook pipeline create", "err", err)
 		writeErr(w, http.StatusInternalServerError, "failed to create pipeline")

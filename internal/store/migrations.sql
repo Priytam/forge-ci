@@ -136,6 +136,14 @@ WHERE NOT EXISTS (SELECT 1 FROM repo_config_versions v WHERE v.repo = rc.repo);
 -- config supplied at run time; never persisted to the registry).
 ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS config_version INT;
 
+-- fail_fast (top-level `fail_fast: true` in the pipeline YAML; default FALSE,
+-- so existing pipelines are unaffected and GitLab-compatible). When TRUE, the
+-- scheduler's fail_fast_cancel transition cancels the pipeline's other
+-- non-terminal jobs as soon as any job reaches a genuine (non-allow_failure,
+-- retries-exhausted) 'failed' state — stopping in-flight and not-yet-started
+-- siblings, not just downstream dependents.
+ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS fail_fast BOOLEAN NOT NULL DEFAULT FALSE;
+
 -- First-class repo registry: the connection to the real VCS repo. token is
 -- used to build authenticated clone URLs for runners (never returned by the
 -- API, never logged). Plaintext at rest for now — same caveat as variables.

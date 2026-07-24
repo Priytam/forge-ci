@@ -153,5 +153,11 @@ func mergeConfig(base, overlay config) config {
 	if overlay.AutoCancel != nil {
 		out.AutoCancel = overlay.AutoCancel
 	}
+
+	// fail_fast: overlay wins when set.
+	out.FailFast = base.FailFast
+	if overlay.FailFast != nil {
+		out.FailFast = overlay.FailFast
+	}
 	return out
 }

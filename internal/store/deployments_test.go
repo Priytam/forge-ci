@@ -54,7 +54,7 @@ func makeEnvPipeline(t *testing.T, st *Store, repo, ref, sha, env, triggeredBy s
 	}}
 	p, err := st.CreatePipeline(ctx, proto.CreatePipelineRequest{
 		Repo: repo, Ref: ref, SHA: sha, Config: "x", TriggeredBy: triggeredBy,
-	}, jobs, nil, false)
+	}, jobs, nil, false, false)
 	if err != nil {
 		t.Fatalf("CreatePipeline: %v", err)
 	}

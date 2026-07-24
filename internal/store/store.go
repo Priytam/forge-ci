@@ -221,7 +221,10 @@ func (s *Store) Close() { s.pool.Close() }
 // config version it was compiled from (nil = one-off custom config). When
 // autoCancel is true, older non-terminal pipelines for the same repo+ref are
 // canceled in the same transaction (GitLab-style redundant-pipeline cancel).
-func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequest, jobs []compiler.CompiledJob, configVersion *int, autoCancel bool) (*proto.Pipeline, error) {
+// failFast is persisted on the pipeline; when true the scheduler's
+// fail_fast_cancel transition stops the pipeline's other non-terminal jobs on
+// the first genuine job failure.
+func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequest, jobs []compiler.CompiledJob, configVersion *int, autoCancel, failFast bool) (*proto.Pipeline, error) {
 	// Repo-level runner-group selection: jobs without explicit tags inherit
 	// the repo's default runner tags (job-level tags: overrides).
 	defaultTags, err := s.GetRepoDefaultTags(ctx, req.Repo)
@@ -240,9 +243,9 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 	p.Status = "created"
 	p.ConfigVersion = configVersion
 	err = tx.QueryRow(ctx,
-		`INSERT INTO pipelines (repo, ref, sha, config_yaml, triggered_by, config_version)
-		 VALUES ($1,$2,$3,$4,$5,$6) RETURNING id, created_at`,
-		req.Repo, req.Ref, req.SHA, req.Config, req.TriggeredBy, configVersion).Scan(&p.ID, &p.CreatedAt)
+		`INSERT INTO pipelines (repo, ref, sha, config_yaml, triggered_by, config_version, fail_fast)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, created_at`,
+		req.Repo, req.Ref, req.SHA, req.Config, req.TriggeredBy, configVersion, failFast).Scan(&p.ID, &p.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -1413,6 +1416,53 @@ func (s *Store) FailOverdueJobs(ctx context.Context) (int64, error) {
 		       (CASE WHEN timeout_seconds > 0 THEN timeout_seconds ELSE $1 END) + $2) < now()`,
 		int(s.defaultJobTimeout.Seconds()), int(grace.Seconds()))
 	return tag.RowsAffected(), err
+}
+
+// hasGenuineFailure is true when a pipeline has at least one job in a genuine
+// terminal failure: status='failed' AND NOT allow_failure. An allowed failure
+// must NOT trigger fail-fast, and a retrying attempt is represented as 'pending'
+// (CompleteJob requeues it without ever writing status='failed'), so only a
+// FINAL, retries-exhausted failure of a non-allow_failure job matches here.
+const hasGenuineFailure = `EXISTS (
+	SELECT 1 FROM jobs f
+	WHERE f.pipeline_id = j.pipeline_id
+	  AND f.status='failed' AND NOT f.allow_failure)`
+
+// FailFastCancel implements opt-in pipeline-level fail-fast. For every pipeline
+// flagged fail_fast whose jobs include a genuine failure (see hasGenuineFailure),
+// it stops that pipeline's OTHER non-terminal jobs — not just downstream
+// dependents:
+//
+//   - created/pending/blocked siblings go straight to 'canceled'.
+//   - running siblings (including allow_failure ones — the pipeline is doomed)
+//     are flagged cancel_requested so their runner kills them and reports
+//     'canceled' on the next heartbeat, reusing the same mechanism as CancelJob.
+//
+// The already-failed job and any terminal job are naturally excluded (their
+// status is not in the created/pending/blocked/running sets). The running
+// update skips jobs already flagged, so the statement is idempotent and safe to
+// re-run every tick and across replicas. Returns the number of sibling jobs
+// canceled or newly flagged this call.
+func (s *Store) FailFastCancel(ctx context.Context) (int64, error) {
+	nonRunning, err := s.pool.Exec(ctx,
+		`UPDATE jobs j SET status='canceled', finished_at=now()
+		 FROM pipelines p
+		 WHERE j.pipeline_id = p.id AND p.fail_fast
+		   AND j.status IN ('created','pending','blocked')
+		   AND `+hasGenuineFailure)
+	if err != nil {
+		return 0, err
+	}
+	running, err := s.pool.Exec(ctx,
+		`UPDATE jobs j SET cancel_requested=TRUE
+		 FROM pipelines p
+		 WHERE j.pipeline_id = p.id AND p.fail_fast
+		   AND j.status='running' AND NOT j.cancel_requested
+		   AND `+hasGenuineFailure)
+	if err != nil {
+		return 0, err
+	}
+	return nonRunning.RowsAffected() + running.RowsAffected(), nil
 }
 
 // FailStuckPending fails jobs that no runner picked up within the queue

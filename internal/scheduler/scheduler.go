@@ -206,6 +206,7 @@ func (sc *Scheduler) step(ctx context.Context) {
 		fn   func(context.Context) (int64, error)
 	}{
 		{"cancel_dead", sc.store.CancelDeadJobs},
+		{"fail_fast_cancel", sc.store.FailFastCancel},
 		{"promote_ready", sc.store.PromoteReadyJobs},
 		{"expire_blocked", sc.store.ExpireBlockedJobs},
 		{"fail_overdue", sc.store.FailOverdueJobs},

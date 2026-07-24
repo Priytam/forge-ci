@@ -1,7 +1,7 @@
 # Pipeline DSL: rules, include, extends, parallel/matrix
 
 This is the reference for Forge's GitLab-style authoring extensions. The core
-DSL (`stages`, `default`, `auto_cancel`, per-job `stage`/`image`/`script`/
+DSL (`stages`, `default`, `auto_cancel`, `fail_fast`, per-job `stage`/`image`/`script`/
 `needs`/`environment`/`variables`/`only`/`except`/`tags`/`artifacts`/`cache`/
 `timeout`/`retry`) is documented in the [README](../README.md#pipeline-dsl).
 Everything
@@ -157,7 +157,7 @@ then the **main config overrides all includes** on any conflict.
 - **jobs** — deep-merged by name (same rules as `extends`; main wins per key).
 - **stages** — unioned preserving order (includes first, then any new main
   stages).
-- **default / auto_cancel** — main wins when it sets them.
+- **default / auto_cancel / fail_fast** — main wins when it sets them.
 
 Nested includes (a template that itself has `include:`) are supported up to a
 depth bound that guards against include cycles.
@@ -502,6 +502,38 @@ failure:
 - **The pipeline is not marked failed** — status derivation folds an allowed
   failure into `success` for the overall and per-stage status (the individual
   job still reports its true `failed` status).
+- **Does not trip `fail_fast`** — because an allowed failure is not a pipeline
+  failure, it never triggers `fail_fast` cancellation of siblings (see below).
+
+---
+
+## `fail_fast` — stop the run on the first genuine failure
+
+Top-level `fail_fast: true` (default **false**; opt-in, and unlike some CI
+systems GitLab is *not* fail-fast by default) makes the scheduler cancel a
+pipeline's other non-terminal jobs the moment any job reaches a **final**
+`failed` state that is **not** `allow_failure` — the whole run, not just
+downstream dependents:
+
+- **created / pending / blocked** siblings → `canceled` immediately.
+- **running** siblings → asked to stop via the heartbeat cancel path (the same
+  mechanism as an explicit job/pipeline cancel): `cancel_requested` is set, the
+  runner kills the process and reports `canceled`. This includes running
+  `allow_failure` jobs — the run is already doomed, so they are cancelled too.
+- The already-failed job and any terminal job are left untouched.
+
+Semantics and scope:
+
+- **Only a final failure counts.** A failing attempt with `retry` budget left is
+  requeued (`pending`) and never written as `failed`, so retries do **not** trip
+  fail-fast until they are exhausted.
+- **`allow_failure` failures never trip it** (see above).
+- **Pipeline-level only.** There is no per-stage `fail_fast`.
+- **Idempotent & replica-safe.** The cancellation is a scheduler transition
+  (`fail_fast_cancel`) applied every tick as idempotent SQL; a job already
+  canceled/terminal or already flagged is skipped.
+- Leaving it unset (or `false`) is fully backward compatible: independent
+  siblings run to completion and only jobs whose needs died are canceled.
 
 ---
 

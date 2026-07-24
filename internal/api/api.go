@@ -179,7 +179,7 @@ func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
 			configVersion = &v
 		}
 	}
-	p, err := s.store.CreatePipeline(r.Context(), req, jobs, configVersion, opts.AutoCancel)
+	p, err := s.store.CreatePipeline(r.Context(), req, jobs, configVersion, opts.AutoCancel, opts.FailFast)
 	if err != nil {
 		slog.Error("create pipeline", "err", err)
 		writeErr(w, http.StatusInternalServerError, "failed to create pipeline")

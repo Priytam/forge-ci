@@ -20,6 +20,9 @@
 //
 //	auto_cancel: true            # optional (default true); cancel older
 //	                             # non-terminal pipelines for the same repo+ref
+//	fail_fast: true              # optional (default false); on the first genuine
+//	                             # job failure, cancel the pipeline's other
+//	                             # in-flight and not-yet-started jobs
 //	default: {timeout: 30m, retry: 1}
 //	include: [{template: name}]  # compose from registered per-repo templates
 //
@@ -196,6 +199,7 @@ type config struct {
 	Stages     []string           `yaml:"stages"`
 	Jobs       map[string]jobSpec `yaml:"jobs"`
 	AutoCancel *bool              `yaml:"auto_cancel"` // nil = default true
+	FailFast   *bool              `yaml:"fail_fast"`   // nil = default false
 	Include    []includeSpec      `yaml:"include"`
 	Default    struct {
 		Timeout string `yaml:"timeout"` // pipeline-wide TTL for jobs without their own
@@ -217,11 +221,12 @@ func validateRetry(where string, v *int) (int, error) {
 // YAML that the store needs at creation time.
 type PipelineOptions struct {
 	AutoCancel bool // cancel older non-terminal pipelines for the same repo+ref
+	FailFast   bool // on the first genuine job failure, cancel the pipeline's other jobs
 }
 
 // Options parses just the pipeline-level settings from the YAML. AutoCancel
-// defaults to true when the key is absent. auto_cancel is read from the main
-// config only (not from included templates).
+// defaults to true and FailFast defaults to false when the key is absent. Both
+// are read from the main config only (not from included templates).
 func Options(yml string) (PipelineOptions, error) {
 	var cfg config
 	if err := yaml.Unmarshal([]byte(yml), &cfg); err != nil {
@@ -231,7 +236,11 @@ func Options(yml string) (PipelineOptions, error) {
 	if cfg.AutoCancel != nil {
 		autoCancel = *cfg.AutoCancel
 	}
-	return PipelineOptions{AutoCancel: autoCancel}, nil
+	failFast := false
+	if cfg.FailFast != nil {
+		failFast = *cfg.FailFast
+	}
+	return PipelineOptions{AutoCancel: autoCancel, FailFast: failFast}, nil
 }
 
 func parseTimeout(where, v string) (int, error) {
