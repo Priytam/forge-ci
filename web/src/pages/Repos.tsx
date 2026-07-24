@@ -59,6 +59,14 @@ function RepoCard({
             </span>
           )}
           <Link
+            to={`/repos/${encodeURIComponent(summary.repo)}/environments`}
+            className="repo-settings-link"
+            title="Environments"
+            onClick={(e) => e.stopPropagation()}
+          >
+            ⛴
+          </Link>
+          <Link
             to={`/repos/${encodeURIComponent(summary.repo)}/settings`}
             className="repo-settings-link"
             title="CI/CD Settings"

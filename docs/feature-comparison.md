@@ -51,6 +51,7 @@ Legend: ✅ shipped · 🟡 partial · ❌ not yet (roadmap).
 | Protected environments + approvers | ✅ (Premium) | ✅ | roles: admin/owner/developer |
 | Separation of duties (no self-approval) | ✅ | ✅ | pinned to `triggered_by` |
 | Approval audit trail | ✅ | ✅ | append-only `job_approvals` |
+| Built-in security scan templates (SAST/dependency/container/secrets) | ✅ (CI templates) | ✅ | one-line `include: [{template: security/sast}]` — semgrep/trivy/gitleaks, `allow_failure` by default; built-ins resolve as a fallback after per-repo templates — see docs/pipeline-dsl.md |
 | AuthN (SSO/OIDC) + real RBAC identity | ✅ | ❌ | identity is client-asserted today — REQUIRED before real use |
 | Audit log (all setting changes) | ✅ | ❌ | |
 

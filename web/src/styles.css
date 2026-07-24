@@ -791,6 +791,22 @@ tbody tr:last-child td {
   --pillglow: rgba(210, 153, 34, 0.09);
 }
 
+.allowfail-tag {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  color: #d29922;
+  background: rgba(210, 153, 34, 0.16);
+  border-radius: 4px;
+  padding: 1px 5px;
+  margin-left: 2px;
+}
+
+.allowfail-note {
+  font-size: 11px;
+  margin: 4px 0 0 12px;
+}
+
 .job-pill-name {
   font-weight: 600;
   font-size: 13px;
@@ -2078,4 +2094,158 @@ select:focus {
   align-items: center;
   gap: 14px;
   padding: 4px 0;
+}
+
+.log-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.log-live {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  color: #4ade80;
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+/* ---------- Admin nav dropdown ---------- */
+
+.admin-nav {
+  position: relative;
+}
+
+.admin-nav-trigger {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-family: var(--font);
+  padding: 0;
+}
+
+.admin-dropdown {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  background: rgba(22, 27, 34, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  padding: 8px;
+  min-width: 180px;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.admin-dropdown a {
+  color: var(--text);
+  font-size: 13px;
+  padding: 7px 10px;
+  border-radius: 8px;
+}
+.admin-dropdown a:hover {
+  background: rgba(255, 255, 255, 0.06);
+  text-decoration: none;
+}
+
+/* ---------- Environments board ---------- */
+
+.env-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 16px;
+}
+
+.env-card {
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.env-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.env-name {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.env-current {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+
+.env-meta {
+  font-size: 12px;
+}
+
+.env-history-toggle {
+  align-self: flex-start;
+}
+
+.freeze-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.freeze-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  background: rgba(88, 166, 255, 0.1);
+  box-shadow: inset 0 0 0 1px rgba(88, 166, 255, 0.3);
+  color: #9ecbff;
+  border-radius: 10px;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+
+/* ---------- Audit log ---------- */
+
+.audit-filters {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+.audit-filters input {
+  flex: 0 1 220px;
+}
+
+.audit-detail {
+  background: rgba(0, 0, 0, 0.4);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  color: #d4d4d4;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+}
+
+.pagination {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 16px;
+  justify-content: flex-end;
+  font-size: 13px;
 }

@@ -9,7 +9,8 @@ import (
 // TemplateFunc resolves a named template to its YAML body. It returns
 // (yaml, true, nil) when found, ("", false, nil) when there is no such
 // template, and a non-nil error only on a lookup failure. A nil TemplateFunc
-// means "no templates are available"; any include that names one then errors.
+// means "no repo template store is available" — includes then resolve against
+// the shipped built-in templates only (see builtins.go and resolveTemplateBody).
 //
 // Forge does not host repo file trees and webhooks carry no file contents, so
 // there is nothing to resolve a filesystem-style `include: local:` against.
@@ -23,6 +24,32 @@ type TemplateFunc func(name string) (yaml string, found bool, err error)
 // form is supported.
 type includeSpec struct {
 	Template string `yaml:"template"`
+}
+
+// resolveTemplateBody resolves a template name to its YAML body, checking the
+// per-repo template store FIRST (the caller-supplied tmpl) and falling back to
+// a shipped built-in (see builtins.go) only when the store has no template by
+// that name. This gives repos the ability to shadow any built-in by
+// registering a template of the same name, while keeping built-ins available
+// even when tmpl is nil (no store at all — e.g. a nil-resolver Compile).
+//
+// Returns (body, true, nil) when resolved, ("", false, nil) when neither the
+// store nor the built-ins have it, and a non-nil error only on a store lookup
+// failure.
+func resolveTemplateBody(name string, tmpl TemplateFunc) (string, bool, error) {
+	if tmpl != nil {
+		body, found, err := tmpl(name)
+		if err != nil {
+			return "", false, err
+		}
+		if found {
+			return body, true, nil
+		}
+	}
+	if body, ok := BuiltinTemplate(name); ok {
+		return body, true, nil
+	}
+	return "", false, nil
 }
 
 // resolveIncludes fetches every included template, parses each as a config
@@ -53,15 +80,12 @@ func resolveIncludesDepth(main config, tmpl TemplateFunc, depth int) (config, er
 		if inc.Template == "" {
 			return config{}, fmt.Errorf("include: only the {template: <name>} form is supported")
 		}
-		if tmpl == nil {
-			return config{}, fmt.Errorf("include: template %q requested but no template store is available", inc.Template)
-		}
-		body, found, err := tmpl(inc.Template)
+		body, found, err := resolveTemplateBody(inc.Template, tmpl)
 		if err != nil {
 			return config{}, fmt.Errorf("include: loading template %q: %w", inc.Template, err)
 		}
 		if !found {
-			return config{}, fmt.Errorf("include: template %q is not registered for this repo", inc.Template)
+			return config{}, fmt.Errorf("include: template %q is not registered for this repo and is not a built-in", inc.Template)
 		}
 		var frag config
 		if err := yaml.Unmarshal([]byte(body), &frag); err != nil {

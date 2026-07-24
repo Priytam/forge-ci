@@ -1,0 +1,28 @@
+# Example: one-line security scanning via Forge's built-in templates.
+#
+# `include: [{template: security/...}]` pulls in shipped scan jobs with zero
+# setup — no repo template needs to be registered first. Built-ins resolve as a
+# fallback AFTER any per-repo template of the same name, so a repo can shadow
+# any of these by registering its own template under the same name.
+#
+# The built-in scan jobs land in the `test` stage and are allow_failure: true by
+# default (a finding is surfaced but does not hard-block the pipeline). Because
+# include: stages are unioned ahead of stages declared only here, the `test`
+# stage (scans) runs before `build`.
+#
+# See docs/pipeline-dsl.md for the full list of built-ins, their images, and how
+# to override them (make a scan blocking, point the container scan at your image).
+
+include:
+  - template: security/sast      # semgrep static analysis      -> job "sast"
+  - template: security/secrets   # gitleaks secret detection    -> job "secret-detection"
+
+stages: [build]
+
+jobs:
+  build:
+    stage: build
+    image: golang:1.23
+    script:
+      - go build ./...
+      - go test ./...

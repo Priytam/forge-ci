@@ -36,6 +36,13 @@ export default function PipelineList() {
         </h1>
         <div className="page-head-actions">
           <Link
+            to={`/repos/${encodeURIComponent(repo)}/environments`}
+            className="btn"
+            title="Environments"
+          >
+            Environments
+          </Link>
+          <Link
             to={`/repos/${encodeURIComponent(repo)}/settings`}
             className="btn"
             title="CI/CD Settings"

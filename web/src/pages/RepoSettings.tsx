@@ -19,12 +19,15 @@ import {
   humanSize,
   listArtifacts,
   listConfigVersions,
+  getRepoTemplate,
   listMembers,
   listProtectedEnvironments,
+  listRepoTemplates,
   listRunners,
   listVariables,
   putRepoConfig,
   putRepoSettings,
+  putRepoTemplate,
   relativeTime,
   revertConfig,
   updateVariable,
@@ -990,6 +993,111 @@ function ConfigSection({ repo }: { repo: string }) {
 
 /* ---------------- Page ---------------- */
 
+/* ---------------- Config templates (for include:) ---------------- */
+
+const NEW_TEMPLATE = "__new__";
+
+function TemplatesSection({ repo }: { repo: string }) {
+  const fetcher = useCallback(() => listRepoTemplates(repo), [repo]);
+  const { data: names, refresh } = usePoll(fetcher, 0, false);
+
+  const [selected, setSelected] = useState<string>(NEW_TEMPLATE);
+  const [name, setName] = useState("");
+  const [yaml, setYaml] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const onSelect = async (value: string) => {
+    setSelected(value);
+    setSaved(false);
+    setError(null);
+    if (value === NEW_TEMPLATE) {
+      setName("");
+      setYaml("");
+      return;
+    }
+    try {
+      const t = await getRepoTemplate(repo, value);
+      setName(t.name);
+      setYaml(t.yaml);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const onSave = async () => {
+    setBusy(true);
+    setError(null);
+    setSaved(false);
+    try {
+      await putRepoTemplate(repo, name.trim(), yaml);
+      setSaved(true);
+      setSelected(name.trim());
+      refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div>
+      <p className="muted small-note">
+        Templates resolved by <code>include: [&#123;template: name&#125;]</code>{" "}
+        in a pipeline config.
+      </p>
+      <div className="form-row">
+        <label className="field">
+          <span>Template</span>
+          <select value={selected} onChange={(e) => void onSelect(e.target.value)}>
+            <option value={NEW_TEMPLATE}>New template…</option>
+            {(names ?? []).map((n) => (
+              <option key={n} value={n}>
+                {n}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="field">
+          <span>Name</span>
+          <input
+            className="mono"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            disabled={selected !== NEW_TEMPLATE}
+            required
+          />
+        </label>
+      </div>
+      <textarea
+        rows={12}
+        className="mono yaml-input config-textarea"
+        value={yaml}
+        onChange={(e) => {
+          setYaml(e.target.value);
+          setSaved(false);
+        }}
+        spellCheck={false}
+        placeholder="jobs:&#10;  ..."
+      />
+      {error && <div className="error-banner">{error}</div>}
+      {saved && <div className="saved-note">Template saved.</div>}
+      <div className="form-actions">
+        <button
+          type="button"
+          className="btn btn-primary"
+          disabled={busy || !name.trim()}
+          onClick={() => void onSave()}
+        >
+          Save template
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function RepoSettings() {
   const params = useParams<{ repo: string }>();
   const repo = decodeRepoParam(params.repo ?? "");
@@ -1083,6 +1191,18 @@ export default function RepoSettings() {
         }
       >
         <ConfigSection repo={repo} />
+      </Section>
+
+      <Section
+        title="Config templates"
+        description={
+          <>
+            Reusable YAML fragments that a pipeline config pulls in with{" "}
+            <code>include:</code>.
+          </>
+        }
+      >
+        <TemplatesSection repo={repo} />
       </Section>
     </div>
   );

@@ -10,7 +10,10 @@ import Docs from "./pages/Docs";
 import AddRepo from "./pages/AddRepo";
 import Login from "./pages/Login";
 import AdminSso from "./pages/AdminSso";
+import AdminAudit from "./pages/AdminAudit";
+import Environments from "./pages/Environments";
 import AuthMenu from "./components/AuthMenu";
+import AdminNav from "./components/AdminNav";
 
 export default function App() {
   return (
@@ -27,9 +30,7 @@ export default function App() {
             <Link to="/docs" className="header-link">
               Docs
             </Link>
-            <Link to="/admin/sso" className="header-link">
-              Admin
-            </Link>
+            <AdminNav />
             <Link to="/new" className="btn header-action">
               Run pipeline
             </Link>
@@ -43,11 +44,13 @@ export default function App() {
           <Route path="/repos/new" element={<AddRepo />} />
           <Route path="/repos/:repo" element={<PipelineList />} />
           <Route path="/repos/:repo/settings" element={<RepoSettings />} />
+          <Route path="/repos/:repo/environments" element={<Environments />} />
           <Route path="/runners" element={<Runners />} />
           <Route path="/docs" element={<Docs />} />
           <Route path="/docs/:guide" element={<Docs />} />
           <Route path="/login" element={<Login />} />
           <Route path="/admin/sso" element={<AdminSso />} />
+          <Route path="/admin/audit" element={<AdminAudit />} />
           <Route path="/pipelines/:id" element={<PipelineDetail />} />
           <Route path="/jobs/:id" element={<JobLog />} />
           <Route path="/new" element={<NewPipeline />} />

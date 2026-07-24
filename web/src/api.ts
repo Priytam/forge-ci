@@ -46,6 +46,10 @@ export interface Job {
   finished_at: string | null;
   exit_code: number | null;
   needs: number[];
+  /** blocked jobs: true = manual gate (Play), false/absent = approval gate */
+  manual?: boolean;
+  /** failure of this job does not fail the pipeline */
+  allow_failure?: boolean;
 }
 
 export interface PipelineDetail {
@@ -132,6 +136,9 @@ export interface RegisteredRepo {
   has_token: boolean;
   default_branch: string;
   created_at: string;
+  has_github_app?: boolean;
+  github_app_id?: string;
+  github_installation_id?: string;
 }
 
 export interface RepoRegistryInput {
@@ -140,6 +147,9 @@ export interface RepoRegistryInput {
   clone_url?: string;
   token?: string;
   default_branch?: string;
+  github_app_id?: string;
+  github_installation_id?: string;
+  github_app_private_key?: string;
 }
 
 export interface RepoSummary {
@@ -423,6 +433,165 @@ export function putRepoSettings(
   return requestVoid("PUT", "/repo-settings", { repo, default_runner_tags });
 }
 
+// --- Environments ---
+
+export interface Deployment {
+  id: number;
+  sha: string;
+  ref: string;
+  pipeline_id: number;
+  deployed_by: string;
+  deployed_at: string;
+  status: string;
+}
+
+export interface Environment {
+  name: string;
+  current: {
+    sha: string;
+    ref: string;
+    pipeline_id: number;
+    deployed_by: string;
+    deployed_at: string;
+  } | null;
+  deployment_count: number;
+  drift: "in_sync" | "drifted" | "unknown";
+  ref_tip_sha: string;
+}
+
+export interface Freeze {
+  id: number;
+  starts_at: string;
+  ends_at: string;
+  reason: string;
+}
+
+/**
+ * Environment sub-paths embed the repo unencoded (the server parses the
+ * subtree), so repos containing a slash must NOT be collapsed into one
+ * encoded segment. Only the env/action segments are encoded.
+ */
+function envPath(repo: string, env: string, action?: string): string {
+  const base = `/environments/${repo}/${encodeURIComponent(env)}`;
+  return action ? `${base}/${action}` : base;
+}
+
+export function listEnvironments(repo: string): Promise<Environment[]> {
+  return getJSON<Environment[]>(
+    `/environments?repo=${encodeURIComponent(repo)}`
+  );
+}
+
+export async function listDeployments(
+  repo: string,
+  env: string,
+  limit: number,
+  offset: number
+): Promise<{ items: Deployment[]; total: number }> {
+  const res = await fetch(
+    `${BASE}${envPath(repo, env, "deployments")}?limit=${limit}&offset=${offset}`,
+    { headers: { Accept: "application/json" } }
+  );
+  if (!res.ok) throw await parseError(res);
+  const total = Number(res.headers.get("X-Total-Count") ?? "0");
+  const items = (await res.json()) as Deployment[];
+  return { items, total };
+}
+
+export function rollbackEnvironment(
+  repo: string,
+  env: string,
+  toPipelineId: number
+): Promise<{ pipeline: Pipeline }> {
+  return postJSON<{ pipeline: Pipeline }>(envPath(repo, env, "rollback"), {
+    to_pipeline_id: toPipelineId,
+  });
+}
+
+export function listFreezes(repo: string, env: string): Promise<Freeze[]> {
+  return getJSON<Freeze[]>(envPath(repo, env, "freezes"));
+}
+
+export function createFreeze(
+  repo: string,
+  env: string,
+  body: { starts_at: string; ends_at: string; reason: string }
+): Promise<Freeze> {
+  return postJSON<Freeze>(envPath(repo, env, "freezes"), body);
+}
+
+export function deleteFreeze(
+  repo: string,
+  env: string,
+  id: number
+): Promise<void> {
+  return requestVoid("DELETE", envPath(repo, env, `freezes/${id}`));
+}
+
+// --- Audit log ---
+
+export interface AuditEntry {
+  id: number;
+  ts: string;
+  actor: string;
+  action: string;
+  target: string;
+  repo: string;
+  detail: unknown;
+  source_ip: string;
+  result: string;
+}
+
+export async function listAuditLog(params: {
+  limit: number;
+  offset: number;
+  repo?: string;
+  actor?: string;
+}): Promise<{ items: AuditEntry[]; total: number }> {
+  const qs = new URLSearchParams({
+    limit: String(params.limit),
+    offset: String(params.offset),
+  });
+  if (params.repo) qs.set("repo", params.repo);
+  if (params.actor) qs.set("actor", params.actor);
+  const res = await fetch(`${BASE}/audit-log?${qs.toString()}`, {
+    headers: { Accept: "application/json" },
+  });
+  if (!res.ok) throw await parseError(res);
+  const items = (await res.json()) as AuditEntry[];
+  const header = res.headers.get("X-Total-Count");
+  // Some deployments omit the count header — estimate enough to keep
+  // pagination working (assume more if the page came back full).
+  const total =
+    header !== null
+      ? Number(header)
+      : params.offset + items.length + (items.length === params.limit ? 1 : 0);
+  return { items, total };
+}
+
+// --- Config templates (for include:) ---
+
+export function listRepoTemplates(repo: string): Promise<string[]> {
+  return getJSON<string[]>(`/repo-templates?repo=${encodeURIComponent(repo)}`);
+}
+
+export function getRepoTemplate(
+  repo: string,
+  name: string
+): Promise<{ repo: string; name: string; yaml: string }> {
+  return getJSON<{ repo: string; name: string; yaml: string }>(
+    `/repo-templates?repo=${encodeURIComponent(repo)}&name=${encodeURIComponent(name)}`
+  );
+}
+
+export function putRepoTemplate(
+  repo: string,
+  name: string,
+  yaml: string
+): Promise<void> {
+  return requestVoid("PUT", "/repo-templates", { repo, name, yaml });
+}
+
 // --- Stats / dashboard ---
 
 export interface StatsNow {
@@ -466,6 +635,8 @@ export interface AuthUser {
   name: string;
   provider: string;
   expires_at: string;
+  /** true in open mode (everyone) and for admin sessions when SSO is enforced */
+  is_admin?: boolean;
 }
 
 export interface AuthProviders {
@@ -501,6 +672,29 @@ export function getMe(force = false): Promise<AuthUser | null> {
     })();
   }
   return meCache;
+}
+
+let isAdminCache: Promise<boolean> | null = null;
+
+/**
+ * Whether the current viewer has admin rights. In open mode (SSO not
+ * enforced) everyone is admin — /auth/me 401s with no session, so we derive
+ * it from the providers state; when enforced, use the session's is_admin.
+ */
+export function getIsAdmin(force = false): Promise<boolean> {
+  if (!isAdminCache || force) {
+    isAdminCache = (async () => {
+      try {
+        const providers = await getAuthProviders();
+        if (!providers.enforced) return true;
+        const me = await getMe(force);
+        return me?.is_admin ?? false;
+      } catch {
+        return false;
+      }
+    })();
+  }
+  return isAdminCache;
 }
 
 /** Full-page navigation target for starting an IdP login (302s to the IdP). */
@@ -604,6 +798,11 @@ export function submitApproval(
   body: ApprovalRequest
 ): Promise<{ job: Job }> {
   return postJSON<{ job: Job }>(`/jobs/${jobId}/approvals`, body);
+}
+
+/** Release a manual-gated blocked job (blocked → created). */
+export function playJob(jobId: number | string): Promise<{ job: Job }> {
+  return postJSON<{ job: Job }>(`/jobs/${jobId}/play`, {});
 }
 
 export function createPipeline(

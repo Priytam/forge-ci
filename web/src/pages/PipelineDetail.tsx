@@ -13,6 +13,7 @@ import StatusBadge from "../components/StatusBadge";
 import { StatusIcon } from "../components/StageDots";
 import ConfigChip from "../components/ConfigChip";
 import ApprovalButtons from "../components/ApprovalButtons";
+import PlayButton from "../components/PlayButton";
 
 interface Stage {
   name: string;
@@ -269,30 +270,58 @@ export default function PipelineDetail() {
               <div className="stage-title">{stage.name}</div>
               {stage.jobs.map((job) => {
                 const dur = duration(job.started_at, job.finished_at);
+                // An allow_failure job that failed doesn't fail the pipeline —
+                // show it as a warning, not a hard red.
+                const allowedFail =
+                  job.allow_failure === true && job.status === "failed";
+                const pillClass = allowedFail
+                  ? "pill-blocked"
+                  : `pill-${job.status}`;
                 const tooltip = [
                   job.name,
-                  job.status,
+                  allowedFail ? "failed (allowed to fail)" : job.status,
                   isTerminalStatus(job.status) && dur ? dur : null,
                   job.environment,
                 ]
                   .filter(Boolean)
                   .join(" · ");
+                // Blocked jobs: manual gate → Play, approval gate →
+                // Approve/Reject. When the payload can't distinguish, show both.
+                const showPlay =
+                  job.status === "blocked" && job.manual !== false;
+                const showApproval =
+                  job.status === "blocked" && job.manual !== true;
                 return (
                   <div key={job.id} className="job-node">
                     <div
                       ref={(el) => setCardRef(job.id, el)}
-                      className={`job-pill pill-${job.status}`}
+                      className={`job-pill ${pillClass}`}
                       title={tooltip}
                       onClick={() =>
                         navigate(`/jobs/${job.id}?pipeline=${pipeline.id}`)
                       }
                     >
-                      <StatusIcon status={job.status} />
+                      <StatusIcon
+                        status={allowedFail ? "blocked" : job.status}
+                      />
                       <span className="job-pill-name">{job.name}</span>
+                      {job.allow_failure && (
+                        <span className="allowfail-tag" title="allowed to fail">
+                          AF
+                        </span>
+                      )}
                     </div>
-                    {job.status === "blocked" && (
+                    {allowedFail && (
+                      <div className="allowfail-note muted">allowed to fail</div>
+                    )}
+                    {(showPlay || showApproval) && (
                       <div className="card job-approval-panel glow glow-orange">
-                        <ApprovalButtons jobId={job.id} onDone={refresh} />
+                        {showPlay && (
+                          <PlayButton jobId={job.id} onDone={refresh} />
+                        )}
+                        {showApproval && (
+                          <ApprovalButtons jobId={job.id} onDone={refresh} />
+                        )}
                       </div>
                     )}
                   </div>

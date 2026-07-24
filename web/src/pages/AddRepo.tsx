@@ -17,12 +17,18 @@ export default function AddRepo() {
   const [cloneUrl, setCloneUrl] = useState("");
   const [token, setToken] = useState("");
   const [branch, setBranch] = useState("main");
+  const [authMethod, setAuthMethod] = useState<"pat" | "app">("pat");
+  const [appId, setAppId] = useState("");
+  const [installationId, setInstallationId] = useState("");
+  const [appPrivateKey, setAppPrivateKey] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [connected, setConnected] = useState<string | null>(null);
 
   const autoUrl = provider !== "other";
   const effectiveCloneUrl = autoUrl ? derivedCloneUrl(provider, repo) : cloneUrl;
+  // GitHub App auth only applies to GitHub repos.
+  const appMode = provider === "github" && authMethod === "app";
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -33,8 +39,15 @@ export default function AddRepo() {
         repo: repo.trim(),
         provider,
         clone_url: autoUrl ? undefined : cloneUrl.trim(),
-        token: token || undefined,
+        token: appMode ? undefined : token || undefined,
         default_branch: branch.trim() || "main",
+        ...(appMode
+          ? {
+              github_app_id: appId.trim(),
+              github_installation_id: installationId.trim(),
+              github_app_private_key: appPrivateKey || undefined,
+            }
+          : {}),
       });
       setConnected(repo.trim());
     } catch (err) {
@@ -139,30 +152,101 @@ export default function AddRepo() {
           )}
         </label>
 
-        <div className="form-row">
-          <label className="field">
-            <span>Access token</span>
-            <input
-              type="password"
-              autoComplete="off"
-              value={token}
-              onChange={(e) => setToken(e.target.value)}
-            />
-            <span className="field-hint">
-              Optional for public repos. Use a fine-grained PAT (GitHub) or
-              repository access token (Bitbucket) with read access. Stored
-              server-side, never shown again.
-            </span>
-          </label>
-          <label className="field">
-            <span>Default branch</span>
-            <input
-              className="mono"
-              value={branch}
-              onChange={(e) => setBranch(e.target.value)}
-            />
-          </label>
-        </div>
+        {provider === "github" && (
+          <div className="field">
+            <span>Authentication</span>
+            <div className="segmented">
+              <button
+                type="button"
+                className={authMethod === "pat" ? "seg-btn seg-active" : "seg-btn"}
+                onClick={() => setAuthMethod("pat")}
+              >
+                Personal Access Token
+              </button>
+              <button
+                type="button"
+                className={authMethod === "app" ? "seg-btn seg-active" : "seg-btn"}
+                onClick={() => setAuthMethod("app")}
+              >
+                GitHub App
+              </button>
+            </div>
+          </div>
+        )}
+
+        {appMode ? (
+          <>
+            <div className="form-row">
+              <label className="field">
+                <span>App ID</span>
+                <input
+                  className="mono"
+                  value={appId}
+                  onChange={(e) => setAppId(e.target.value)}
+                  required
+                />
+              </label>
+              <label className="field">
+                <span>Installation ID</span>
+                <input
+                  className="mono"
+                  value={installationId}
+                  onChange={(e) => setInstallationId(e.target.value)}
+                  required
+                />
+              </label>
+            </div>
+            <label className="field">
+              <span>App private key (PEM)</span>
+              <textarea
+                rows={5}
+                className="mono"
+                autoComplete="off"
+                value={appPrivateKey}
+                onChange={(e) => setAppPrivateKey(e.target.value)}
+                placeholder="-----BEGIN RSA PRIVATE KEY-----"
+                required
+              />
+              <span className="field-hint">
+                Write-only — stored server-side, never displayed. The App needs
+                Contents: read and Commit statuses: write.
+              </span>
+            </label>
+            <label className="field">
+              <span>Default branch</span>
+              <input
+                className="mono"
+                value={branch}
+                onChange={(e) => setBranch(e.target.value)}
+              />
+            </label>
+          </>
+        ) : (
+          <div className="form-row">
+            <label className="field">
+              <span>Access token</span>
+              <input
+                type="password"
+                autoComplete="off"
+                value={token}
+                onChange={(e) => setToken(e.target.value)}
+              />
+              <span className="field-hint">
+                Optional for public repos. Use a fine-grained PAT (GitHub) or
+                repository access token (Bitbucket) with read access. Stored
+                server-side, never shown again.
+              </span>
+            </label>
+            <label className="field">
+              <span>Default branch</span>
+              <input
+                className="mono"
+                value={branch}
+                onChange={(e) => setBranch(e.target.value)}
+              />
+            </label>
+          </div>
+        )}
 
         {error && (
           <div className="error-banner">

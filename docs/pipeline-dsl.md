@@ -163,8 +163,81 @@ Nested includes (a template that itself has `include:`) are supported up to a
 depth bound that guards against include cycles.
 
 **Limitation:** remote/URL includes are intentionally **not** supported — the
-compiler does no network fetch. An unregistered template name, or an `include:`
-form other than `{template: name}`, is a clear compile error.
+compiler does no network fetch. An `include:` form other than `{template: name}`
+is a clear compile error, as is a template name that is neither registered for
+the repo nor a shipped built-in.
+
+### Built-in security templates
+
+Forge ships a set of **built-in templates** so you get GitLab-style one-line
+security scanning with **zero setup** — you do not have to register anything in
+the repo first. They resolve through the same `include:` mechanism and merge
+with the same semantics (stages unioned, jobs deep-merged, main config wins).
+
+| `template:` name | Scanner (image) | Job emitted | Runs |
+| --- | --- | --- | --- |
+| `security/sast` | semgrep (`returntocorp/semgrep`) | `sast` | `semgrep --config auto --error .` |
+| `security/dependency` | trivy (`aquasec/trivy`) | `dependency-scan` | `trivy fs --exit-code 1 --no-progress .` |
+| `security/container` | trivy (`aquasec/trivy`) | `container-scan` | `trivy image --exit-code 1 --no-progress "$SCAN_IMAGE"` |
+| `security/secrets` | gitleaks (`zricethezav/gitleaks`) | `secret-detection` | `gitleaks detect --source . --verbose --redact` |
+
+```yaml
+include:
+  - template: security/sast
+  - template: security/secrets
+stages: [build]
+jobs:
+  build:
+    stage: build
+    image: golang:1.23
+    script: [go build ./...]
+```
+
+See [`examples/security-pipeline.yml`](../examples/security-pipeline.yml) for a
+complete runnable config.
+
+**Defaults**
+
+- Every scan job lands in the **`test`** stage and is **`allow_failure: true`**
+  by default — a finding is surfaced in the pipeline (the job reports `failed`)
+  but does **not** block dependents or mark the pipeline failed.
+- Because included stages are **unioned ahead** of stages that appear only in
+  your main config, the `test` stage (scans) sorts **before** main-only stages
+  such as `build`/`deploy` — scans run "security-first". To place scans at a
+  specific point in the order, declare `test` yourself in the main `stages:`
+  list.
+- `security/container` scans the image named by the **`SCAN_IMAGE`** variable
+  (default `alpine:3.19`). Point it at the image your pipeline builds by
+  overriding that variable (see below).
+
+**Precedence & overriding**
+
+Resolution consults the **per-repo template store first** and only falls back to
+a built-in when the repo has **no** template by that name. So:
+
+- A repo can **shadow** any built-in by registering a `repo_templates` entry
+  under the same name (e.g. `security/sast`) — its YAML then wins wholesale.
+- Built-ins are available even for repos with **zero** registered templates, and
+  even when the compiler is invoked with **no template store** at all.
+- You can tune a built-in inline from your main config via the normal
+  `include:` deep-merge (main overrides the included job per key). Two common
+  overrides:
+
+  ```yaml
+  include:
+    - template: security/dependency
+    - template: security/container
+  stages: [test]
+  jobs:
+    dependency-scan:
+      allow_failure: false          # make the dependency scan BLOCKING
+    container-scan:
+      variables:
+        SCAN_IMAGE: myorg/app:latest # scan the image this pipeline ships
+  ```
+
+The full list of built-in names is also available programmatically via the
+compiler's `ListBuiltinTemplates()` Go function.
 
 ---
 
