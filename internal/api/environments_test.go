@@ -25,7 +25,7 @@ func TestDriftOf(t *testing.T) {
 
 func TestParseEnvPath(t *testing.T) {
 	cases := []struct {
-		path, action     string
+		path, action      string
 		wantRepo, wantEnv string
 		wantOK            bool
 	}{

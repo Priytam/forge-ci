@@ -1,0 +1,84 @@
+# GitHub Actions CI for Forge CI.
+#
+# This is the FALLBACK working CI: Forge itself is a standalone CI engine (see
+# .forge-ci.yml and docs/self-hosted-ci.md for running Forge's pipeline on
+# Forge), but because this repo is not yet pushed to a remote that a Forge
+# instance can clone, GitHub Actions provides real CI in the meantime.
+#
+# It mirrors `make test` / `make test-e2e`: go build, vet, gofmt, unit tests,
+# the end-to-end suite (against a Postgres + Redis service), and the web build.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  go:
+    name: Go build / vet / gofmt / test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: forge
+          POSTGRES_PASSWORD: forge
+          POSTGRES_DB: forge
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U forge"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 15
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 15
+    env:
+      # Unit + e2e suites read these; defaults already point at :5433 / :6379.
+      DATABASE_URL: postgres://forge:forge@localhost:5433/forge?sslmode=disable
+      REDIS_URL: redis://localhost:6379/0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+      - name: go build
+        run: go build ./...
+      - name: go vet
+        run: go vet ./...
+      - name: gofmt check
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed on:"; echo "$unformatted"; exit 1
+          fi
+      - name: unit tests
+        run: go test ./...
+      - name: e2e tests
+        run: make test-e2e
+
+  web:
+    name: Web build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run build

@@ -54,9 +54,9 @@ func TestMapBitbucketState(t *testing.T) {
 
 // recorded captures one inbound stub request.
 type recorded struct {
-	path   string
-	auth   string
-	body   map[string]string
+	path string
+	auth string
+	body map[string]string
 }
 
 func TestPostGitHubShape(t *testing.T) {

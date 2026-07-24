@@ -137,7 +137,7 @@ func (s *Store) RollbackTarget(ctx context.Context, repo, env string, pipelineID
 // ---- deploy freezes ----
 
 // IsFrozen reports whether an active deploy-freeze window currently covers the
-// (repo, environment) — a repo-specific or global (repo='') freeze.
+// (repo, environment) — a repo-specific or global (repo="") freeze.
 func (s *Store) IsFrozen(ctx context.Context, repo, env string) (bool, error) {
 	var frozen bool
 	err := s.pool.QueryRow(ctx,
@@ -156,7 +156,7 @@ func (s *Store) CreateFreeze(ctx context.Context, f proto.DeployFreeze) (*proto.
 	return &f, err
 }
 
-// ListFreezes returns freeze windows for a repo (including global repo='' ones),
+// ListFreezes returns freeze windows for a repo (including global repo="" ones),
 // or all freezes when repo is empty, newest first.
 func (s *Store) ListFreezes(ctx context.Context, repo string) ([]proto.DeployFreeze, error) {
 	rows, err := s.pool.Query(ctx,

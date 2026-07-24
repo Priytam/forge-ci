@@ -102,7 +102,7 @@ func (s *Store) DeleteVariable(ctx context.Context, id int64) error {
 }
 
 // refProtected reports whether a ref matches any protected-ref pattern for
-// the repo (or the global '' repo).
+// the repo (or the global "" repo).
 func (s *Store) refProtected(ctx context.Context, repo, ref string) (bool, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT pattern FROM protected_refs WHERE repo IN ('', $1)`, repo)

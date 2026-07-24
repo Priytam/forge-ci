@@ -238,9 +238,9 @@ type Deployment struct {
 
 // Drift indicator values for an environment card.
 const (
-	DriftInSync  = "in_sync"  // deployed sha == ref tip
-	DriftDrifted = "drifted"  // deployed sha != ref tip
-	DriftUnknown = "unknown"  // ref tip could not be resolved (repo not connected)
+	DriftInSync  = "in_sync" // deployed sha == ref tip
+	DriftDrifted = "drifted" // deployed sha != ref tip
+	DriftUnknown = "unknown" // ref tip could not be resolved (repo not connected)
 )
 
 // EnvironmentBoard is one card on the per-repo environments board: the current

@@ -1,0 +1,117 @@
+# Forge CI self-hosted pipeline — Forge building and testing Forge.
+#
+# This is a real, valid Forge pipeline config for THIS repo. It is validated by
+# the compiler in the e2e suite (test/e2e: TestSelfCIConfigCompiles) and runs on
+# Forge itself with a docker runner. See docs/self-hosted-ci.md for how to
+# register this repo, register this config, point a docker runner at it, and
+# trigger a run.
+#
+# DAG:  build ─┬─▶ unit-tests
+#              └─▶ vet          (test stage; both need the compiled build cache)
+#        gofmt, web-build       (independent lint / web build)
+#
+# Networking note: the docker executor isolates a *serviceless* job with
+# `--network none`. Jobs that must reach the Go module proxy or the npm registry
+# therefore declare a throwaway `net` sidecar (alpine sleep) so they run on a
+# per-job bridge network with outbound internet. The `unit-tests` job's Postgres
+# sidecar serves the same purpose *and* provides the test database (Forge's own
+# DB-backed unit tests connect to $DATABASE_URL, and skip when it is absent).
+# A runner with a pre-warmed GOMODCACHE could drop the module-proxy sidecars and
+# rely on the cache: blocks alone.
+
+stages: [build, test, lint]
+
+default:
+  timeout: 30m
+  retry: 1 # tolerate a flaky network fetch of modules/images
+
+jobs:
+  build:
+    stage: build
+    image: golang:1.25
+    services:
+      - { name: alpine:3, alias: net, cmd: [sleep, "1800"] } # grants outbound network
+    variables:
+      GOFLAGS: -buildvcs=false
+      GOCACHE: /workspace/.gocache
+      GOMODCACHE: /workspace/.gomodcache
+    cache:
+      key:
+        files: [go.sum]
+        prefix: gomod
+      paths: [.gocache, .gomodcache]
+    script:
+      - go version
+      - go build ./...
+
+  unit-tests:
+    stage: test
+    image: golang:1.25
+    needs: [build]
+    services:
+      # Postgres sidecar: gives the job outbound network (for modules) AND a live
+      # database. Forge's DB-backed unit tests create throwaway DBs against it.
+      - name: postgres:16-alpine
+        alias: db
+        env: { POSTGRES_USER: forge, POSTGRES_PASSWORD: forge, POSTGRES_DB: forge }
+    variables:
+      GOFLAGS: -buildvcs=false
+      GOCACHE: /workspace/.gocache
+      GOMODCACHE: /workspace/.gomodcache
+      DATABASE_URL: postgres://forge:forge@db:5432/forge?sslmode=disable
+    cache:
+      key:
+        files: [go.sum]
+        prefix: gomod
+      paths: [.gocache, .gomodcache]
+      policy: pull # tests only read the warmed cache; build pushes it
+    script:
+      # Give the Postgres sidecar a moment to finish first-boot init, then run
+      # unit tests. Forge's DB-backed tests connect to $DATABASE_URL (and skip
+      # cleanly if it is not yet reachable). The e2e suite (tag `e2e`) is run
+      # separately — see docs/self-hosted-ci.md.
+      - sleep 8
+      - go test ./...
+
+  vet:
+    stage: test
+    image: golang:1.25
+    needs: [build]
+    services:
+      - { name: alpine:3, alias: net, cmd: [sleep, "1800"] }
+    variables:
+      GOFLAGS: -buildvcs=false
+      GOCACHE: /workspace/.gocache
+      GOMODCACHE: /workspace/.gomodcache
+    cache:
+      key:
+        files: [go.sum]
+        prefix: gomod
+      paths: [.gocache, .gomodcache]
+      policy: pull
+    script:
+      - go vet ./...
+
+  gofmt:
+    stage: lint
+    image: golang:1.25 # gofmt needs no modules, so no network sidecar
+    variables:
+      GOFLAGS: -buildvcs=false
+    script:
+      - unformatted="$(gofmt -l .)"
+      - test -z "$unformatted" || { echo "gofmt needed on:"; echo "$unformatted"; exit 1; }
+
+  web-build:
+    stage: build
+    image: node:22-alpine
+    services:
+      - { name: alpine:3, alias: net, cmd: [sleep, "1800"] } # npm registry access
+    cache:
+      key:
+        files: [web/package-lock.json]
+        prefix: npm
+      paths: [web/node_modules]
+    script:
+      - cd web
+      - npm ci
+      - npm run build

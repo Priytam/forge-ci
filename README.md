@@ -283,6 +283,46 @@ the dev experience):
   the server runs in plaintext passthrough and logs a loud warning if secrets
   exist. Generate a key with `head -c 32 /dev/urandom | base64`.
 
+## Testing
+
+Two tiers:
+
+| Command | What it runs | Needs |
+|---|---|---|
+| `make test` | `go vet ./...` + unit/DB-level tests (`go test ./...`) | Postgres on :5433 for the DB-backed ones (they **skip** cleanly if absent) |
+| `make test-e2e` | Black-box end-to-end suite: `go test -tags e2e ./test/e2e/...` | Postgres on :5433 (the whole suite skips with a message if unreachable); docker for the services subtest |
+
+`make test-e2e` is **build-tagged** (`//go:build e2e`), so it never runs in the
+default `go test`. Its `TestMain` builds the real `forge-server`/`forge-runner`
+binaries, provisions an **isolated throwaway database**, starts a server on a
+spare port plus a shell-executor runner, waits for health, and tears everything
+down afterward — then drives pipelines through the **real HTTP API**. It uses
+`LOG_BACKEND=postgres`, so most subtests need only Postgres (no Redis).
+
+Covered end-to-end (each asserts real outcomes by polling the API): happy-path
+DAG + logs (full, `?offset`, SSE), the approval gate (approve **and** reject),
+job/pipeline cancel, retry-then-succeed, `rules:` by ref + matrix expansion,
+cache restore across runs, artifact passing via `needs`, masked-variable
+redaction, webhook delivery dedup, environments board + rollback, and
+`RUNNER_AUTH=on` rejecting an unauthenticated runner. The docker-executor
+**services** subtest self-skips when `docker info` fails.
+
+```sh
+make db          # Postgres on :5433
+make test        # unit tests
+make test-e2e    # end-to-end suite (add docker for the services subtest)
+```
+
+## Self-hosting Forge's own CI
+
+Forge can build and test itself. The pipeline is [`.forge-ci.yml`](.forge-ci.yml)
+(stages `build`/`test`/`lint`: `go build`, `go test`, `go vet`, `gofmt`, and the
+web build; DAG via `needs`, Go module/build cache shared across runs). Register
+this repo + config and trigger a run against a docker runner with
+`scripts/self-host-ci.sh`. Because the repo isn't on a remote a Forge server can
+clone yet, a GitHub Actions workflow ([`.github/workflows/ci.yml`](.github/workflows/ci.yml))
+provides the fallback CI. Full walkthrough: [docs/self-hosted-ci.md](docs/self-hosted-ci.md).
+
 ## Docs
 
 - [VCS integration (GitHub/Bitbucket webhooks)](docs/vcs-integration.md)
@@ -294,6 +334,7 @@ the dev experience):
 - [SSO setup: Google, Microsoft, GitHub](docs/sso.md)
 - [Cloud deployment (Helm chart + Terraform/OpenTofu for AWS & GCP)](docs/cloud-deployment.md)
 - [Feature comparison vs GitLab CI + roadmap](docs/feature-comparison.md)
+- [Self-hosting Forge's own CI (Forge builds Forge)](docs/self-hosted-ci.md)
 
 ## What's here beyond the core
 
@@ -336,4 +377,5 @@ the dev experience):
   re-masked on full-text reads as a backstop.
 - Secret encryption uses a single `FORGE_SECRET_KEY` (no per-key rotation or
   external KMS/Vault yet); rotating the key requires re-encrypting rows.
-- No caching, `rules:`, includes, matrix, retries, or scheduled pipelines yet.
+- No scheduled (cron) pipelines yet. Caching, `rules:`, `include:`, `extends:`,
+  matrix, and retries are all supported — see [docs/pipeline-dsl.md](docs/pipeline-dsl.md).
