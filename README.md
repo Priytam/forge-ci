@@ -149,8 +149,9 @@ the dev experience):
 | `RUNNER_TOKEN` | (runner) token sent to an `RUNNER_AUTH=on` server | — |
 | `FORGE_SECRET_KEY` | base64 32-byte AES-256-GCM key; encrypts variables, VCS tokens and SSO secrets at rest | — (passthrough) |
 | `ADMIN_EMAILS` | comma-separated platform-admin emails (enforced once SSO is on) | — |
-| `EXTERNAL_URL` | server's public origin (SSO redirect + CSRF allow-list) | `http://localhost:8080` |
-| `FRONTEND_URL` | dashboard origin (post-login redirect + CSRF allow-list) | `http://localhost:5173` |
+| `EXTERNAL_URL` | server's public origin (SSO redirect + CSRF allow-list; commit-status `target_url` fallback) | `http://localhost:8080` |
+| `FRONTEND_URL` | dashboard origin (post-login redirect + CSRF allow-list; commit-status `target_url` base) | `http://localhost:5173` |
+| `COMMIT_STATUS` | `on` \| `off` — write pipeline status back to the origin VCS (GitHub commit status / Bitbucket build status). Only acts on connected repos that have a token with commit-status scope; `off` disables globally | `on` |
 | `REDIS_URL` | Redis for the high-volume log tier (live buffer + pub/sub fan-out), e.g. `redis://localhost:6379/0` | — |
 | `LOG_BACKEND` | `redis` \| `postgres`; empty auto-selects redis when `REDIS_URL` is set+reachable, else postgres | — (auto) |
 | `MAX_JOB_LOG_BYTES` | per-job cumulative log cap; excess truncated with a notice | `10485760` (10 MiB) |
@@ -200,6 +201,12 @@ the dev experience):
   self-approval block, timeout), append-only audit trail.
 - **GitHub/Bitbucket webhooks** — push → pipeline, with per-repo registered
   configs and HMAC verification (GitHub).
+- **Commit status write-back** — pipeline status is posted back to the origin
+  VCS (GitHub commit status / Bitbucket build status, context `forge-ci`,
+  `target_url` → the pipeline page) as it progresses, so the commit/PR shows
+  Forge's ✓/✗. Idempotent and delivered asynchronously with bounded retries;
+  needs a connection token with commit-status scope, and is toggled by
+  `COMMIT_STATUS`. See [docs/vcs-integration.md](docs/vcs-integration.md#commit-status-write-back).
 
 ## Known limitations (see docs/feature-comparison.md for the full roadmap)
 

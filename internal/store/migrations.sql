@@ -284,3 +284,18 @@ CREATE INDEX IF NOT EXISTS webhook_deliveries_received_idx ON webhook_deliveries
 -- all-repos and repo-filtered list queries without a full scan.
 CREATE INDEX IF NOT EXISTS pipelines_repo_id_idx ON pipelines (repo, id DESC);
 CREATE INDEX IF NOT EXISTS pipelines_created_idx ON pipelines (created_at);
+
+-- Commit-status write-back dedup: one row per (pipeline, posted status). The
+-- scheduler posts the pipeline's status back to the origin VCS (GitHub commit
+-- status / Bitbucket build status) as it progresses; recording each posted
+-- (pipeline_id, status) makes posting idempotent so the 1s scheduler tick never
+-- re-posts the same state. A row is a durable claim: it is inserted BEFORE the
+-- HTTP call so concurrent ticks/instances can't double-post, and deleted again
+-- only when a transient delivery failure should be retried on a later tick.
+-- Cascades away with the pipeline (retention GC).
+CREATE TABLE IF NOT EXISTS pipeline_status_posts (
+    pipeline_id BIGINT      NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
+    status      TEXT        NOT NULL,
+    posted_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (pipeline_id, status)
+);

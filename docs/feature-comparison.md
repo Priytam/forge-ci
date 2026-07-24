@@ -59,7 +59,7 @@ Legend: ✅ shipped · 🟡 partial · ❌ not yet (roadmap).
 |---|---|---|---|
 | Push webhooks GitHub/Bitbucket | n/a (native) | ✅ | HMAC verified (GitHub) |
 | Pipeline config source | in-repo `.gitlab-ci.yml` | 🟡 registered per repo | fetch `.forge-ci.yml` from GitHub API at push (needs token) |
-| Commit status write-back (✓/✗ on commit, PR checks) | native | ❌ | GitHub Checks API + Bitbucket build status — high priority, it's how devs see CI |
+| Commit status write-back (✓/✗ on commit, PR checks) | native | ✅ | GitHub commit-status API + Bitbucket build status, context `forge-ci`, `target_url` → pipeline page; async idempotent posting (needs a token with commit-status scope) — see [vcs-integration.md](vcs-integration.md#commit-status-write-back) |
 | PR/MR-triggered pipelines | ✅ | ❌ | webhook already receives PR events; needs ref semantics |
 
 ## UI (GitLab-themed)
@@ -95,7 +95,7 @@ view in GitLab's visual language:
 ## Suggested build order (impact-ranked)
 
 1. OIDC authn + map RBAC to real identities (unblocks everything trust-related)
-2. Git clone step + commit-status write-back (makes it a *real* CI for GitHub/Bitbucket)
+2. ~~Git clone step + commit-status write-back~~ ✅ shipped (makes it a *real* CI for GitHub/Bitbucket)
 3. Caching + k8s executor (speed and scale)
 4. Environments board with deploy history/rollback (ArgoCD lens, GitLab skin)
 5. `rules:`/`include`/matrix (authoring power) · WebSocket logs · scheduled pipelines

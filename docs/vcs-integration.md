@@ -68,5 +68,51 @@ connect it to your VCS:
 - **Auto-cancel:** a new pipeline for the same repo+ref cancels older
   non-terminal ones (unless the YAML sets `auto_cancel: false`). Pushing twice
   in quick succession leaves only the newest pipeline running.
-- Commit status write-back (green tick on the commit) is on the roadmap — see
-  the feature comparison doc.
+
+## Commit status write-back
+
+Once a repo is connected **with a token**, Forge posts the pipeline's status
+back to the origin VCS as the pipeline progresses, so the commit (and any PR
+built on it) shows Forge's result — the green tick / red X.
+
+- **What it posts:** on the commit SHA the pipeline ran, under the fixed context
+  `forge-ci`, with a `target_url` linking to the Forge pipeline page
+  (`FRONTEND_URL` — falling back to `EXTERNAL_URL` — `+ /pipelines/{id}`).
+- **When:** on pipeline creation (queued), when work starts, and on every
+  overall-status transition through to the terminal result. Posting is
+  idempotent — each `(pipeline, status)` is posted at most once (a small
+  `pipeline_status_posts` dedup table backs this), so the 1s scheduler tick
+  never spams the provider. Delivery is asynchronous with bounded, backed-off
+  retries, so a slow or broken VCS API never blocks the scheduler.
+- **Status mapping:**
+
+  | Forge pipeline phase | GitHub state | Bitbucket state |
+  |---|---|---|
+  | pending / running / blocked | `pending` | `INPROGRESS` |
+  | success | `success` | `SUCCESSFUL` |
+  | failed | `failure` | `FAILED` |
+  | canceled | `error` | `STOPPED` |
+
+  (`canceled` → GitHub `error` rather than `failure`: the run did not complete,
+  but it wasn't a test failure.)
+- **APIs used:**
+  - GitHub — `POST /repos/{owner}/{repo}/statuses/{sha}`.
+  - Bitbucket — `POST /2.0/repositories/{workspace}/{repo}/commit/{sha}/statuses/build`.
+
+  Both bases are overridable via `GITHUB_API_BASE` / `BITBUCKET_API_BASE`
+  (used for testing against a stub; leave unset in production).
+- **Required token scope:**
+  - GitHub — a token with **`repo:status`** (classic PAT) or the fine-grained
+    **"Commit statuses: write"** permission. The same connection token used for
+    cloning is reused; a public-repo clone token without this scope will clone
+    fine but get a `403` on status write (logged with an actionable message —
+    the token is never logged).
+  - Bitbucket — a token / app password with **`repositories:write`**.
+- **Skipped silently** (logged at debug, nothing posted) when the repo has **no
+  token** or **provider `other`** (not every git host has a status API).
+- **Disable:** set `COMMIT_STATUS=off` on `forge-server` to turn write-back off
+  globally. It is on by default and only ever acts on repos that have a token.
+
+> Real write-back requires a token with the commit-status scope above. The
+> demo/public connections (`Priytam/statemachine`, `octocat/Hello-World`) have
+> no token, so nothing is posted for them.
