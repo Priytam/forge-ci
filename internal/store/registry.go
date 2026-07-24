@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"os/exec"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/priytamjeepandey/forge-ci/internal/githubapp"
 	"github.com/priytamjeepandey/forge-ci/internal/proto"
+	"github.com/priytamjeepandey/forge-ci/internal/vcs"
 )
 
 // RegisterRepo stores/updates the VCS connection for a repo. Both secrets — the
@@ -30,11 +32,16 @@ func (s *Store) RegisterRepo(ctx context.Context, r proto.RepoRegistration) erro
 	if err != nil {
 		return err
 	}
+	configSource := r.ConfigSource
+	if configSource == "" {
+		configSource = "repo" // default: config rides in the commit/PR
+	}
 	_, err = s.pool.Exec(ctx,
 		`INSERT INTO repo_registry
 		     (repo, provider, clone_url, token, default_branch,
-		      github_app_id, github_app_private_key, github_app_installation_id)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+		      github_app_id, github_app_private_key, github_app_installation_id,
+		      config_source, config_path)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
 		 ON CONFLICT (repo) DO UPDATE SET
 		   provider = EXCLUDED.provider,
 		   clone_url = EXCLUDED.clone_url,
@@ -43,9 +50,12 @@ func (s *Store) RegisterRepo(ctx context.Context, r proto.RepoRegistration) erro
 		   github_app_id = EXCLUDED.github_app_id,
 		   github_app_private_key = CASE WHEN EXCLUDED.github_app_private_key = ''
 		       THEN repo_registry.github_app_private_key ELSE EXCLUDED.github_app_private_key END,
-		   github_app_installation_id = EXCLUDED.github_app_installation_id`,
+		   github_app_installation_id = EXCLUDED.github_app_installation_id,
+		   config_source = EXCLUDED.config_source,
+		   config_path = EXCLUDED.config_path`,
 		r.Repo, r.Provider, r.CloneURL, encToken, r.DefaultBranch,
-		r.GitHubAppID, encKey, r.GitHubInstallationID)
+		r.GitHubAppID, encKey, r.GitHubInstallationID,
+		configSource, r.ConfigPath)
 	return err
 }
 
@@ -55,7 +65,8 @@ func (s *Store) RegisterRepo(ctx context.Context, r proto.RepoRegistration) erro
 func (s *Store) ListRegisteredRepos(ctx context.Context) ([]proto.RepoRegistration, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT repo, provider, clone_url, token <> '', default_branch, created_at,
-		        github_app_id, github_app_installation_id, github_app_id <> ''
+		        github_app_id, github_app_installation_id, github_app_id <> '',
+		        config_source, config_path
 		 FROM repo_registry ORDER BY repo`)
 	if err != nil {
 		return nil, err
@@ -66,7 +77,8 @@ func (s *Store) ListRegisteredRepos(ctx context.Context) ([]proto.RepoRegistrati
 		var r proto.RepoRegistration
 		if err := rows.Scan(&r.Repo, &r.Provider, &r.CloneURL, &r.HasToken,
 			&r.DefaultBranch, &r.CreatedAt,
-			&r.GitHubAppID, &r.GitHubInstallationID, &r.HasGitHubApp); err != nil {
+			&r.GitHubAppID, &r.GitHubInstallationID, &r.HasGitHubApp,
+			&r.ConfigSource, &r.ConfigPath); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -113,6 +125,93 @@ func (s *Store) resolveRepoAuth(ctx context.Context, repo string) (provider, clo
 		return "", "", "", false, derr
 	}
 	return provider, rawURL, tok, true, nil
+}
+
+// repoConfigSource returns a repo's config source ('repo' | 'registered') and
+// its config-path override. An unregistered repo defaults to ('repo', "") so the
+// in-repo path is attempted (and transparently falls back when there is no
+// connection to fetch through).
+func (s *Store) repoConfigSource(ctx context.Context, repo string) (source, path string, err error) {
+	err = s.pool.QueryRow(ctx,
+		`SELECT config_source, config_path FROM repo_registry WHERE repo=$1`, repo).
+		Scan(&source, &path)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "repo", "", nil
+	}
+	if err != nil {
+		return "", "", err
+	}
+	if source == "" {
+		source = "repo"
+	}
+	return source, path, nil
+}
+
+// ConfigFromRepo fetches the in-repo pipeline config (path, default
+// .forge-ci.yml) at sha using the repo's connection auth (static PAT or minted
+// GitHub App token). found is false (nil error) when the repo isn't registered,
+// the provider has no supported contents API, or the file is absent (404) — all
+// "fall back to the registered config" cases. The token is never logged.
+func (s *Store) ConfigFromRepo(ctx context.Context, repo, sha, path string) (config string, found bool, err error) {
+	provider, _, token, registered, err := s.resolveRepoAuth(ctx, repo)
+	if err != nil {
+		return "", false, err
+	}
+	if !registered {
+		return "", false, nil
+	}
+	if path == "" {
+		path = vcs.DefaultConfigPath
+	}
+	content, ok, err := s.fetcher.FetchFile(ctx, vcs.FetchRequest{
+		Provider: provider, Repo: repo, SHA: sha, Path: path, Token: token,
+	})
+	if err != nil {
+		return "", false, err
+	}
+	if !ok {
+		return "", false, nil
+	}
+	return string(content), true, nil
+}
+
+// ResolvePipelineConfig chooses the pipeline config for a (repo, sha) event per
+// the repo's config_source toggle, returning the chosen YAML, the registry
+// version to stamp (nil for an in-repo config), and the source label ('repo' |
+// 'registered') for CreatePipeline.
+//
+// Precedence when source is 'repo' (the default): fetch the in-repo
+// .forge-ci.yml at sha; if present use it (version nil); if absent fall back to
+// the registered config. When source is 'registered' the in-repo file is never
+// fetched. ErrNotFound is returned only when neither an in-repo file nor a
+// registered config exists. A hard fetch error (non-404) is logged (without the
+// token) and treated as a fall-back to the registered config so a transient
+// provider blip does not wholly block a pipeline that also has a registered one.
+func (s *Store) ResolvePipelineConfig(ctx context.Context, repo, sha string) (config string, version *int, source string, err error) {
+	cfgSource, cfgPath, err := s.repoConfigSource(ctx, repo)
+	if err != nil {
+		return "", nil, "", err
+	}
+	if cfgSource == "repo" {
+		yml, found, ferr := s.ConfigFromRepo(ctx, repo, sha, cfgPath)
+		if ferr != nil {
+			// Never log the token; ConfigFromRepo/FetchFile already keep it out of err.
+			slog.Warn("config-from-repo fetch failed, falling back to registered config",
+				"repo", repo, "err", ferr)
+		} else if found {
+			return yml, nil, "repo", nil
+		}
+	}
+	// Registered-config fallback (also the 'registered' toggle path).
+	registered, err := s.GetRepoConfig(ctx, repo)
+	if err != nil {
+		return "", nil, "", err // ErrNotFound bubbles up as "no config"
+	}
+	var v *int
+	if cur, verr := s.CurrentConfigVersion(ctx, repo); verr == nil && cur > 0 {
+		v = &cur
+	}
+	return registered, v, "registered", nil
 }
 
 // AppTokenForValidation mints a GitHub App installation token so the

@@ -160,13 +160,15 @@ func (s *Store) ClaimScheduleFire(ctx context.Context, id int64, expected, newNe
 // and create the pipeline. Returns ErrNotFound when the repo has no registered
 // config (a schedule cannot run without one) — the caller logs and skips.
 func (s *Store) BuildScheduledPipeline(ctx context.Context, repo, ref string) (*proto.Pipeline, error) {
-	config, err := s.GetRepoConfig(ctx, repo)
-	if err != nil {
-		return nil, err // ErrNotFound when no config is registered
-	}
+	// Resolve the ref tip first so config-from-repo can fetch .forge-ci.yml at the
+	// exact sha the scheduled run builds on (same helper as the webhook path).
 	sha, err := s.ResolveRef(ctx, repo, ref)
 	if err != nil {
 		return nil, err
+	}
+	config, configVersion, cfgSource, err := s.ResolvePipelineConfig(ctx, repo, sha)
+	if err != nil {
+		return nil, err // ErrNotFound when neither in-repo nor registered config exists
 	}
 	jobs, err := compiler.Compile(config, ref, compiler.SourceSchedule, s.TemplateResolver(ctx, repo))
 	if err != nil {
@@ -176,11 +178,7 @@ func (s *Store) BuildScheduledPipeline(ctx context.Context, repo, ref string) (*
 	if err != nil {
 		return nil, err
 	}
-	var configVersion *int
-	if v, verr := s.CurrentConfigVersion(ctx, repo); verr == nil && v > 0 {
-		configVersion = &v
-	}
 	return s.CreatePipeline(ctx,
-		proto.CreatePipelineRequest{Repo: repo, Ref: ref, SHA: sha, Config: config, TriggeredBy: "schedule"},
+		proto.CreatePipelineRequest{Repo: repo, Ref: ref, SHA: sha, Config: config, TriggeredBy: "schedule", ConfigSource: cfgSource},
 		jobs, configVersion, opts.AutoCancel, opts.FailFast)
 }

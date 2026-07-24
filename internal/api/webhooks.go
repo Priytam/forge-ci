@@ -117,6 +117,17 @@ func (s *Server) registerRepo(w http.ResponseWriter, r *http.Request) {
 		req.DefaultBranch = "main"
 	}
 
+	// config-from-repo toggle: 'repo' (default) prefers the in-repo .forge-ci.yml
+	// and falls back to the registered config; 'registered' only ever uses the
+	// registered config. config_path overrides the fetched path.
+	if req.ConfigSource == "" {
+		req.ConfigSource = "repo"
+	}
+	if req.ConfigSource != "repo" && req.ConfigSource != "registered" {
+		writeErr(w, http.StatusBadRequest, `config_source must be "repo" or "registered"`)
+		return
+	}
+
 	// GitHub App auth (github only) is configured when any App field is present.
 	// It authenticates INSTEAD of a static token — Forge mints short-lived
 	// installation tokens on demand (see internal/githubapp).
@@ -180,6 +191,8 @@ func repoRegistryAuditDetail(req proto.RepoRegistration) map[string]any {
 		"default_branch": req.DefaultBranch,
 		"has_token":      req.Token != "",
 		"github_app":     appConfigured,
+		"config_source":  req.ConfigSource,
+		"config_path":    req.ConfigPath,
 	}
 	if appConfigured {
 		detail["github_app_id"] = req.GitHubAppID
@@ -255,10 +268,15 @@ func (s *Server) triggerFromWebhook(w http.ResponseWriter, r *http.Request, repo
 		writeErr(w, http.StatusBadRequest, "payload missing repo/ref/sha")
 		return false
 	}
-	config, err := s.store.GetRepoConfig(r.Context(), repo)
+	// config-from-repo: resolve the config for this event per the repo's
+	// config_source toggle — an in-repo .forge-ci.yml fetched at the event sha
+	// (preferred by default), else the registered config. configVersion is nil
+	// for an in-repo config (it is not a registry version); cfgSource is stamped
+	// on the pipeline for audit. config_yaml stores exactly what compiled.
+	config, configVersion, cfgSource, err := s.store.ResolvePipelineConfig(r.Context(), repo, sha)
 	if errors.Is(err, store.ErrNotFound) {
 		writeErr(w, http.StatusNotFound,
-			"no pipeline config registered for "+repo+" — PUT /api/v1/repo-configs first")
+			"no pipeline config for "+repo+" — add .forge-ci.yml to the repo or PUT /api/v1/repo-configs first")
 		return false
 	}
 	if err != nil {
@@ -275,19 +293,15 @@ func (s *Server) triggerFromWebhook(w http.ResponseWriter, r *http.Request, repo
 		writeErr(w, http.StatusUnprocessableEntity, "pipeline config error: "+err.Error())
 		return false
 	}
-	var configVersion *int
-	if v, verr := s.store.CurrentConfigVersion(r.Context(), repo); verr == nil && v > 0 {
-		configVersion = &v
-	}
 	p, err := s.store.CreatePipeline(r.Context(),
-		proto.CreatePipelineRequest{Repo: repo, Ref: ref, SHA: sha, Config: config, TriggeredBy: author},
+		proto.CreatePipelineRequest{Repo: repo, Ref: ref, SHA: sha, Config: config, TriggeredBy: author, ConfigSource: cfgSource},
 		jobs, configVersion, opts.AutoCancel, opts.FailFast)
 	if err != nil {
 		slog.Error("webhook pipeline create", "err", err)
 		writeErr(w, http.StatusInternalServerError, "failed to create pipeline")
 		return false
 	}
-	slog.Info("pipeline triggered via webhook", "repo", repo, "ref", ref, "pipeline", p.ID)
+	slog.Info("pipeline triggered via webhook", "repo", repo, "ref", ref, "pipeline", p.ID, "config_source", cfgSource)
 	writeJSON(w, http.StatusCreated, map[string]any{"pipeline": p})
 	return true
 }

@@ -20,8 +20,12 @@ connect it to your VCS:
    A connection can authenticate with **either** a static token (the PAT above)
    **or** a GitHub App — see [GitHub App authentication](#github-app-authentication).
 
-1. **A registered pipeline config** — Forge stores the pipeline YAML per repo
-   (it can't read `.forge-ci.yml` out of a repo it doesn't host):
+1. **The pipeline config.** By default Forge reads `.forge-ci.yml` **from the
+   repo itself**, fetched at the pushed/PR sha over the provider's contents API
+   using the connection from step 0 — so pipeline config rides in the commit/PR,
+   exactly like GitLab/GitHub. See
+   [Config from the repo](#config-from-the-repo-forge-ciyml). When a repo has no
+   in-repo file, Forge falls back to a **registered** config stored per repo:
    ```sh
    curl -X PUT $FORGE/api/v1/repo-configs \
      -d "$(jq -n --arg cfg "$(cat forge-ci.yml)" '{repo:"acme/checkout-service", config:$cfg}')"
@@ -164,10 +168,65 @@ stub; leave unset in production).
 > later mint failure is logged (token/key redacted) and treated like any other
 > transient/permanent VCS error.
 
+## Config from the repo (`.forge-ci.yml`)
+
+Forge can read a repo's pipeline config **straight from the repo**, so config
+rides in the commit/PR instead of only living in a registered copy — the big DX
+win: a branch or PR that changes `.forge-ci.yml` runs *that* config, and reviews
+of the pipeline happen in the PR alongside the code.
+
+**How it works.** When a push or PR webhook fires, Forge fetches `.forge-ci.yml`
+**at the exact event sha** over the provider's contents API, authenticated with
+the same connection as the clone (a static PAT or a freshly-minted GitHub App
+installation token — the App needs **Contents: read**). It then compiles and runs
+that YAML. This requires a **connected repo with valid auth** (step 0); the token
+is used only in the outbound `Authorization` header and is never logged.
+
+- **GitHub:** `GET {GITHUB_API_BASE|https://api.github.com}/repos/{owner}/{repo}/contents/.forge-ci.yml?ref={sha}`
+  with `Accept: application/vnd.github.raw` (base64 `content` is also decoded).
+- **Bitbucket:** `GET {BITBUCKET_API_BASE|https://api.bitbucket.org}/2.0/repositories/{ws}/{repo}/src/{sha}/.forge-ci.yml`.
+- Provider `other`, an unregistered repo, or a **404** (no such file) → treated
+  as "not found" and Forge falls back (below), never an error.
+
+**Precedence and the `config_source` toggle.** Each connected repo has a
+`config_source` setting:
+
+| `config_source` | Behavior |
+|---|---|
+| `repo` (**default**) | Prefer the in-repo `.forge-ci.yml` at the event sha; **fall back** to the registered config when the file is absent. If neither exists, the usual `404 "no pipeline config"` applies. |
+| `registered` | Only ever use the registered config — the repo file is **never** fetched, even if present. |
+
+Set it (and, optionally, a `config_path` override — default `.forge-ci.yml`) when
+connecting the repo:
+
+```sh
+curl -X POST $FORGE/api/v1/repo-registry -d '{
+  "repo": "acme/checkout-service", "provider": "github",
+  "token": "<PAT with Contents:read>",
+  "config_source": "repo",          # or "registered"
+  "config_path": ".forge-ci.yml"     # optional override
+}'
+```
+
+**Version stamping.** A pipeline built from an in-repo config is **not** stamped
+with a registered `config_version` (it isn't a registry version — `config_version`
+is `NULL`) and is recorded with `config_source = repo`; a registered-config run
+keeps its version and `config_source = registered`. Either way the pipeline's
+stored `config_yaml` is **exactly the YAML that ran**, so retries and audit see
+precisely what executed.
+
+**Scheduled pipelines** honor the same precedence: a scheduled fire resolves the
+ref tip and then applies `config_source` at that sha (in-repo preferred by
+default, registered fallback).
+
+The manual API path (`POST /api/v1/pipelines` with an explicit `config`) is
+unchanged — it always runs the config you supply.
+
 ## Behavior notes
 
 - The ref from the webhook drives `only`/`except`, so pushes to `main` and to
-  feature branches compile different DAGs from the same registered YAML.
+  feature branches compile different DAGs from the same config (in-repo or
+  registered).
 - Push and pull-request events are handled; **any other event** (GitHub — e.g.
   `issues`, `X-GitHub-Event` other than `push`/`pull_request`) and empty push
   change lists (Bitbucket) are acknowledged with **202** and ignored. See

@@ -24,6 +24,7 @@ import (
 	"github.com/priytamjeepandey/forge-ci/internal/oidc"
 	"github.com/priytamjeepandey/forge-ci/internal/proto"
 	"github.com/priytamjeepandey/forge-ci/internal/secret"
+	"github.com/priytamjeepandey/forge-ci/internal/vcs"
 )
 
 //go:embed migrations.sql
@@ -42,6 +43,7 @@ type Store struct {
 	cipher     *secret.Cipher    // envelope encryption for secrets at rest
 	appMinter  *githubapp.Minter // mints/caches GitHub App installation tokens
 	oidcSigner *oidc.Signer      // mints per-job OIDC ID tokens (keyless cloud auth)
+	fetcher    *vcs.Fetcher      // fetches in-repo .forge-ci.yml at the event sha (config-from-repo)
 
 	// Execution-timeout policy (env-configured, see New).
 	defaultJobTimeout time.Duration // DEFAULT_JOB_TIMEOUT, jobs without timeout:
@@ -107,6 +109,7 @@ func New(ctx context.Context, dsn string) (*Store, error) {
 		pool:              pool,
 		cipher:            cipher,
 		appMinter:         githubapp.New(),
+		fetcher:           vcs.NewFetcher(),
 		defaultJobTimeout: envDuration("DEFAULT_JOB_TIMEOUT", time.Hour),
 		maxJobTimeout:     envDuration("MAX_JOB_TIMEOUT", 4*time.Hour),
 		queueTimeout:      envDuration("QUEUE_TIMEOUT", 24*time.Hour),
@@ -251,14 +254,23 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 	}
 	defer tx.Rollback(ctx)
 
+	// config_source notes where config_yaml came from (audit/retry clarity):
+	// 'repo' for an in-repo .forge-ci.yml, else 'registered' (a registry version
+	// or a manual one-off). Empty defaults to 'registered' so untouched callers
+	// (the manual API path) are unaffected.
+	configSource := req.ConfigSource
+	if configSource == "" {
+		configSource = "registered"
+	}
+
 	var p proto.Pipeline
 	p.Repo, p.Ref, p.SHA = req.Repo, req.Ref, req.SHA
 	p.Status = "created"
 	p.ConfigVersion = configVersion
 	err = tx.QueryRow(ctx,
-		`INSERT INTO pipelines (repo, ref, sha, config_yaml, triggered_by, config_version, fail_fast)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, created_at`,
-		req.Repo, req.Ref, req.SHA, req.Config, req.TriggeredBy, configVersion, failFast).Scan(&p.ID, &p.CreatedAt)
+		`INSERT INTO pipelines (repo, ref, sha, config_yaml, triggered_by, config_version, fail_fast, config_source)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id, created_at`,
+		req.Repo, req.Ref, req.SHA, req.Config, req.TriggeredBy, configVersion, failFast, configSource).Scan(&p.ID, &p.CreatedAt)
 	if err != nil {
 		return nil, err
 	}

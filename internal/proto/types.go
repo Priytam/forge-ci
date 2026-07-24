@@ -143,6 +143,13 @@ type RepoRegistration struct {
 	GitHubInstallationID string `json:"github_installation_id,omitempty"`
 	GitHubAppPrivateKey  string `json:"github_app_private_key,omitempty"` // write-only; never returned
 	HasGitHubApp         bool   `json:"has_github_app"`
+
+	// config-from-repo. ConfigSource is 'repo' (prefer the in-repo .forge-ci.yml
+	// fetched at the event sha, fall back to the registered config) or
+	// 'registered' (only ever use the registered config). Empty defaults to
+	// 'repo'. ConfigPath overrides the fetched path ('' = .forge-ci.yml).
+	ConfigSource string `json:"config_source,omitempty"`
+	ConfigPath   string `json:"config_path,omitempty"`
 }
 
 // Runner is a registered build agent as seen by the control plane.
@@ -243,6 +250,9 @@ type CreatePipelineRequest struct {
 	SHA         string `json:"sha"`
 	Config      string `json:"config"`
 	TriggeredBy string `json:"triggered_by,omitempty"`
+	// ConfigSource notes where Config came from for audit/retry ('repo' =
+	// in-repo .forge-ci.yml, else 'registered'). Empty defaults to 'registered'.
+	ConfigSource string `json:"config_source,omitempty"`
 }
 
 // Schedule is a cron-scheduled pipeline trigger for a (repo, ref). The cron

@@ -136,6 +136,16 @@ WHERE NOT EXISTS (SELECT 1 FROM repo_config_versions v WHERE v.repo = rc.repo);
 -- config supplied at run time; never persisted to the registry).
 ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS config_version INT;
 
+-- config-from-repo: which source this pipeline's config_yaml came from.
+--   'registered' = a registered config version (stamped in config_version), or a
+--                  one-off custom config supplied to the manual API.
+--   'repo'       = the in-repo .forge-ci.yml fetched at the pipeline sha
+--                  (config_version is NULL — it is not a registry version).
+-- config_yaml always stores the exact YAML that was compiled, so retries/audit
+-- see precisely what ran. Defaults to 'registered' so existing rows and the
+-- manual one-off path are unaffected.
+ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS config_source TEXT NOT NULL DEFAULT 'registered';
+
 -- fail_fast (top-level `fail_fast: true` in the pipeline YAML; default FALSE,
 -- so existing pipelines are unaffected and GitLab-compatible). When TRUE, the
 -- scheduler's fail_fast_cancel transition cancels the pipeline's other
@@ -168,6 +178,21 @@ CREATE TABLE IF NOT EXISTS repo_registry (
 ALTER TABLE repo_registry ADD COLUMN IF NOT EXISTS github_app_id              TEXT NOT NULL DEFAULT '';
 ALTER TABLE repo_registry ADD COLUMN IF NOT EXISTS github_app_private_key     TEXT NOT NULL DEFAULT '';
 ALTER TABLE repo_registry ADD COLUMN IF NOT EXISTS github_app_installation_id TEXT NOT NULL DEFAULT '';
+
+-- config-from-repo: where a repo's pipeline config comes from.
+--   'repo'       = prefer the in-repo .forge-ci.yml fetched (via the provider
+--                  contents API, at the event sha, with the connection's
+--                  token/App) and fall back to the registered config when the
+--                  file is absent.
+--   'registered' = only ever use the registered config (the repo file is never
+--                  fetched, even if it exists).
+-- Default 'repo' so pipeline config rides in the commit/PR (the DX win); a repo
+-- with no in-repo file transparently falls back to its registered config, so
+-- existing connections keep working. config_path overrides the fetched path
+-- ('' = the default .forge-ci.yml).
+ALTER TABLE repo_registry ADD COLUMN IF NOT EXISTS config_source TEXT NOT NULL DEFAULT 'repo'
+    CHECK (config_source IN ('repo','registered'));
+ALTER TABLE repo_registry ADD COLUMN IF NOT EXISTS config_path   TEXT NOT NULL DEFAULT '';
 
 -- Per-repo defaults. Runners are deployed independently (global fleet,
 -- selected by tags); a repo picks its runner group here. Jobs without an
