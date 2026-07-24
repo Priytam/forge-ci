@@ -127,6 +127,18 @@ export interface RepoSettings {
   default_runner_tags: string[];
 }
 
+export interface Schedule {
+  id: number;
+  repo: string;
+  ref: string;
+  cron: string;
+  enabled: boolean;
+  created_by: string;
+  created_at: string;
+  last_run_at: string | null;
+  next_run_at: string | null;
+}
+
 export type RepoProvider = "github" | "bitbucket" | "other";
 
 export interface RegisteredRepo {
@@ -431,6 +443,36 @@ export function putRepoSettings(
   default_runner_tags: string[]
 ): Promise<void> {
   return requestVoid("PUT", "/repo-settings", { repo, default_runner_tags });
+}
+
+// --- Scheduled pipelines ---
+
+export function listSchedules(repo: string): Promise<Schedule[]> {
+  return getJSON<Schedule[]>(`/schedules?repo=${encodeURIComponent(repo)}`);
+}
+
+export interface ScheduleInput {
+  ref: string;
+  cron: string;
+  enabled: boolean;
+}
+
+export function createSchedule(
+  repo: string,
+  input: ScheduleInput
+): Promise<{ schedule: Schedule }> {
+  return postJSON<{ schedule: Schedule }>("/schedules", { repo, ...input });
+}
+
+export function updateSchedule(
+  id: number,
+  input: Partial<ScheduleInput>
+): Promise<{ schedule: Schedule }> {
+  return putJSON<{ schedule: Schedule }>(`/schedules/${id}`, input);
+}
+
+export function deleteSchedule(id: number): Promise<void> {
+  return requestVoid("DELETE", `/schedules/${id}`);
 }
 
 // --- Environments ---

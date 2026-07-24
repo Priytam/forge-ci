@@ -10,10 +10,13 @@ import { Link, useParams } from "react-router-dom";
 import {
   addMember,
   artifactDownloadUrl,
+  createSchedule,
   createVariable,
   decodeRepoParam,
   deleteMember,
+  deleteSchedule,
   deleteVariable,
+  getIsAdmin,
   getRepoConfig,
   getRepoSettings,
   humanSize,
@@ -24,14 +27,17 @@ import {
   listProtectedEnvironments,
   listRepoTemplates,
   listRunners,
+  listSchedules,
   listVariables,
   putRepoConfig,
   putRepoSettings,
   putRepoTemplate,
   relativeTime,
   revertConfig,
+  updateSchedule,
   updateVariable,
   upsertProtectedEnvironment,
+  type Schedule,
   type Variable,
 } from "../api";
 import { usePoll } from "../hooks/usePoll";
@@ -1098,6 +1104,229 @@ function TemplatesSection({ repo }: { repo: string }) {
   );
 }
 
+/* ---------------- Scheduled pipelines ---------------- */
+
+/** Absolute UTC label for a title tooltip, e.g. "2026-07-25 03:00 UTC". */
+function absoluteUtc(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return (
+    `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ` +
+    `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} UTC`
+  );
+}
+
+function SchedulesSection({ repo }: { repo: string }) {
+  const fetcher = useCallback(() => listSchedules(repo), [repo]);
+  const { data: schedules, error, refresh } = usePoll(fetcher, 0, false);
+
+  const [isAdmin, setIsAdmin] = useState(false);
+  useEffect(() => {
+    void getIsAdmin().then(setIsAdmin);
+  }, []);
+
+  // add-schedule form
+  const [showForm, setShowForm] = useState(false);
+  const [ref, setRef] = useState("main");
+  const [cron, setCron] = useState("");
+  const [enabled, setEnabled] = useState(true);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const resetForm = () => {
+    setShowForm(false);
+    setRef("main");
+    setCron("");
+    setEnabled(true);
+    setFormError(null);
+  };
+
+  const onSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setFormError(null);
+    try {
+      await createSchedule(repo, { ref: ref.trim(), cron: cron.trim(), enabled });
+      resetForm();
+      refresh();
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onToggle = async (s: Schedule) => {
+    setActionError(null);
+    try {
+      await updateSchedule(s.id, { enabled: !s.enabled });
+      refresh();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const onDelete = async (s: Schedule) => {
+    if (!window.confirm(`Delete schedule "${s.cron}" for ${s.ref}?`)) return;
+    setActionError(null);
+    try {
+      await deleteSchedule(s.id);
+      refresh();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  return (
+    <div>
+      {error && <div className="error-banner">{error}</div>}
+      {actionError && <div className="error-banner">{actionError}</div>}
+
+      {isAdmin && (
+        <div className="section-toolbar">
+          {!showForm && (
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => {
+                resetForm();
+                setShowForm(true);
+              }}
+            >
+              Add Schedule
+            </button>
+          )}
+        </div>
+      )}
+
+      {schedules && schedules.length > 0 ? (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Cron</th>
+                <th>Ref</th>
+                <th>Enabled</th>
+                <th>Next run</th>
+                <th>Last run</th>
+                <th>Created by</th>
+                {isAdmin && <th>Actions</th>}
+              </tr>
+            </thead>
+            <tbody>
+              {schedules.map((s) => (
+                <tr key={s.id}>
+                  <td className="mono">{s.cron}</td>
+                  <td className="mono">{s.ref}</td>
+                  <td>
+                    <label className="check-row">
+                      <input
+                        type="checkbox"
+                        checked={s.enabled}
+                        disabled={!isAdmin}
+                        onChange={() => void onToggle(s)}
+                      />
+                    </label>
+                  </td>
+                  <td className="muted">
+                    {s.next_run_at ? (
+                      <span title={absoluteUtc(s.next_run_at)}>
+                        {relativeTime(s.next_run_at)}
+                      </span>
+                    ) : (
+                      "—"
+                    )}
+                  </td>
+                  <td className="muted">
+                    {s.last_run_at ? (
+                      <span title={absoluteUtc(s.last_run_at)}>
+                        {relativeTime(s.last_run_at)}
+                      </span>
+                    ) : (
+                      "never"
+                    )}
+                  </td>
+                  <td>{s.created_by}</td>
+                  {isAdmin && (
+                    <td className="actions-cell">
+                      <button
+                        type="button"
+                        className="btn btn-icon"
+                        title="Delete"
+                        onClick={() => void onDelete(s)}
+                      >
+                        🗑
+                      </button>
+                    </td>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="muted">No schedules yet.</div>
+      )}
+
+      {showForm && isAdmin && (
+        <form className="settings-form" onSubmit={(e) => void onSubmit(e)}>
+          <h3>Add schedule</h3>
+          <div className="form-row">
+            <label className="field">
+              <span>Ref</span>
+              <input
+                className="mono"
+                value={ref}
+                onChange={(e) => setRef(e.target.value)}
+                required
+              />
+            </label>
+            <label className="field">
+              <span>Cron</span>
+              <input
+                className="mono"
+                value={cron}
+                onChange={(e) => setCron(e.target.value)}
+                placeholder="0 3 * * *"
+                required
+              />
+              <span className="muted small-note">
+                5-field cron, UTC — e.g. <code>0 3 * * *</code> = 03:00 UTC daily
+              </span>
+            </label>
+          </div>
+          <label className="check-row">
+            <input
+              type="checkbox"
+              checked={enabled}
+              onChange={(e) => setEnabled(e.target.checked)}
+            />
+            <span>Enabled</span>
+          </label>
+          {formError && <div className="error-banner">{formError}</div>}
+          <div className="form-actions">
+            <button type="button" className="btn" onClick={resetForm}>
+              Cancel
+            </button>
+            <button type="submit" className="btn btn-primary" disabled={busy}>
+              Add schedule
+            </button>
+          </div>
+        </form>
+      )}
+
+      <div className="muted small-note">
+        Scheduled runs use <code>CI_PIPELINE_SOURCE=schedule</code> and the
+        repo's registered pipeline config.
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Page ---------------- */
+
 export default function RepoSettings() {
   const params = useParams<{ repo: string }>();
   const repo = decodeRepoParam(params.repo ?? "");
@@ -1203,6 +1432,20 @@ export default function RepoSettings() {
         }
       >
         <TemplatesSection repo={repo} />
+      </Section>
+
+      <Section
+        title="Schedules"
+        description={
+          <>
+            Cron-triggered pipeline runs for this repo. Each run uses the repo's
+            registered pipeline config and sets{" "}
+            <code>CI_PIPELINE_SOURCE=schedule</code>. Cron is 5-field, evaluated
+            in UTC.
+          </>
+        }
+      >
+        <SchedulesSection repo={repo} />
       </Section>
     </div>
   );
