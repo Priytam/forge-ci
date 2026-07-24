@@ -7,7 +7,7 @@ import {
   useState,
 } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { duration, getPipeline, isTerminalStatus, shortSha, type Job } from "../api";
+import { duration, getPipeline, isTerminalStatus, shortSha, sourceLabel, type Job } from "../api";
 import { usePoll } from "../hooks/usePoll";
 import StatusBadge from "../components/StatusBadge";
 import { StatusIcon } from "../components/StageDots";
@@ -222,6 +222,9 @@ export default function PipelineDetail() {
           <div className="pipeline-meta">
             <span className="mono sha">{shortSha(pipeline.sha)}</span>
             <ConfigChip version={pipeline.config_version ?? null} />
+            {sourceLabel(pipeline.source) && (
+              <span className="source-chip">{sourceLabel(pipeline.source)}</span>
+            )}
           </div>
         </div>
         <StatusBadge status={pipeline.status} />

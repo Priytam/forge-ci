@@ -6,6 +6,7 @@ import {
   listRegistry,
   relativeTime,
   shortSha,
+  sourceLabel,
 } from "../api";
 import { usePoll } from "../hooks/usePoll";
 import StatusBadge from "../components/StatusBadge";
@@ -92,6 +93,9 @@ export default function PipelineList() {
                   <td className="mono">
                     {shortSha(p.sha)}{" "}
                     <ConfigChip version={p.config_version ?? null} />
+                    {sourceLabel(p.source) && (
+                      <span className="source-chip">{sourceLabel(p.source)}</span>
+                    )}
                   </td>
                   <td>
                     <StageDots stages={p.stages ?? []} />

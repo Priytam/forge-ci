@@ -7,6 +7,7 @@ import NewPipeline from "./pages/NewPipeline";
 import RepoSettings from "./pages/RepoSettings";
 import Runners from "./pages/Runners";
 import Docs from "./pages/Docs";
+import Recipes from "./pages/Recipes";
 import AddRepo from "./pages/AddRepo";
 import Login from "./pages/Login";
 import AdminSso from "./pages/AdminSso";
@@ -26,6 +27,9 @@ export default function App() {
           <nav className="header-nav">
             <Link to="/runners" className="header-link">
               Runners
+            </Link>
+            <Link to="/recipes" className="header-link">
+              Recipes
             </Link>
             <Link to="/docs" className="header-link">
               Docs
@@ -48,6 +52,8 @@ export default function App() {
           <Route path="/runners" element={<Runners />} />
           <Route path="/docs" element={<Docs />} />
           <Route path="/docs/:guide" element={<Docs />} />
+          <Route path="/recipes" element={<Recipes />} />
+          <Route path="/recipes/:slug" element={<Recipes />} />
           <Route path="/login" element={<Login />} />
           <Route path="/admin/sso" element={<AdminSso />} />
           <Route path="/admin/audit" element={<AdminAudit />} />

@@ -31,6 +31,20 @@ export interface Pipeline {
   stages: StageStatus[];
   /** Registered config version this run used; null = one-off custom config. */
   config_version: number | null;
+  /** Trigger: api | push | webhook | merge_request | schedule. */
+  source?: string;
+}
+
+/** Human label for a pipeline trigger source; "" for the ordinary api/push case. */
+export function sourceLabel(source?: string): string {
+  switch (source) {
+    case "merge_request":
+      return "merge request";
+    case "schedule":
+      return "scheduled";
+    default:
+      return "";
+  }
 }
 
 export interface Job {
