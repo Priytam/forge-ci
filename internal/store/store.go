@@ -54,6 +54,36 @@ func envDuration(key string, fallback time.Duration) time.Duration {
 	return fallback
 }
 
+// migrationLockKey is a fixed application-defined key for the migration
+// advisory lock (ASCII "FoRg"). Any constant works as long as it's stable.
+const migrationLockKey int64 = 0x466f5267
+
+// runMigrations applies the embedded schema under a transaction-scoped advisory
+// lock so that concurrent server replicas starting against the same database
+// serialize: the first replica migrates while the others block on the lock,
+// then run the (idempotent) statements as no-ops. Without this, two replicas
+// racing CREATE TABLE IF NOT EXISTS on a fresh DB can collide in the Postgres
+// catalog (duplicate pg_type). DDL runs in one transaction (Postgres has
+// transactional DDL), and pg_advisory_xact_lock auto-releases on commit/rollback
+// — no lingering lock on a pooled connection.
+func runMigrations(ctx context.Context, pool *pgxpool.Pool) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("migrations: begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", migrationLockKey); err != nil {
+		return fmt.Errorf("migrations: acquire lock: %w", err)
+	}
+	if _, err := tx.Exec(ctx, migrations); err != nil {
+		return fmt.Errorf("migrations: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("migrations: commit: %w", err)
+	}
+	return nil
+}
+
 func New(ctx context.Context, dsn string) (*Store, error) {
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
@@ -62,8 +92,8 @@ func New(ctx context.Context, dsn string) (*Store, error) {
 	if err := pool.Ping(ctx); err != nil {
 		return nil, fmt.Errorf("postgres ping: %w", err)
 	}
-	if _, err := pool.Exec(ctx, migrations); err != nil {
-		return nil, fmt.Errorf("migrations: %w", err)
+	if err := runMigrations(ctx, pool); err != nil {
+		return nil, err
 	}
 	cipher, err := secret.FromEnv()
 	if err != nil {

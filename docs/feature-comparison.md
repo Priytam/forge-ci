@@ -22,7 +22,7 @@ Legend: ✅ shipped · 🟡 partial · ❌ not yet (roadmap).
 | Matrix builds (`parallel:`) | ✅ | ❌ | |
 | Manual jobs (`when: manual`) | ✅ | 🟡 | approvals cover the gated case; plain manual next |
 | Timeouts (per job + pipeline default) | ✅ | ✅ | runner group-kill + server backstop + queue timeout |
-| Retry policy | ✅ | ❌ | |
+| Retry policy | ✅ | ✅ | `retry: N` (0..10) + `default.retry`, attempt tracking; timeouts/cancels not retried |
 | Child/multi-project pipelines, triggers | ✅ | ❌ | |
 | Scheduled pipelines (cron) | ✅ | ❌ | easy: scheduler already ticks |
 
@@ -36,10 +36,10 @@ Legend: ✅ shipped · 🟡 partial · ❌ not yet (roadmap).
 | Runner concurrency (one manager, N jobs) | ✅ | ✅ | `--concurrency` |
 | Tag-based routing | ✅ | ✅ | |
 | Pause/drain runners | ✅ | ✅ | |
-| Job logs: live streaming | ✅ | ✅ (poll) | move to WebSocket tail |
+| Job logs: live streaming | ✅ | ✅ | SSE live tail + Redis buffer + object-storage archive |
 | Services (sidecar containers, e.g. postgres for tests) | ✅ | ❌ | |
-| Git clone of the source into the job | ✅ (owns repo) | ❌ | standalone-CI must clone via token/deploy key — top priority |
-| Interruptible/auto-cancel superseded pipelines | ✅ | ❌ | |
+| Git clone of the source into the job | ✅ (owns repo) | ✅ | shallow clone at the pipeline SHA via the registry token |
+| Interruptible/auto-cancel superseded pipelines | ✅ | ✅ | `auto_cancel` (default true), per repo+ref |
 
 ## Security & governance
 
