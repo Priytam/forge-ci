@@ -89,6 +89,29 @@ export interface Artifact {
   name: string;
   size_bytes: number;
   created_at: string;
+  /** Per-artifact expiry (from artifacts.expire_in); null/absent = no expiry. */
+  expires_at?: string | null;
+}
+
+/** One failed or errored test case in a JUnit report. */
+export interface JUnitFailure {
+  name: string;
+  classname?: string;
+  /** "failure" | "error" */
+  type: string;
+  message?: string;
+}
+
+/** Per-job JUnit test summary. Absent (404) when the job produced no report. */
+export interface JUnitReport {
+  job_id: number;
+  total: number;
+  passed: number;
+  failed: number;
+  skipped: number;
+  duration_seconds: number;
+  failures: JUnitFailure[];
+  created_at: string;
 }
 
 export interface Member {
@@ -336,6 +359,18 @@ export function listArtifacts(repo: string, jobId?: number | string): Promise<Ar
 
 export function artifactDownloadUrl(id: number): string {
   return `${BASE}/artifacts/${id}/download`;
+}
+
+/** A job's parsed JUnit summary, or null when the job produced no report (404). */
+export async function getJobReport(
+  id: number | string
+): Promise<JUnitReport | null> {
+  try {
+    return await getJSON<JUnitReport>(`/jobs/${id}/report`);
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) return null;
+    throw err;
+  }
 }
 
 export function listMembers(repo: string): Promise<Member[]> {
@@ -897,4 +932,33 @@ export function duration(start: string | null, end: string | null): string | nul
 
 export function shortSha(sha: string): string {
   return sha.slice(0, 8);
+}
+
+/**
+ * Artifact expiry label: null/absent = "no expiry", a future time =
+ * "expires in 3d", a past time = "expired 2h ago".
+ */
+export function expiryLabel(iso: string | null | undefined): string {
+  if (!iso) return "no expiry";
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return iso;
+  const diffSec = Math.round((t - Date.now()) / 1000);
+  const abs = Math.abs(diffSec);
+  let mag: string;
+  if (abs < 60) mag = `${abs}s`;
+  else if (abs < 3600) mag = `${Math.floor(abs / 60)}m`;
+  else if (abs < 86400) mag = `${Math.floor(abs / 3600)}h`;
+  else mag = `${Math.floor(abs / 86400)}d`;
+  return diffSec < 0 ? `expired ${mag} ago` : `expires in ${mag}`;
+}
+
+/** Human test duration from JUnit seconds, e.g. "1m 12s" or "0.4s". */
+export function testDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "";
+  if (seconds < 60) {
+    return seconds < 10 ? `${seconds.toFixed(1)}s` : `${Math.round(seconds)}s`;
+  }
+  const min = Math.floor(seconds / 60);
+  const sec = Math.round(seconds % 60);
+  return `${min}m ${sec}s`;
 }

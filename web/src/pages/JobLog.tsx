@@ -3,19 +3,24 @@ import { Link, useParams, useSearchParams } from "react-router-dom";
 import {
   artifactDownloadUrl,
   duration,
+  expiryLabel,
   getJobLogs,
   getJobLogsIncremental,
+  getJobReport,
   getPipeline,
   humanSize,
   isTerminalStatus,
   jobLogStreamUrl,
   listArtifacts,
+  testDuration,
   type Artifact,
   type Job,
+  type JUnitReport,
 } from "../api";
 import { usePoll } from "../hooks/usePoll";
 import StatusBadge from "../components/StatusBadge";
 import ApprovalButtons from "../components/ApprovalButtons";
+import PlayButton from "../components/PlayButton";
 
 /**
  * Live job log: an SSE EventSource on /logs/stream?offset=0 that appends
@@ -198,6 +203,21 @@ export default function JobLog() {
     if (repo) refreshArtifacts();
   }, [repo, jobStatus, refreshArtifacts]);
 
+  // JUnit test report (null until known / when the job has none). Fetched once
+  // metadata is available and re-fetched when the job reaches a terminal state.
+  const reportFetcher = useCallback(
+    () => (jobId ? getJobReport(jobId) : Promise.resolve<JUnitReport | null>(null)),
+    [jobId]
+  );
+  const { data: report, refresh: refreshReport } = usePoll(
+    reportFetcher,
+    0,
+    false
+  );
+  useEffect(() => {
+    if (jobId) refreshReport();
+  }, [jobId, jobStatus, refreshReport]);
+
   // Auto-scroll: stick to the bottom unless the user scrolled up.
   const termRef = useRef<HTMLPreElement>(null);
   const stickRef = useRef(true);
@@ -212,6 +232,8 @@ export default function JobLog() {
   }, [logs]);
 
   const dur = job ? duration(job.started_at, job.finished_at) : null;
+
+  const [showFailures, setShowFailures] = useState(false);
 
   return (
     <div>
@@ -256,7 +278,62 @@ export default function JobLog() {
 
       {job && job.status === "blocked" && (
         <div className="card blocked-card glow glow-orange">
-          <ApprovalButtons jobId={job.id} onDone={refreshPipeline} />
+          {job.manual ? (
+            <PlayButton jobId={job.id} onDone={refreshPipeline} />
+          ) : (
+            <ApprovalButtons jobId={job.id} onDone={refreshPipeline} />
+          )}
+        </div>
+      )}
+
+      {report && report.total > 0 && (
+        <div className="card report-box">
+          <div className="report-summary">
+            <span className="report-label">Tests</span>
+            <span className="report-stat report-pass">{report.passed} passed</span>
+            <span
+              className={
+                report.failed > 0
+                  ? "report-stat report-fail"
+                  : "report-stat report-muted"
+              }
+            >
+              {report.failed} failed
+            </span>
+            <span className="report-stat report-muted">
+              {report.skipped} skipped
+            </span>
+            {report.duration_seconds > 0 && (
+              <span className="muted report-dur">
+                {testDuration(report.duration_seconds)}
+              </span>
+            )}
+            {report.failed > 0 && report.failures.length > 0 && (
+              <button
+                type="button"
+                className="report-toggle"
+                onClick={() => setShowFailures((v) => !v)}
+              >
+                {showFailures ? "Hide failures" : "Show failures"}
+              </button>
+            )}
+          </div>
+          {showFailures && report.failures.length > 0 && (
+            <ul className="report-failures">
+              {report.failures.map((f, i) => (
+                <li key={`${f.classname ?? ""}.${f.name}.${i}`} className="report-failure">
+                  <div className="report-failure-name mono">
+                    {f.classname ? `${f.classname} · ` : ""}
+                    {f.name}
+                    <span className="report-failure-type">{f.type}</span>
+                  </div>
+                  {f.message && (
+                    <div className="report-failure-msg muted">{f.message}</div>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       )}
 
@@ -267,6 +344,14 @@ export default function JobLog() {
             <div key={a.id} className="artifact-row">
               <span className="mono">{a.name}</span>
               <span className="muted">{humanSize(a.size_bytes)}</span>
+              <span
+                className={
+                  a.expires_at ? "artifact-expiry" : "artifact-expiry artifact-expiry-none"
+                }
+                title={a.expires_at ? new Date(a.expires_at).toLocaleString() : undefined}
+              >
+                {expiryLabel(a.expires_at)}
+              </span>
               <a className="btn" href={artifactDownloadUrl(a.id)}>
                 Download
               </a>

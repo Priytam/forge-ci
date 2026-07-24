@@ -14,6 +14,7 @@ import {
   createVariable,
   decodeRepoParam,
   deleteMember,
+  expiryLabel,
   deleteSchedule,
   deleteVariable,
   getIsAdmin,
@@ -471,6 +472,7 @@ function ArtifactsSection({ repo }: { repo: string }) {
                 <th>Artifact</th>
                 <th>Size</th>
                 <th>Created</th>
+                <th>Expires</th>
                 <th></th>
               </tr>
             </thead>
@@ -486,6 +488,12 @@ function ArtifactsSection({ repo }: { repo: string }) {
                   <td className="mono">{a.name}</td>
                   <td>{humanSize(a.size_bytes)}</td>
                   <td className="muted">{relativeTime(a.created_at)}</td>
+                  <td
+                    className={a.expires_at ? "artifact-expiry" : "muted"}
+                    title={a.expires_at ? new Date(a.expires_at).toLocaleString() : undefined}
+                  >
+                    {expiryLabel(a.expires_at)}
+                  </td>
                   <td>
                     <a className="btn" href={artifactDownloadUrl(a.id)}>
                       Download

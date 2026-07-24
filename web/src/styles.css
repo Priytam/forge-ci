@@ -2096,6 +2096,128 @@ select:focus {
   padding: 4px 0;
 }
 
+.artifact-expiry {
+  font-size: 11px;
+  font-weight: 600;
+  color: #fbbf24;
+  background: rgba(212, 167, 44, 0.14);
+  border: 1px solid rgba(212, 167, 44, 0.35);
+  border-radius: 999px;
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+
+.artifact-row .artifact-expiry {
+  margin-left: auto;
+}
+
+.artifact-expiry-none {
+  color: var(--text-muted);
+  background: rgba(110, 118, 129, 0.14);
+  border-color: rgba(110, 118, 129, 0.32);
+  font-weight: 500;
+}
+
+/* ---------- JUnit test report (job log) ---------- */
+
+.report-box {
+  padding: 12px 16px;
+  margin-bottom: 16px;
+}
+
+.report-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.report-label {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-muted);
+}
+
+.report-stat {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.report-pass {
+  color: #4ade80;
+}
+
+.report-fail {
+  color: #f87171;
+}
+
+.report-muted {
+  color: var(--text-muted);
+}
+
+.report-dur {
+  font-size: 12px;
+}
+
+.report-toggle {
+  margin-left: auto;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 12px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+
+.report-toggle:hover {
+  border-color: var(--accent, #60a5fa);
+}
+
+.report-failures {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.report-failure {
+  border-left: 2px solid rgba(229, 83, 75, 0.5);
+  padding: 4px 0 4px 12px;
+}
+
+.report-failure-name {
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.report-failure-type {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: #f87171;
+  background: rgba(229, 83, 75, 0.14);
+  border: 1px solid rgba(229, 83, 75, 0.35);
+  border-radius: 4px;
+  padding: 0 5px;
+}
+
+.report-failure-msg {
+  font-size: 12px;
+  margin-top: 3px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .log-head {
   display: flex;
   align-items: center;
