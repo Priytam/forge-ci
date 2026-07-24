@@ -63,7 +63,7 @@ Legend: ✅ shipped · 🟡 partial · ❌ not yet (roadmap).
 | Push webhooks GitHub/Bitbucket | n/a (native) | ✅ | HMAC verified (GitHub) |
 | Pipeline config source | in-repo `.gitlab-ci.yml` | 🟡 registered per repo | fetch `.forge-ci.yml` from GitHub API at push (needs token) |
 | Commit status write-back (✓/✗ on commit, PR checks) | native | ✅ | GitHub commit-status API + Bitbucket build status, context `forge-ci`, `target_url` → pipeline page; async idempotent posting (needs a token with commit-status scope) — see [vcs-integration.md](vcs-integration.md#commit-status-write-back) |
-| PR/MR-triggered pipelines | ✅ | ❌ | webhook already receives PR events; needs ref semantics |
+| PR/MR-triggered pipelines | ✅ | ✅ | GitHub `pull_request` (opened/synchronize/reopened) + Bitbucket `pullrequest:created`/`:updated` build the PR HEAD sha with `CI_PIPELINE_SOURCE=merge_request` and `CI_MERGE_REQUEST_*` context; commit status lands on the PR head, and a new push/sync auto-cancels the older PR pipeline — see [vcs-integration.md](vcs-integration.md#prmr-triggered-pipelines) |
 
 ## UI (GitLab-themed)
 

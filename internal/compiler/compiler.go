@@ -58,10 +58,11 @@ import (
 // Pipeline source values threaded into the rules if: context as
 // CI_PIPELINE_SOURCE.
 const (
-	SourceAPI      = "api"
-	SourceWebhook  = "webhook"
-	SourcePush     = "push"
-	SourceSchedule = "schedule"
+	SourceAPI          = "api"
+	SourceWebhook      = "webhook"
+	SourcePush         = "push"
+	SourceSchedule     = "schedule"
+	SourceMergeRequest = "merge_request" // GitHub pull_request / Bitbucket pull-request
 )
 
 const (
@@ -283,13 +284,22 @@ type CompiledJob struct {
 // Forge cannot distinguish a tag ref from a branch ref at compile time (a
 // webhook carries only the ref string), so CI_COMMIT_BRANCH is set to the ref
 // and CI_COMMIT_TAG is left undefined — documented in docs/pipeline-dsl.md.
-func buildContext(ref, source string) map[string]string {
-	return map[string]string{
+//
+// extra carries source-specific context (e.g. the CI_MERGE_REQUEST_* vars for a
+// merge_request pipeline). It is overlaid last so a caller can set/override any
+// key, and its entries are also injected into every emitted job's Env by Compile
+// so job scripts can read them.
+func buildContext(ref, source string, extra map[string]string) map[string]string {
+	ctx := map[string]string{
 		"CI_COMMIT_REF":      ref,
 		"CI_COMMIT_REF_NAME": ref,
 		"CI_COMMIT_BRANCH":   ref,
 		"CI_PIPELINE_SOURCE": source,
 	}
+	for k, v := range extra {
+		ctx[k] = v
+	}
+	return ctx
 }
 
 // Compile builds the job DAG for one specific ref and pipeline source.
@@ -301,7 +311,17 @@ func buildContext(ref, source string) map[string]string {
 // source is threaded into the rules if: context as CI_PIPELINE_SOURCE. tmpl
 // resolves include: templates; it may be nil when the caller has no template
 // store (any include then errors).
-func Compile(yml, ref, source string, tmpl TemplateFunc) ([]CompiledJob, error) {
+//
+// extra is optional source-specific context (only the first map is used). For a
+// merge_request pipeline the webhook handler passes the CI_MERGE_REQUEST_* vars
+// here; they become visible to rules if: expressions AND are injected into every
+// emitted job's Env so job scripts can read them. Existing callers pass no extra
+// map and are unaffected.
+func Compile(yml, ref, source string, tmpl TemplateFunc, extra ...map[string]string) ([]CompiledJob, error) {
+	var extraCtx map[string]string
+	if len(extra) > 0 {
+		extraCtx = extra[0]
+	}
 	var cfg config
 	if err := yaml.Unmarshal([]byte(yml), &cfg); err != nil {
 		return nil, fmt.Errorf("invalid YAML: %w", err)
@@ -336,7 +356,7 @@ func Compile(yml, ref, source string, tmpl TemplateFunc) ([]CompiledJob, error) 
 
 	// 3. Partition into emittable (real) jobs and hidden templates. Hidden jobs
 	// (leading dot) are never emitted; they exist only to be extended.
-	baseCtx := buildContext(ref, source)
+	baseCtx := buildContext(ref, source, extraCtx)
 
 	type decision struct {
 		spec         jobSpec
@@ -440,6 +460,9 @@ func Compile(yml, ref, source string, tmpl TemplateFunc) ([]CompiledJob, error) 
 		}
 		for _, e := range exps {
 			env := map[string]string{}
+			for k, v := range extraCtx { // source context (e.g. CI_MERGE_REQUEST_*); scripts can read these
+				env[k] = v
+			}
 			for k, v := range d.spec.Variables {
 				env[k] = v
 			}

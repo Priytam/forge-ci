@@ -28,7 +28,8 @@ connect it to your VCS:
    ```
    Re-PUT to update; the YAML is validated on save.
 
-2. **A push webhook** from the provider.
+2. **A webhook** from the provider — push events, and (GitHub / Bitbucket)
+   pull-request events. See [PR/MR-triggered pipelines](#prmr-triggered-pipelines).
 
 ## GitHub — step by step
 
@@ -41,7 +42,8 @@ connect it to your VCS:
    - Payload URL: `https://<forge-host>/api/v1/webhooks/github`
    - Content type: `application/json`
    - Secret: the same `WEBHOOK_SECRET`
-   - Events: *Just the push event*
+   - Events: *Push* — and, for PR pipelines, also *Pull requests*
+     (see [PR/MR-triggered pipelines](#prmr-triggered-pipelines))
 4. Push a commit. GitHub's "Recent Deliveries" should show **201**, and the
    pipeline appears under the repo card in Forge with the pusher recorded as
    `triggered_by` (which drives the self-approval rule).
@@ -52,7 +54,8 @@ connect it to your VCS:
    `workspace/repo-slug` full name.
 2. In Bitbucket: **Repository settings → Webhooks → Add webhook**
    - URL: `https://<forge-host>/api/v1/webhooks/bitbucket`
-   - Triggers: *Repository push*
+   - Triggers: *Repository push* — and, for PR pipelines, *Pull request →
+     Created* and *Updated* (see [PR/MR-triggered pipelines](#prmr-triggered-pipelines))
 3. Push a commit; the pipeline triggers with the actor as `triggered_by`.
    (Bitbucket Cloud has no HMAC signing — restrict by network/allowlist or a
    token in the URL if exposure is a concern.)
@@ -165,8 +168,10 @@ stub; leave unset in production).
 
 - The ref from the webhook drives `only`/`except`, so pushes to `main` and to
   feature branches compile different DAGs from the same registered YAML.
-- Non-push events (GitHub) and empty change lists (Bitbucket) are acknowledged
-  with **202** and ignored.
+- Push and pull-request events are handled; **any other event** (GitHub — e.g.
+  `issues`, `X-GitHub-Event` other than `push`/`pull_request`) and empty push
+  change lists (Bitbucket) are acknowledged with **202** and ignored. See
+  [PR/MR-triggered pipelines](#prmr-triggered-pipelines) for which PR actions run.
 - **Delivery dedup:** providers redeliver events (retries, manual redelivery).
   Each delivery is recorded by id — GitHub `X-GitHub-Delivery`, Bitbucket
   `X-Request-UUID`, or a SHA-256 of the body when no header is present — so a
@@ -175,6 +180,67 @@ stub; leave unset in production).
 - **Auto-cancel:** a new pipeline for the same repo+ref cancels older
   non-terminal ones (unless the YAML sets `auto_cancel: false`). Pushing twice
   in quick succession leaves only the newest pipeline running.
+
+## PR/MR-triggered pipelines
+
+Beyond branch pushes, Forge builds a pipeline for a **pull request** (GitHub) /
+**pull request** (Bitbucket) so PR checks run on the exact code that would merge.
+
+- **Events that trigger a build:**
+  - GitHub — `X-GitHub-Event: pull_request` with action **`opened`**,
+    **`synchronize`** (new commits pushed to the PR) or **`reopened`**. Every
+    other action (`closed`, `edited`, `labeled`, …) is acknowledged with **202**
+    and creates nothing. Enable *Pull requests* on the GitHub webhook.
+  - Bitbucket — `X-Event-Key: pullrequest:created` or `pullrequest:updated`.
+    Other PR event keys (`pullrequest:approved`, `:fulfilled`, …) → **202**.
+- **Built on the PR HEAD, at the head branch ref.** The pipeline's SHA is the PR
+  **head commit** (GitHub `pull_request.head.sha`, Bitbucket
+  `pullrequest.source.commit.hash`) and the **compile ref is the head/source
+  branch** — so branch-keyed `only`/`except` and `rules` still apply, and the
+  commit status lands on the PR head (see below). Forge builds the committed HEAD
+  of the source branch, not a speculative merge commit.
+- **`CI_PIPELINE_SOURCE = merge_request`.** PR pipelines set the source to
+  `merge_request` (distinct from `push`/`webhook`), so you can route jobs to run
+  only on PRs:
+  ```yaml
+  jobs:
+    pr-lint:
+      stage: test
+      script: [make lint]
+      rules:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request"'
+  ```
+  On a plain push this job's rule does not match and it is excluded; on a PR it
+  is included.
+- **Merge-request context variables.** These are available both to `rules:` `if:`
+  expressions **and** in every job's environment (so scripts can read them):
+
+  | Variable | Value |
+  |---|---|
+  | `CI_PIPELINE_SOURCE` | `merge_request` |
+  | `CI_MERGE_REQUEST_IID` | PR/MR number (GitHub `number`, Bitbucket `pullrequest.id`) |
+  | `CI_MERGE_REQUEST_SOURCE_BRANCH` | head/source branch (also the compile ref) |
+  | `CI_MERGE_REQUEST_TARGET_BRANCH` | base/destination branch |
+  | `CI_MERGE_REQUEST_TITLE` | PR/MR title |
+
+  Example routing on the target branch:
+  ```yaml
+  rules:
+    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH == "main"'
+  ```
+- **`triggered_by`** is the PR author (GitHub `pull_request.user.login`,
+  Bitbucket `actor.nickname`/`display_name`).
+- **Auto-cancel of superseded PR pipelines.** Because PR pipelines compile at the
+  head-branch ref, the existing repo+ref auto-cancel applies: a new
+  `synchronize`/`:updated` (or a push to the same branch) supersedes the older,
+  still-running PR pipeline unless the YAML sets `auto_cancel: false`.
+- **Commit status on the PR head.** The status writer posts to the pipeline's
+  SHA, which for a PR pipeline **is** the PR head sha — so the pending/success
+  check appears directly on the PR with no extra configuration (see
+  [Commit status write-back](#commit-status-write-back)).
+- **Dedup and HMAC are unchanged.** GitHub PR deliveries are deduped by
+  `X-GitHub-Delivery` and still HMAC-verified (`X-Hub-Signature-256`) when
+  `WEBHOOK_SECRET` is set; Bitbucket by `X-Request-UUID`.
 
 ## Commit status write-back
 

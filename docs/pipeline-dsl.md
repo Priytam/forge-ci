@@ -16,10 +16,15 @@ include (templates) → extends (inheritance) → drop hidden jobs
    → needs wiring (with matrix fan-in) → validation
 ```
 
-Compilation is ref- and source-aware: `Compile(yaml, ref, source, resolver)`.
+Compilation is ref- and source-aware: `Compile(yaml, ref, source, resolver, [extra])`.
 `source` is `CI_PIPELINE_SOURCE` (`api` for `POST /api/v1/pipelines`, `webhook`
-for a VCS webhook trigger, `schedule` for a cron-scheduled run — see
+for a VCS push webhook, `merge_request` for a GitHub/Bitbucket pull-request
+webhook, `schedule` for a cron-scheduled run — see
 [docs/schedules.md](docs/schedules.md), `push` for config validation on save).
+The optional `extra` map carries source-specific context — for a `merge_request`
+pipeline the webhook handler passes the `CI_MERGE_REQUEST_*` variables here; they
+are visible to `rules:` `if:` expressions **and** injected into every job's env
+(see [vcs-integration.md](vcs-integration.md#prmr-triggered-pipelines)).
 
 ---
 

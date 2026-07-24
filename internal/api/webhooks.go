@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -241,7 +242,15 @@ func (s *Server) listRegisteredRepos(w http.ResponseWriter, r *http.Request) {
 // triggerFromWebhook compiles the repo's registered config and creates a
 // pipeline. It returns false (having written an error response) when nothing
 // was created, so the caller can roll back a recorded webhook delivery.
-func (s *Server) triggerFromWebhook(w http.ResponseWriter, r *http.Request, repo, ref, sha, author string) bool {
+//
+// source is the pipeline source threaded into rules if: as CI_PIPELINE_SOURCE
+// (push webhooks pass SourceWebhook; PR/MR webhooks pass SourceMergeRequest).
+// extraCtx carries source-specific context (the CI_MERGE_REQUEST_* vars for a
+// merge_request pipeline); it is visible to rules if: AND injected into every
+// job's Env. For a PR pipeline the caller passes the PR HEAD sha and the PR head
+// branch as ref, so only/except and rules matching the branch still work and the
+// commit status lands on the PR head sha.
+func (s *Server) triggerFromWebhook(w http.ResponseWriter, r *http.Request, repo, ref, sha, author, source string, extraCtx map[string]string) bool {
 	if repo == "" || ref == "" || sha == "" {
 		writeErr(w, http.StatusBadRequest, "payload missing repo/ref/sha")
 		return false
@@ -256,7 +265,7 @@ func (s *Server) triggerFromWebhook(w http.ResponseWriter, r *http.Request, repo
 		writeErr(w, http.StatusInternalServerError, "failed to load repo config")
 		return false
 	}
-	jobs, err := compiler.Compile(config, ref, compiler.SourceWebhook, s.store.TemplateResolver(r.Context(), repo))
+	jobs, err := compiler.Compile(config, ref, source, s.store.TemplateResolver(r.Context(), repo), extraCtx)
 	if err != nil {
 		writeErr(w, http.StatusUnprocessableEntity, "pipeline config error: "+err.Error())
 		return false
@@ -304,8 +313,9 @@ func (s *Server) dedupDelivery(w http.ResponseWriter, r *http.Request, provider,
 	return true, created
 }
 
-// githubWebhook handles push events. If WEBHOOK_SECRET is set, the
-// X-Hub-Signature-256 HMAC is verified.
+// githubWebhook handles push and pull_request events. If WEBHOOK_SECRET is set,
+// the X-Hub-Signature-256 HMAC is verified. The X-GitHub-Event header selects
+// the handler; any other event is acknowledged (202) and ignored.
 func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
@@ -321,10 +331,18 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if ev := r.Header.Get("X-GitHub-Event"); ev != "" && ev != "push" {
-		w.WriteHeader(http.StatusAccepted) // ignore non-push events politely
-		return
+	switch r.Header.Get("X-GitHub-Event") {
+	case "", "push":
+		s.githubPush(w, r, body)
+	case "pull_request":
+		s.githubPullRequest(w, r, body)
+	default:
+		w.WriteHeader(http.StatusAccepted) // ignore other events politely
 	}
+}
+
+// githubPush creates a pipeline for a branch/tag push at the pushed sha.
+func (s *Server) githubPush(w http.ResponseWriter, r *http.Request, body []byte) {
 	var payload struct {
 		Ref        string `json:"ref"` // refs/heads/main
 		After      string `json:"after"`
@@ -356,7 +374,117 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 	}()
 	ref := strings.TrimPrefix(payload.Ref, "refs/heads/")
 	ref = strings.TrimPrefix(ref, "refs/tags/")
-	*created = s.triggerFromWebhook(w, r, payload.Repository.FullName, ref, payload.After, payload.Pusher.Name)
+	*created = s.triggerFromWebhook(w, r, payload.Repository.FullName, ref, payload.After, payload.Pusher.Name, compiler.SourceWebhook, nil)
+}
+
+// prTrigger is the normalized subset of a PR/MR webhook payload needed to build
+// a merge_request pipeline, shared by the GitHub and Bitbucket PR handlers.
+type prTrigger struct {
+	Action       string // provider action (GitHub); "" for Bitbucket (event key gates instead)
+	Repo         string // owner/name
+	IID          int    // PR/MR number
+	Title        string
+	SourceBranch string // PR head branch — used as the compile ref
+	TargetBranch string // PR base branch
+	HeadSHA      string // PR head commit — the pipeline sha (status lands here)
+	Author       string
+}
+
+// parseGitHubPR extracts a prTrigger from a GitHub pull_request payload.
+func parseGitHubPR(body []byte) (prTrigger, error) {
+	var payload struct {
+		Action      string `json:"action"`
+		Number      int    `json:"number"`
+		PullRequest struct {
+			Title string `json:"title"`
+			Head  struct {
+				SHA string `json:"sha"`
+				Ref string `json:"ref"`
+			} `json:"head"`
+			Base struct {
+				Ref string `json:"ref"`
+			} `json:"base"`
+			User struct {
+				Login string `json:"login"`
+			} `json:"user"`
+		} `json:"pull_request"`
+		Repository struct {
+			FullName string `json:"full_name"`
+		} `json:"repository"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return prTrigger{}, err
+	}
+	pr := payload.PullRequest
+	return prTrigger{
+		Action:       payload.Action,
+		Repo:         payload.Repository.FullName,
+		IID:          payload.Number,
+		Title:        pr.Title,
+		SourceBranch: pr.Head.Ref,
+		TargetBranch: pr.Base.Ref,
+		HeadSHA:      pr.Head.SHA,
+		Author:       pr.User.Login,
+	}, nil
+}
+
+// githubPullRequest creates a merge_request pipeline for a pull_request event.
+// It runs only on the opened / synchronize / reopened actions (all others are
+// acknowledged with 202 and ignored). The pipeline is built on the PR HEAD sha
+// with the PR head branch as the compile ref — so branch-keyed only/except and
+// rules still apply and the commit status lands on the PR head — while
+// CI_PIPELINE_SOURCE is forced to merge_request and the CI_MERGE_REQUEST_* vars
+// are threaded into rules and job env.
+func (s *Server) githubPullRequest(w http.ResponseWriter, r *http.Request, body []byte) {
+	pr, err := parseGitHubPR(body)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON payload")
+		return
+	}
+	if !prActionTriggers(pr.Action) {
+		w.WriteHeader(http.StatusAccepted) // opened/synchronize/reopened only
+		return
+	}
+	deliveryID := r.Header.Get("X-GitHub-Delivery")
+	if deliveryID == "" {
+		deliveryID = bodyHash(body)
+	}
+	proceed, created := s.dedupDelivery(w, r, "github", deliveryID)
+	if !proceed {
+		return
+	}
+	defer func() {
+		if !*created {
+			_ = s.store.ForgetWebhookDelivery(r.Context(), "github", deliveryID)
+		}
+	}()
+	ctx := mergeRequestContext(pr.IID, pr.SourceBranch, pr.TargetBranch, pr.Title)
+	*created = s.triggerFromWebhook(w, r, pr.Repo,
+		pr.SourceBranch, pr.HeadSHA, pr.Author, compiler.SourceMergeRequest, ctx)
+}
+
+// prActionTriggers reports whether a GitHub pull_request / Bitbucket pull-request
+// action should (re)build a pipeline. Only opened, (re)synchronize and reopened
+// do; closed/merged/edited/labeled/etc. are ignored.
+func prActionTriggers(action string) bool {
+	switch action {
+	case "opened", "synchronize", "reopened":
+		return true
+	}
+	return false
+}
+
+// mergeRequestContext builds the CI_MERGE_REQUEST_* context for a PR/MR pipeline.
+// It also pins CI_PIPELINE_SOURCE=merge_request so the value is present in job env
+// (Compile already sets it in the rules context from the source argument).
+func mergeRequestContext(iid int, sourceBranch, targetBranch, title string) map[string]string {
+	return map[string]string{
+		"CI_PIPELINE_SOURCE":             compiler.SourceMergeRequest,
+		"CI_MERGE_REQUEST_IID":           strconv.Itoa(iid),
+		"CI_MERGE_REQUEST_SOURCE_BRANCH": sourceBranch,
+		"CI_MERGE_REQUEST_TARGET_BRANCH": targetBranch,
+		"CI_MERGE_REQUEST_TITLE":         title,
+	}
 }
 
 // bodyHash is the fallback delivery id when a provider sends no delivery header.
@@ -365,13 +493,27 @@ func bodyHash(body []byte) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-// bitbucketWebhook handles repo:push events (Bitbucket Cloud payload shape).
+// bitbucketWebhook handles repo:push and pull-request events (Bitbucket Cloud
+// payload shape). The X-Event-Key header selects the handler; any other event is
+// acknowledged (202) and ignored.
 func (s *Server) bitbucketWebhook(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "unreadable body")
 		return
 	}
+	switch r.Header.Get("X-Event-Key") {
+	case "", "repo:push":
+		s.bitbucketPush(w, r, body)
+	case "pullrequest:created", "pullrequest:updated":
+		s.bitbucketPullRequest(w, r, body)
+	default:
+		w.WriteHeader(http.StatusAccepted) // ignore other events politely
+	}
+}
+
+// bitbucketPush creates a pipeline for a repo:push at the pushed sha.
+func (s *Server) bitbucketPush(w http.ResponseWriter, r *http.Request, body []byte) {
 	var payload struct {
 		Repository struct {
 			FullName string `json:"full_name"`
@@ -418,7 +560,86 @@ func (s *Server) bitbucketWebhook(w http.ResponseWriter, r *http.Request) {
 	if author == "" {
 		author = payload.Actor.DisplayName
 	}
-	*created = s.triggerFromWebhook(w, r, payload.Repository.FullName, change.Name, change.Target.Hash, author)
+	*created = s.triggerFromWebhook(w, r, payload.Repository.FullName, change.Name, change.Target.Hash, author, compiler.SourceWebhook, nil)
+}
+
+// parseBitbucketPR extracts a prTrigger from a Bitbucket pull-request payload.
+// Action is left empty — the X-Event-Key header (not a payload field) gates which
+// Bitbucket PR events trigger a build.
+func parseBitbucketPR(body []byte) (prTrigger, error) {
+	var payload struct {
+		Repository struct {
+			FullName string `json:"full_name"`
+		} `json:"repository"`
+		Actor struct {
+			Nickname    string `json:"nickname"`
+			DisplayName string `json:"display_name"`
+		} `json:"actor"`
+		PullRequest struct {
+			ID     int    `json:"id"`
+			Title  string `json:"title"`
+			Source struct {
+				Branch struct {
+					Name string `json:"name"`
+				} `json:"branch"`
+				Commit struct {
+					Hash string `json:"hash"`
+				} `json:"commit"`
+			} `json:"source"`
+			Destination struct {
+				Branch struct {
+					Name string `json:"name"`
+				} `json:"branch"`
+			} `json:"destination"`
+		} `json:"pullrequest"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return prTrigger{}, err
+	}
+	author := payload.Actor.Nickname
+	if author == "" {
+		author = payload.Actor.DisplayName
+	}
+	pr := payload.PullRequest
+	return prTrigger{
+		Repo:         payload.Repository.FullName,
+		IID:          pr.ID,
+		Title:        pr.Title,
+		SourceBranch: pr.Source.Branch.Name,
+		TargetBranch: pr.Destination.Branch.Name,
+		HeadSHA:      pr.Source.Commit.Hash,
+		Author:       author,
+	}, nil
+}
+
+// bitbucketPullRequest creates a merge_request pipeline for a pullrequest:created
+// or pullrequest:updated event, built on the PR source-branch tip commit with the
+// source branch as the compile ref (same head-sha / branch-ref semantics as the
+// GitHub PR path). CI_PIPELINE_SOURCE=merge_request and the CI_MERGE_REQUEST_*
+// vars are threaded into rules and job env.
+func (s *Server) bitbucketPullRequest(w http.ResponseWriter, r *http.Request, body []byte) {
+	pr, err := parseBitbucketPR(body)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON payload")
+		return
+	}
+	// Dedup: Bitbucket sends X-Request-UUID; fall back to a hash of the body.
+	deliveryID := r.Header.Get("X-Request-UUID")
+	if deliveryID == "" {
+		deliveryID = bodyHash(body)
+	}
+	proceed, created := s.dedupDelivery(w, r, "bitbucket", deliveryID)
+	if !proceed {
+		return
+	}
+	defer func() {
+		if !*created {
+			_ = s.store.ForgetWebhookDelivery(r.Context(), "bitbucket", deliveryID)
+		}
+	}()
+	ctx := mergeRequestContext(pr.IID, pr.SourceBranch, pr.TargetBranch, pr.Title)
+	*created = s.triggerFromWebhook(w, r, pr.Repo,
+		pr.SourceBranch, pr.HeadSHA, pr.Author, compiler.SourceMergeRequest, ctx)
 }
 
 // ---- registered pipeline configs ----
