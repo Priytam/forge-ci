@@ -4,6 +4,16 @@ A GitLab-style CI/CD engine: YAML pipelines compiled to a job DAG, a
 Postgres-backed scheduler, pull-based runners with pluggable executors, an
 approval gate for protected environments, and a React dashboard.
 
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+
+**Apache-2.0 licensed.** Any organisation — commercial, enterprise, government,
+academic or individual — may clone, run, modify, self-host, redistribute and
+contribute to Forge CI, for internal or commercial use, free of charge and
+without asking permission. The licence includes an express patent grant, and
+there is **no CLA to sign** — contributions use a DCO sign-off instead. See
+[LICENSE](LICENSE), [CONTRIBUTING.md](CONTRIBUTING.md) and
+[SECURITY.md](SECURITY.md).
+
 Monorepo with three deployables:
 
 | Deployable | Path | What it is |
@@ -467,3 +477,30 @@ provides the fallback CI. Full walkthrough: [docs/self-hosted-ci.md](docs/self-h
 - Scheduled (cron) pipelines are supported — see [docs/schedules.md](docs/schedules.md).
   Caching, `rules:`, `include:`, `extends:`, matrix, and retries are all supported
   too — see [docs/pipeline-dsl.md](docs/pipeline-dsl.md).
+
+## Using Forge CI in your organisation
+
+Forge CI is released under the [Apache License 2.0](LICENSE). In practice that
+means you may:
+
+- **Run it internally**, at any scale, commercially, with no fee and no licence key.
+- **Fork and modify it**, including keeping your changes private.
+- **Redistribute it**, as source or binaries, inside or outside your company.
+- **Build commercial products on it**, including hosted or managed offerings.
+
+Your obligations are the ordinary Apache-2.0 ones: keep the `LICENSE` and
+`NOTICE` files with any redistribution, state significant changes you made, and
+retain existing copyright and attribution notices. The licence grants patent
+rights explicitly, and disclaims warranty — see the text for the authoritative
+terms.
+
+**Contributing back is welcome but not required.** There is no Contributor
+License Agreement; contributions are covered by Apache-2.0 section 5 and a
+[Developer Certificate of Origin](https://developercertificate.org/) sign-off
+(`git commit -s`). Contributions from company email addresses on company time
+are expected and fine, provided you have your employer's authorisation.
+
+Before a production or organisation-wide deployment, work through the hardening
+checklist in [SECURITY.md](SECURITY.md) — several defaults favour a frictionless
+local experience over a safe shared one, and the known gaps (no SAML, no SCIM,
+no roles above login) are listed there in full.
