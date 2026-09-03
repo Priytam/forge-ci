@@ -258,7 +258,7 @@ examples, and the honest `changes:` / `exists:` / remote-include limitations.
 
 ## Quickstart (local dev)
 
-Requires Go 1.24+, Node 22+, Docker (for Postgres).
+Requires Go 1.25+ (see `go.mod`), Node 22+, Docker (for Postgres).
 
 ```sh
 make setup      # postgres container + go deps + npm install

@@ -100,7 +100,7 @@ with the workspace bind-mounted and networking disabled.
    ```yaml
    unit-tests:
      stage: test
-     image: golang:1.24
+     image: golang:1.25
      script: [go test ./...]
    ```
 

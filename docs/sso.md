@@ -132,8 +132,11 @@ of the cookie's `SameSite=Lax`.
   `UPDATE sso_providers SET enabled=false;` (takes effect within ~5s).
 - Sessions last 12h, are HttpOnly cookies backed by server-side rows, and can
   be revoked by deleting from the `sessions` table.
-- Secrets are write-only through the API (reads return `has_secret`), stored
-  plaintext in Postgres today — same encrypt-at-rest caveat as CI variables.
+- Secrets are write-only through the API (reads return `has_secret`). Client
+  secrets are encrypted at rest with AES-256-GCM when `FORGE_SECRET_KEY` is set
+  (marked by an `enc:v1:` prefix; any plaintext rows are re-encrypted on every
+  start). **Without that key they are stored in plaintext** — same caveat as CI
+  variables. See the "Secrets at rest" note in the README.
 - What this is not yet: no roles on top of login (any signed-in user can
   reach admin pages — repo-role checks still apply to approvals), no SAML,
   no SCIM provisioning, no session-idle timeout. Listed in the roadmap.
