@@ -3,3 +3,6 @@ data/
 web/node_modules/
 web/dist/
 .DS_Store
+
+# local dev env (contains a secret key)
+dev.env
