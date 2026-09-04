@@ -176,7 +176,7 @@ export interface Schedule {
   next_run_at: string | null;
 }
 
-export type RepoProvider = "github" | "bitbucket" | "other";
+export type RepoProvider = "github" | "bitbucket" | "codecommit" | "other";
 
 export interface RegisteredRepo {
   repo: string;
@@ -188,6 +188,10 @@ export interface RegisteredRepo {
   has_github_app?: boolean;
   github_app_id?: string;
   github_installation_id?: string;
+  /** CodeCommit only. Non-secret: CodeCommit access is IAM-signed, not tokenised. */
+  aws_region?: string;
+  aws_profile?: string;
+  aws_role_arn?: string;
 }
 
 export interface RepoRegistryInput {
@@ -199,6 +203,10 @@ export interface RepoRegistryInput {
   github_app_id?: string;
   github_installation_id?: string;
   github_app_private_key?: string;
+  /** CodeCommit only; aws_region is required for that provider. */
+  aws_region?: string;
+  aws_profile?: string;
+  aws_role_arn?: string;
 }
 
 export interface RepoSummary {

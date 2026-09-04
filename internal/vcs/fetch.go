@@ -36,11 +36,13 @@ type FetchRequest struct {
 	Token    string // plaintext auth; "" fetches anonymously (public repo)
 
 	// CodeCommit only. There is no token: the call is SigV4-signed with the
-	// control plane's own AWS identity. CloneURL carries the region (and any
-	// named profile), so a CodeCommit repo needs no second place to configure it;
-	// RoleARN, when set, is assumed before the call so one Forge deployment can
-	// read repositories across accounts.
+	// control plane's own AWS identity. Region and Profile are authoritative when
+	// set; otherwise they are read off CloneURL, so a connection registered by URL
+	// alone still resolves. RoleARN, when set, is assumed before the call so one
+	// Forge deployment can read repositories across accounts.
 	CloneURL string
+	Region   string
+	Profile  string
 	RoleARN  string
 }
 
@@ -81,7 +83,16 @@ func (f *Fetcher) FetchFile(ctx context.Context, req FetchRequest) (content []by
 	// rather than an HTTP request with an Authorization header.
 	if req.Provider == "codecommit" {
 		repo, ok := ParseCodeCommitURL(req.CloneURL)
-		if !ok {
+		// An explicitly registered region/profile wins over whatever the clone URL
+		// encodes; the URL is the fall-back for URL-only registrations.
+		if req.Region != "" {
+			repo.Region = req.Region
+			ok = ok || repo.Name != ""
+		}
+		if req.Profile != "" {
+			repo.Profile = req.Profile
+		}
+		if !ok || repo.Region == "" || repo.Name == "" {
 			// Without a region there is nothing to call. This surfaces as an
 			// error rather than a silent miss so the misregistration is visible;
 			// ResolvePipelineConfig still logs it and falls back to the

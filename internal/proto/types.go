@@ -129,9 +129,11 @@ type DependencyArtifact struct {
 // connection authenticates via EITHER a static token (PAT) OR a GitHub App
 // (app id + private key + installation id); when App fields are configured they
 // take precedence and Forge mints short-lived installation tokens on demand.
+// CodeCommit is the exception: it holds no credential at all and is reached with
+// an AWS identity resolved at call time (see the AWS* fields).
 type RepoRegistration struct {
 	Repo          string    `json:"repo"`
-	Provider      string    `json:"provider"` // github | bitbucket | other
+	Provider      string    `json:"provider"` // github | bitbucket | codecommit | other
 	CloneURL      string    `json:"clone_url"`
 	Token         string    `json:"token,omitempty"` // write-only; never returned
 	HasToken      bool      `json:"has_token"`
@@ -145,6 +147,16 @@ type RepoRegistration struct {
 	GitHubInstallationID string `json:"github_installation_id,omitempty"`
 	GitHubAppPrivateKey  string `json:"github_app_private_key,omitempty"` // write-only; never returned
 	HasGitHubApp         bool   `json:"has_github_app"`
+
+	// AWS CodeCommit (codecommit only). CodeCommit has no token — every call is
+	// SigV4-signed with an AWS identity — so none of these are secret and all
+	// three ARE returned by the API. AWSRegion is required (it is also encoded in
+	// the derived clone URL); AWSProfile and AWSRoleARN scope the CONTROL PLANE's
+	// identity. The runner authenticates separately and keylessly via per-job
+	// OIDC, so nothing here is a credential.
+	AWSRegion  string `json:"aws_region,omitempty"`
+	AWSProfile string `json:"aws_profile,omitempty"`
+	AWSRoleARN string `json:"aws_role_arn,omitempty"`
 
 	// config-from-repo. ConfigSource is 'repo' (prefer the in-repo .forge-ci.yml
 	// fetched at the event sha, fall back to the registered config) or

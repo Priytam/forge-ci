@@ -216,3 +216,27 @@ func awsErrCode(err error) string {
 	}
 	return "request failed"
 }
+
+// checkAccess proves that a CodeCommit repository is reachable with the
+// resolved AWS identity, using the cheapest call that exercises the same path
+// config-from-repo will take. It is the CodeCommit stand-in for the git
+// ls-remote the HTTPS providers validate with: git cannot reach CodeCommit
+// without IAM-signed git auth on the control-plane host, which Forge does not
+// require of an operator. The error carries the AWS error code only.
+func (c *ccClients) checkAccess(ctx context.Context, repo CodeCommitRepo, roleARN string) error {
+	cl, err := c.client(ctx, repo.Region, roleARN, repo.Profile)
+	if err != nil {
+		return err
+	}
+	if _, err := cl.GetRepository(ctx, &codecommit.GetRepositoryInput{
+		RepositoryName: aws.String(repo.Name),
+	}); err != nil {
+		return errors.New(awsErrCode(err))
+	}
+	return nil
+}
+
+// CheckCodeCommitAccess verifies a CodeCommit registration before it is saved.
+func (f *Fetcher) CheckCodeCommitAccess(ctx context.Context, repo CodeCommitRepo, roleARN string) error {
+	return f.cc.checkAccess(ctx, repo, roleARN)
+}

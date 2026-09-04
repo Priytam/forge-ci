@@ -137,12 +137,12 @@ func (s *Store) ReleaseStatusPost(ctx context.Context, pipelineID int64, status 
 // The token is used only for outbound VCS API calls (Authorization header) — it
 // is never returned over Forge's own HTTP API and never logged.
 func (s *Store) RepoStatusTarget(ctx context.Context, repo string) (provider, token string, ok bool, err error) {
-	provider, _, token, found, err := s.resolveRepoAuth(ctx, repo)
+	conn, found, err := s.resolveRepoAuth(ctx, repo)
 	if err != nil {
 		return "", "", false, err
 	}
 	if !found {
 		return "", "", false, nil
 	}
-	return provider, token, true, nil
+	return conn.Provider, conn.Token, true, nil
 }

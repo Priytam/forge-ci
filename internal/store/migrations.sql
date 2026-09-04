@@ -161,7 +161,7 @@ ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS fail_fast BOOLEAN NOT NULL DEFAUL
 -- API, never logged). Plaintext at rest for now — same caveat as variables.
 CREATE TABLE IF NOT EXISTS repo_registry (
     repo           TEXT PRIMARY KEY,
-    provider       TEXT NOT NULL CHECK (provider IN ('github','bitbucket','other')),
+    provider       TEXT NOT NULL CHECK (provider IN ('github','bitbucket','codecommit','other')),
     clone_url      TEXT NOT NULL,
     token          TEXT NOT NULL DEFAULT '',
     default_branch TEXT NOT NULL DEFAULT 'main',
@@ -180,6 +180,28 @@ CREATE TABLE IF NOT EXISTS repo_registry (
 ALTER TABLE repo_registry ADD COLUMN IF NOT EXISTS github_app_id              TEXT NOT NULL DEFAULT '';
 ALTER TABLE repo_registry ADD COLUMN IF NOT EXISTS github_app_private_key     TEXT NOT NULL DEFAULT '';
 ALTER TABLE repo_registry ADD COLUMN IF NOT EXISTS github_app_installation_id TEXT NOT NULL DEFAULT '';
+
+-- AWS CodeCommit connections. CodeCommit has no token: every call (GetFile for
+-- config-from-repo, PostCommentForPullRequest for status, and the runner's git
+-- clone) is SigV4-signed with an AWS identity, so NOTHING SECRET is stored for a
+-- CodeCommit repo — these three columns are all non-secret and are returned by
+-- the API, unlike token / github_app_private_key.
+--   aws_region   the repository's region; also encoded in clone_url, which stays
+--                the fall-back source for connections registered by URL alone.
+--   aws_profile  optional named profile for the CONTROL PLANE's shared AWS config.
+--   aws_role_arn optional role the control plane assumes before calling
+--                CodeCommit, so one Forge deployment can serve repositories in
+--                several accounts. The RUNNER's role is separate and keyless
+--                (per-job OIDC -> AssumeRoleWithWebIdentity); see docs/codecommit.md.
+-- The provider CHECK is widened rather than replaced: DROP IF EXISTS then ADD
+-- keeps the migration idempotent on re-run, and existing rows are unaffected
+-- because the new value only widens the allowed set.
+ALTER TABLE repo_registry DROP CONSTRAINT IF EXISTS repo_registry_provider_check;
+ALTER TABLE repo_registry ADD CONSTRAINT repo_registry_provider_check
+    CHECK (provider IN ('github','bitbucket','codecommit','other'));
+ALTER TABLE repo_registry ADD COLUMN IF NOT EXISTS aws_region   TEXT NOT NULL DEFAULT '';
+ALTER TABLE repo_registry ADD COLUMN IF NOT EXISTS aws_profile  TEXT NOT NULL DEFAULT '';
+ALTER TABLE repo_registry ADD COLUMN IF NOT EXISTS aws_role_arn TEXT NOT NULL DEFAULT '';
 
 -- config-from-repo: where a repo's pipeline config comes from.
 --   'repo'       = prefer the in-repo .forge-ci.yml fetched (via the provider

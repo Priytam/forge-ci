@@ -2,13 +2,29 @@ import { useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { registerRepo, type RepoProvider } from "../api";
 
-function derivedCloneUrl(provider: RepoProvider, repo: string): string {
+function derivedCloneUrl(
+  provider: RepoProvider,
+  repo: string,
+  region: string
+): string {
   const name = repo.trim();
   if (!name) return "";
   if (provider === "github") return `https://github.com/${name}.git`;
   if (provider === "bitbucket") return `https://bitbucket.org/${name}.git`;
+  // git-remote-codecommit form; the runner signs it with SigV4 at clone time.
+  if (provider === "codecommit") {
+    const r = region.trim();
+    return r ? `codecommit::${r}://${name}` : "";
+  }
   return "";
 }
+
+const PROVIDER_LABEL: Record<RepoProvider, string> = {
+  github: "GitHub",
+  bitbucket: "Bitbucket",
+  codecommit: "CodeCommit",
+  other: "Other",
+};
 
 export default function AddRepo() {
   const navigate = useNavigate();
@@ -21,14 +37,21 @@ export default function AddRepo() {
   const [appId, setAppId] = useState("");
   const [installationId, setInstallationId] = useState("");
   const [appPrivateKey, setAppPrivateKey] = useState("");
+  const [awsRegion, setAwsRegion] = useState("");
+  const [awsRoleArn, setAwsRoleArn] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [connected, setConnected] = useState<string | null>(null);
 
   const autoUrl = provider !== "other";
-  const effectiveCloneUrl = autoUrl ? derivedCloneUrl(provider, repo) : cloneUrl;
+  const effectiveCloneUrl = autoUrl
+    ? derivedCloneUrl(provider, repo, awsRegion)
+    : cloneUrl;
   // GitHub App auth only applies to GitHub repos.
   const appMode = provider === "github" && authMethod === "app";
+  // CodeCommit holds no credential at all: it is reached with an AWS identity,
+  // so the token field is replaced by the region and an optional role.
+  const isCodeCommit = provider === "codecommit";
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -39,8 +62,14 @@ export default function AddRepo() {
         repo: repo.trim(),
         provider,
         clone_url: autoUrl ? undefined : cloneUrl.trim(),
-        token: appMode ? undefined : token || undefined,
+        token: appMode || isCodeCommit ? undefined : token || undefined,
         default_branch: branch.trim() || "main",
+        ...(isCodeCommit
+          ? {
+              aws_region: awsRegion.trim(),
+              aws_role_arn: awsRoleArn.trim() || undefined,
+            }
+          : {}),
         ...(appMode
           ? {
               github_app_id: appId.trim(),
@@ -120,18 +149,25 @@ export default function AddRepo() {
             >
               <option value="github">GitHub</option>
               <option value="bitbucket">Bitbucket</option>
+              <option value="codecommit">AWS CodeCommit</option>
               <option value="other">Other</option>
             </select>
           </label>
           <label className="field">
-            <span>Repository full name</span>
+            <span>{isCodeCommit ? "Repository name" : "Repository full name"}</span>
             <input
               className="mono"
-              placeholder="owner/name"
+              placeholder={isCodeCommit ? "my-service" : "owner/name"}
               value={repo}
               onChange={(e) => setRepo(e.target.value)}
               required
             />
+            {isCodeCommit && (
+              <span className="field-hint">
+                The CodeCommit repository name alone — no owner/ prefix. It must
+                match the repositoryName in the EventBridge event.
+              </span>
+            )}
           </label>
         </div>
 
@@ -147,10 +183,40 @@ export default function AddRepo() {
           />
           {autoUrl && (
             <span className="field-hint">
-              Derived from the repo full name for {provider === "github" ? "GitHub" : "Bitbucket"}.
+              Derived from the repo {isCodeCommit ? "name and region" : "full name"}{" "}
+              for {PROVIDER_LABEL[provider]}.
             </span>
           )}
         </label>
+
+        {isCodeCommit && (
+          <div className="form-row">
+            <label className="field">
+              <span>AWS region</span>
+              <input
+                className="mono"
+                placeholder="ap-south-1"
+                value={awsRegion}
+                onChange={(e) => setAwsRegion(e.target.value)}
+                required
+              />
+            </label>
+            <label className="field">
+              <span>Role ARN (optional)</span>
+              <input
+                className="mono"
+                placeholder="arn:aws:iam::123456789012:role/forge-codecommit-read"
+                value={awsRoleArn}
+                onChange={(e) => setAwsRoleArn(e.target.value)}
+              />
+              <span className="field-hint">
+                Assumed by the control plane to read .forge-ci.yml. Leave empty to
+                use its own identity. Runners authenticate separately and
+                keylessly via per-job OIDC.
+              </span>
+            </label>
+          </div>
+        )}
 
         {provider === "github" && (
           <div className="field">
@@ -221,6 +287,21 @@ export default function AddRepo() {
               />
             </label>
           </>
+        ) : isCodeCommit ? (
+          <div className="form-row">
+            <label className="field">
+              <span>Default branch</span>
+              <input
+                className="mono"
+                value={branch}
+                onChange={(e) => setBranch(e.target.value)}
+              />
+              <span className="field-hint">
+                CodeCommit stores no token: every call is IAM-signed, so there is
+                no credential for Forge to hold.
+              </span>
+            </label>
+          </div>
         ) : (
           <div className="form-row">
             <label className="field">

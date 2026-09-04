@@ -36,12 +36,16 @@ func (s *Store) RegisterRepo(ctx context.Context, r proto.RepoRegistration) erro
 	if configSource == "" {
 		configSource = "repo" // default: config rides in the commit/PR
 	}
+	// The AWS columns hold nothing secret, so unlike token / private key they are
+	// overwritten from the request rather than preserved when empty — clearing a
+	// role_arn must actually clear it.
 	_, err = s.pool.Exec(ctx,
 		`INSERT INTO repo_registry
 		     (repo, provider, clone_url, token, default_branch,
 		      github_app_id, github_app_private_key, github_app_installation_id,
-		      config_source, config_path)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+		      config_source, config_path,
+		      aws_region, aws_profile, aws_role_arn)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 		 ON CONFLICT (repo) DO UPDATE SET
 		   provider = EXCLUDED.provider,
 		   clone_url = EXCLUDED.clone_url,
@@ -52,21 +56,27 @@ func (s *Store) RegisterRepo(ctx context.Context, r proto.RepoRegistration) erro
 		       THEN repo_registry.github_app_private_key ELSE EXCLUDED.github_app_private_key END,
 		   github_app_installation_id = EXCLUDED.github_app_installation_id,
 		   config_source = EXCLUDED.config_source,
-		   config_path = EXCLUDED.config_path`,
+		   config_path = EXCLUDED.config_path,
+		   aws_region = EXCLUDED.aws_region,
+		   aws_profile = EXCLUDED.aws_profile,
+		   aws_role_arn = EXCLUDED.aws_role_arn`,
 		r.Repo, r.Provider, r.CloneURL, encToken, r.DefaultBranch,
 		r.GitHubAppID, encKey, r.GitHubInstallationID,
-		configSource, r.ConfigPath)
+		configSource, r.ConfigPath,
+		r.AWSRegion, r.AWSProfile, r.AWSRoleARN)
 	return err
 }
 
 // ListRegisteredRepos returns registrations with secrets replaced by has-* flags.
 // The token and the GitHub App private key are NEVER returned; app_id and
-// installation_id (not secret) are.
+// installation_id (not secret) are, as are the AWS region/profile/role — a
+// CodeCommit connection stores no secret at all.
 func (s *Store) ListRegisteredRepos(ctx context.Context) ([]proto.RepoRegistration, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT repo, provider, clone_url, token <> '', default_branch, created_at,
 		        github_app_id, github_app_installation_id, github_app_id <> '',
-		        config_source, config_path
+		        config_source, config_path,
+		        aws_region, aws_profile, aws_role_arn
 		 FROM repo_registry ORDER BY repo`)
 	if err != nil {
 		return nil, err
@@ -78,7 +88,8 @@ func (s *Store) ListRegisteredRepos(ctx context.Context) ([]proto.RepoRegistrati
 		if err := rows.Scan(&r.Repo, &r.Provider, &r.CloneURL, &r.HasToken,
 			&r.DefaultBranch, &r.CreatedAt,
 			&r.GitHubAppID, &r.GitHubInstallationID, &r.HasGitHubApp,
-			&r.ConfigSource, &r.ConfigPath); err != nil {
+			&r.ConfigSource, &r.ConfigPath,
+			&r.AWSRegion, &r.AWSProfile, &r.AWSRoleARN); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -86,45 +97,88 @@ func (s *Store) ListRegisteredRepos(ctx context.Context) ([]proto.RepoRegistrati
 	return out, rows.Err()
 }
 
-// resolveRepoAuth loads a repo's connection and returns its provider, raw clone
-// URL, and a ready-to-use plaintext token — a static PAT, or a freshly minted
-// (and cached) GitHub App installation token when the repo is App-authed. App
-// auth takes precedence when configured. found is false when the repo isn't
-// registered; token is "" for a public repo with neither a PAT nor an App. The
-// token is returned only for building an authed clone URL / Authorization header
-// — never logged, never returned by Forge's own API.
-func (s *Store) resolveRepoAuth(ctx context.Context, repo string) (provider, cloneURL, token string, found bool, err error) {
-	var rawURL, encToken, appID, encKey, installID string
+// repoConn is a repo's resolved VCS connection: everything needed to reach the
+// origin, with any credential already decrypted or minted.
+type repoConn struct {
+	Provider string // github | bitbucket | codecommit | other
+	CloneURL string // as registered, without embedded credentials
+	Token    string // PAT or minted App token; always "" for codecommit
+	AWS      awsConn
+}
+
+// awsConn is the AWS context for a CodeCommit connection. None of it is secret:
+// the identity itself comes from the control plane's credential chain at call
+// time, so these three only say WHERE to look and WHICH role to wear.
+type awsConn struct {
+	Region  string
+	Profile string
+	RoleARN string
+}
+
+// codeCommitRepo resolves the CodeCommit coordinates for this connection.
+// The registered aws_region/aws_profile columns are authoritative; a connection
+// registered by clone URL alone (or predating those columns) falls back to the
+// region encoded in the URL, so both registration styles work.
+func (c repoConn) codeCommitRepo() (vcs.CodeCommitRepo, bool) {
+	parsed, ok := vcs.ParseCodeCommitURL(c.CloneURL)
+	if c.AWS.Region != "" {
+		parsed.Region = c.AWS.Region
+		ok = ok || parsed.Name != ""
+	}
+	if c.AWS.Profile != "" {
+		parsed.Profile = c.AWS.Profile
+	}
+	return parsed, ok && parsed.Region != "" && parsed.Name != ""
+}
+
+// resolveRepoAuth loads a repo's connection with a ready-to-use credential — a
+// static PAT, or a freshly minted (and cached) GitHub App installation token
+// when the repo is App-authed. App auth takes precedence when configured. found
+// is false when the repo isn't registered; Token is "" for a public repo with
+// neither a PAT nor an App, and always "" for CodeCommit, which authenticates
+// with an AWS identity instead of a credential Forge holds. The token is
+// returned only for building an authed clone URL / Authorization header — never
+// logged, never returned by Forge's own API.
+func (s *Store) resolveRepoAuth(ctx context.Context, repo string) (conn repoConn, found bool, err error) {
+	var encToken, appID, encKey, installID string
 	err = s.pool.QueryRow(ctx,
 		`SELECT provider, clone_url, token,
-		        github_app_id, github_app_private_key, github_app_installation_id
+		        github_app_id, github_app_private_key, github_app_installation_id,
+		        aws_region, aws_profile, aws_role_arn
 		 FROM repo_registry WHERE repo=$1`, repo).
-		Scan(&provider, &rawURL, &encToken, &appID, &encKey, &installID)
+		Scan(&conn.Provider, &conn.CloneURL, &encToken, &appID, &encKey, &installID,
+			&conn.AWS.Region, &conn.AWS.Profile, &conn.AWS.RoleARN)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", "", "", false, nil
+		return repoConn{}, false, nil
 	}
 	if err != nil {
-		return "", "", "", false, err
+		return repoConn{}, false, err
+	}
+	// CodeCommit never carries a token; skip credential resolution entirely.
+	if conn.Provider == "codecommit" {
+		return conn, true, nil
 	}
 	// GitHub App auth takes precedence when fully configured.
 	if appID != "" && installID != "" && encKey != "" {
 		keyPEM, derr := s.cipher.Decrypt(encKey)
 		if derr != nil {
-			return "", "", "", false, derr
+			return repoConn{}, false, derr
 		}
 		tok, _, merr := s.appMinter.Token(ctx, githubapp.Config{
 			AppID: appID, PrivateKeyPEM: keyPEM, InstallationID: installID,
 		})
 		if merr != nil {
-			return "", "", "", false, merr
+			return repoConn{}, false, merr
 		}
-		return provider, rawURL, tok, true, nil
+		conn.Token = tok
+		return conn, true, nil
 	}
 	tok, derr := s.cipher.Decrypt(encToken)
 	if derr != nil {
-		return "", "", "", false, derr
+		return repoConn{}, false, derr
 	}
-	return provider, rawURL, tok, true, nil
+	conn.Token = tok
+	return conn, true, nil
 }
 
 // repoConfigSource returns a repo's config source ('repo' | 'registered') and
@@ -154,7 +208,7 @@ func (s *Store) repoConfigSource(ctx context.Context, repo string) (source, path
 // the provider has no supported contents API, or the file is absent (404) — all
 // "fall back to the registered config" cases. The token is never logged.
 func (s *Store) ConfigFromRepo(ctx context.Context, repo, sha, path string) (config string, found bool, err error) {
-	provider, cloneURL, token, registered, err := s.resolveRepoAuth(ctx, repo)
+	conn, registered, err := s.resolveRepoAuth(ctx, repo)
 	if err != nil {
 		return "", false, err
 	}
@@ -164,11 +218,13 @@ func (s *Store) ConfigFromRepo(ctx context.Context, repo, sha, path string) (con
 	if path == "" {
 		path = vcs.DefaultConfigPath
 	}
-	// CodeCommit takes no token: the clone URL carries the region the SigV4-signed
-	// GetFile call needs, and the identity is the control plane's own.
+	// CodeCommit takes no token: the region (from the registry, else the clone
+	// URL) and the optional role are what the SigV4-signed GetFile needs, and the
+	// identity behind it is the control plane's own.
 	content, ok, err := s.fetcher.FetchFile(ctx, vcs.FetchRequest{
-		Provider: provider, Repo: repo, SHA: sha, Path: path, Token: token,
-		CloneURL: cloneURL,
+		Provider: conn.Provider, Repo: repo, SHA: sha, Path: path, Token: conn.Token,
+		CloneURL: conn.CloneURL, Region: conn.AWS.Region, Profile: conn.AWS.Profile,
+		RoleARN: conn.AWS.RoleARN,
 	})
 	if err != nil {
 		return "", false, err
@@ -282,25 +338,47 @@ func (s *Store) ResolveRef(ctx context.Context, repo, ref string) (string, error
 // (see resolveRepoAuth) — the runner is handed a ready-to-use authed URL either
 // way.
 func (s *Store) cloneAuth(ctx context.Context, repo string) (cloneURL, token string, err error) {
-	provider, raw, tok, found, err := s.resolveRepoAuth(ctx, repo)
+	conn, found, err := s.resolveRepoAuth(ctx, repo)
 	if err != nil {
 		return "", "", err
 	}
 	if !found {
 		return "", "", nil
 	}
-	if tok == "" {
-		return raw, "", nil
+	// CodeCommit is handed to the runner unauthenticated on purpose: there is no
+	// token to embed, and the runner signs the clone with its own IAM identity.
+	// Falling through would splice a bogus x-access-token into the URL.
+	if conn.Provider == "codecommit" {
+		return conn.CloneURL, "", nil
 	}
-	u, perr := url.Parse(raw)
+	if conn.Token == "" {
+		return conn.CloneURL, "", nil
+	}
+	u, perr := url.Parse(conn.CloneURL)
 	if perr != nil || !strings.HasPrefix(u.Scheme, "http") {
-		return raw, tok, nil
+		return conn.CloneURL, conn.Token, nil
 	}
-	switch provider {
+	switch conn.Provider {
 	case "bitbucket":
-		u.User = url.UserPassword("x-token-auth", tok)
+		u.User = url.UserPassword("x-token-auth", conn.Token)
 	default: // github and generic HTTPS token auth
-		u.User = url.UserPassword("x-access-token", tok)
+		u.User = url.UserPassword("x-access-token", conn.Token)
 	}
-	return u.String(), tok, nil
+	return u.String(), conn.Token, nil
+}
+
+// ValidateCodeCommitAccess proves a CodeCommit registration is usable before it
+// is saved, standing in for the git ls-remote the HTTPS providers validate with.
+// It resolves the same AWS identity config-from-repo will later use, so a
+// registration that passes here is one whose .forge-ci.yml can actually be read.
+func (s *Store) ValidateCodeCommitAccess(ctx context.Context, r proto.RepoRegistration) error {
+	repo, ok := repoConn{
+		Provider: r.Provider,
+		CloneURL: r.CloneURL,
+		AWS:      awsConn{Region: r.AWSRegion, Profile: r.AWSProfile, RoleARN: r.AWSRoleARN},
+	}.codeCommitRepo()
+	if !ok {
+		return errors.New("could not determine the region and repository name")
+	}
+	return s.fetcher.CheckCodeCommitAccess(ctx, repo, r.AWSRoleARN)
 }

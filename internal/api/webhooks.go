@@ -21,6 +21,7 @@ import (
 	"github.com/priytamjeepandey/forge-ci/internal/compiler"
 	"github.com/priytamjeepandey/forge-ci/internal/proto"
 	"github.com/priytamjeepandey/forge-ci/internal/store"
+	"github.com/priytamjeepandey/forge-ci/internal/vcs"
 )
 
 // Forge is a standalone CI system — it does not host the repo. Pushes arrive
@@ -82,8 +83,10 @@ func (s *Server) listRepoTemplates(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"repo": repo, "templates": names})
 }
 
-// registerRepo connects a Forge repo to a real GitHub/Bitbucket repository.
-// Access is verified with git ls-remote before saving (skip with ?validate=0).
+// registerRepo connects a Forge repo to a real GitHub/Bitbucket/CodeCommit
+// repository. Access is verified before saving (skip with ?validate=0) — with
+// git ls-remote for the HTTPS providers, and with the CodeCommit API for
+// CodeCommit, which has no token for git to use.
 func (s *Server) registerRepo(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
@@ -107,13 +110,18 @@ func (s *Server) registerRepo(w http.ResponseWriter, r *http.Request) {
 		if req.CloneURL == "" {
 			req.CloneURL = "https://bitbucket.org/" + req.Repo + ".git"
 		}
+	case "codecommit":
+		if err := normalizeCodeCommitRegistration(&req); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	case "other":
 		if req.CloneURL == "" {
 			writeErr(w, http.StatusBadRequest, `provider "other" requires clone_url`)
 			return
 		}
 	default:
-		writeErr(w, http.StatusBadRequest, "provider must be github, bitbucket or other")
+		writeErr(w, http.StatusBadRequest, "provider must be github, bitbucket, codecommit or other")
 		return
 	}
 	if req.DefaultBranch == "" {
@@ -148,7 +156,19 @@ func (s *Server) registerRepo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.URL.Query().Get("validate") != "0" {
-		if appConfigured {
+		if req.Provider == "codecommit" {
+			// git ls-remote cannot reach CodeCommit without IAM-signed git auth on
+			// the control-plane host, which Forge does not require. The CodeCommit
+			// API is the honest equivalent: it proves the same identity, region and
+			// repository name resolve, using the very call config-from-repo makes.
+			if err := s.store.ValidateCodeCommitAccess(r.Context(), req); err != nil {
+				writeErr(w, http.StatusBadRequest,
+					"could not reach the CodeCommit repository "+
+						"(check aws_region, the repository name, and that the control plane's "+
+						"AWS identity has codecommit:GetRepository): "+err.Error())
+				return
+			}
+		} else if appConfigured {
 			// Prove the App config works: mint an installation token, then
 			// ls-remote with it. Errors never contain the key or token.
 			token, err := s.store.AppTokenForValidation(r.Context(),
@@ -202,7 +222,61 @@ func repoRegistryAuditDetail(req proto.RepoRegistration) map[string]any {
 		detail["installation_id"] = req.GitHubInstallationID
 		// The private key is NEVER recorded.
 	}
+	if req.Provider == "codecommit" {
+		// All three are non-secret: they name where the repo lives and which role
+		// to wear, never a credential.
+		detail["aws_region"] = req.AWSRegion
+		detail["aws_profile"] = req.AWSProfile
+		detail["aws_role_arn"] = req.AWSRoleARN
+	}
 	return detail
+}
+
+// normalizeCodeCommitRegistration validates and fills in a CodeCommit
+// registration in place, so the rules are testable without standing up a server.
+//
+// CodeCommit needs a region, not a token. The region may arrive explicitly or
+// encoded in a clone URL of either accepted form; whichever way it comes, both
+// the region field and the clone URL are filled in from the other, so the
+// registry record and the derived URL can never disagree later.
+func normalizeCodeCommitRegistration(req *proto.RepoRegistration) error {
+	req.AWSRegion = strings.TrimSpace(req.AWSRegion)
+	req.AWSProfile = strings.TrimSpace(req.AWSProfile)
+	req.AWSRoleARN = strings.TrimSpace(req.AWSRoleARN)
+	req.CloneURL = strings.TrimSpace(req.CloneURL)
+
+	// Nothing secret is ever stored for a CodeCommit repo. A token here would be
+	// dead weight at best and a needlessly stored credential at worst.
+	if req.Token != "" {
+		return errors.New(`provider "codecommit" takes no token — access is IAM-signed ` +
+			"(set aws_role_arn to assume a role instead)")
+	}
+	// The Forge repo key IS the CodeCommit repository name; an owner/name key
+	// would never match the repositoryName an EventBridge event carries.
+	if strings.Contains(req.Repo, "/") {
+		return errors.New("a CodeCommit repo key is the repository name alone, " +
+			"with no owner/ prefix")
+	}
+	if parsed, ok := vcs.ParseCodeCommitURL(req.CloneURL); ok {
+		if req.AWSRegion == "" {
+			req.AWSRegion = parsed.Region
+		}
+		if req.AWSProfile == "" {
+			req.AWSProfile = parsed.Profile
+		}
+	} else if req.CloneURL != "" {
+		return errors.New(`provider "codecommit" clone_url must be ` +
+			"codecommit::<region>://<repo> or " +
+			"https://git-codecommit.<region>.amazonaws.com/v1/repos/<repo>")
+	}
+	if req.AWSRegion == "" {
+		return errors.New(`provider "codecommit" requires aws_region ` +
+			"(or a clone_url that encodes it)")
+	}
+	if req.CloneURL == "" {
+		req.CloneURL = vcs.CodeCommitCloneURL(req.AWSRegion, req.Repo)
+	}
+	return nil
 }
 
 // validateCloneAccess runs git ls-remote against the PAT-authenticated URL.

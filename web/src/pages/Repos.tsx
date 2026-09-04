@@ -16,7 +16,13 @@ const MAX_REF_CHIPS = 3;
 export function ProviderChip({ provider }: { provider: string | null }) {
   if (!provider) return null;
   const label =
-    provider === "github" ? "GitHub" : provider === "bitbucket" ? "Bitbucket" : "Git";
+    provider === "github"
+      ? "GitHub"
+      : provider === "bitbucket"
+        ? "Bitbucket"
+        : provider === "codecommit"
+          ? "CodeCommit"
+          : "Git";
   return <span className={`provider-chip provider-${provider}`}>{label}</span>;
 }
 
