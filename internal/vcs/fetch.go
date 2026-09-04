@@ -29,20 +29,30 @@ const DefaultConfigPath = ".forge-ci.yml"
 // plaintext VCS token (PAT or minted GitHub App installation token) used only in
 // the Authorization header; it is never logged.
 type FetchRequest struct {
-	Provider string // github | bitbucket | other
-	Repo     string // owner/name (github) or workspace/slug (bitbucket)
+	Provider string // github | bitbucket | codecommit | other
+	Repo     string // owner/name (github/bitbucket) or repository name (codecommit)
 	SHA      string // the exact commit sha to read at
 	Path     string // repo-relative file path (e.g. .forge-ci.yml)
 	Token    string // plaintext auth; "" fetches anonymously (public repo)
+
+	// CodeCommit only. There is no token: the call is SigV4-signed with the
+	// control plane's own AWS identity. CloneURL carries the region (and any
+	// named profile), so a CodeCommit repo needs no second place to configure it;
+	// RoleARN, when set, is assumed before the call so one Forge deployment can
+	// read repositories across accounts.
+	CloneURL string
+	RoleARN  string
 }
 
 // Fetcher reads file contents from a provider's API. The API base URLs are
-// overridable via GITHUB_API_BASE / BITBUCKET_API_BASE (for testing against a
-// local stub), matching internal/vcs/status.go and internal/githubapp.
+// overridable via GITHUB_API_BASE / BITBUCKET_API_BASE / CODECOMMIT_API_BASE
+// (for testing against a local stub), matching internal/vcs/status.go and
+// internal/githubapp.
 type Fetcher struct {
 	client        *http.Client
 	githubBase    string
 	bitbucketBase string
+	cc            ccClients // CodeCommit API clients, cached per region/role
 }
 
 // NewFetcher builds a Fetcher from the environment. GITHUB_API_BASE and
@@ -56,18 +66,35 @@ func NewFetcher() *Fetcher {
 }
 
 // FetchFile returns the raw bytes of Path at SHA. found is false (with a nil
-// error) when the file does not exist (HTTP 404) or when the provider has no
-// supported contents API ("other" or empty) — both cases mean "fall back". A
-// non-404 HTTP failure or a transport error returns a non-nil error whose text
-// never contains the token.
+// error) when the file does not exist (HTTP 404, or CodeCommit's
+// FileDoesNotExist family) or when the provider has no supported contents API
+// ("other" or empty) — all of which mean "fall back". A non-404 HTTP failure or
+// a transport error returns a non-nil error whose text never contains the token,
+// and never a response body.
 func (f *Fetcher) FetchFile(ctx context.Context, req FetchRequest) (content []byte, found bool, err error) {
-	owner, name, ok := splitRepo(req.Repo)
-	if !ok {
-		return nil, false, fmt.Errorf("invalid repo %q (want owner/name)", req.Repo)
-	}
 	path := req.Path
 	if path == "" {
 		path = DefaultConfigPath
+	}
+	// CodeCommit is handled before splitRepo: its repository names are a single
+	// segment with no owner/ prefix, and it reads over a SigV4-signed API call
+	// rather than an HTTP request with an Authorization header.
+	if req.Provider == "codecommit" {
+		repo, ok := ParseCodeCommitURL(req.CloneURL)
+		if !ok {
+			// Without a region there is nothing to call. This surfaces as an
+			// error rather than a silent miss so the misregistration is visible;
+			// ResolvePipelineConfig still logs it and falls back to the
+			// registered config rather than failing the pipeline outright.
+			return nil, false, fmt.Errorf("invalid codecommit clone URL %q "+
+				"(want codecommit::<region>://<repo>)", req.CloneURL)
+		}
+		return f.cc.getFile(ctx, repo, req.RoleARN, req.SHA, path)
+	}
+
+	owner, name, ok := splitRepo(req.Repo)
+	if !ok {
+		return nil, false, fmt.Errorf("invalid repo %q (want owner/name)", req.Repo)
 	}
 
 	var reqURL, accept string

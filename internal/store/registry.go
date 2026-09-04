@@ -148,12 +148,13 @@ func (s *Store) repoConfigSource(ctx context.Context, repo string) (source, path
 }
 
 // ConfigFromRepo fetches the in-repo pipeline config (path, default
-// .forge-ci.yml) at sha using the repo's connection auth (static PAT or minted
-// GitHub App token). found is false (nil error) when the repo isn't registered,
+// .forge-ci.yml) at sha using the repo's connection auth (static PAT, minted
+// GitHub App token, or — for CodeCommit — a SigV4-signed GetFile made with the
+// control plane's own AWS identity). found is false (nil error) when the repo isn't registered,
 // the provider has no supported contents API, or the file is absent (404) — all
 // "fall back to the registered config" cases. The token is never logged.
 func (s *Store) ConfigFromRepo(ctx context.Context, repo, sha, path string) (config string, found bool, err error) {
-	provider, _, token, registered, err := s.resolveRepoAuth(ctx, repo)
+	provider, cloneURL, token, registered, err := s.resolveRepoAuth(ctx, repo)
 	if err != nil {
 		return "", false, err
 	}
@@ -163,8 +164,11 @@ func (s *Store) ConfigFromRepo(ctx context.Context, repo, sha, path string) (con
 	if path == "" {
 		path = vcs.DefaultConfigPath
 	}
+	// CodeCommit takes no token: the clone URL carries the region the SigV4-signed
+	// GetFile call needs, and the identity is the control plane's own.
 	content, ok, err := s.fetcher.FetchFile(ctx, vcs.FetchRequest{
 		Provider: provider, Repo: repo, SHA: sha, Path: path, Token: token,
+		CloneURL: cloneURL,
 	})
 	if err != nil {
 		return "", false, err
