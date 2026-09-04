@@ -140,18 +140,21 @@ func parseCodeCommitPush(body []byte) (ccPush, error) {
 
 // parseCodeCommitPR extracts a prTrigger from a CodeCommit Pull Request State
 // Change payload, so CodeCommit PRs join the same merge_request funnel as the
-// GitHub and Bitbucket PR paths.
+// GitHub and Bitbucket PR paths, plus the prSource that lets Forge comment back
+// on the PR later.
 //
 // Two shape differences from the other providers are normalized here:
 // CodeCommit names the repo in a `repositoryNames` ARRAY (a PR can span
 // repositories; Forge builds the first, which is the source repo), and
-// `pullRequestId` is a STRING where prTrigger.IID is an int. Action is left
-// empty — codeCommitEventKind has already gated which events trigger a build,
-// the same division of labour as the Bitbucket handler.
-func parseCodeCommitPR(body []byte) (prTrigger, error) {
+// `pullRequestId` is a STRING where prTrigger.IID is an int — so the raw string
+// id is carried separately in the prSource rather than widening the shared
+// prTrigger the other two providers fill in. Action is left empty —
+// codeCommitEventKind has already gated which events trigger a build, the same
+// division of labour as the Bitbucket handler.
+func parseCodeCommitPR(body []byte) (prTrigger, prSource, error) {
 	var env codeCommitEnvelope
 	if err := json.Unmarshal(body, &env); err != nil {
-		return prTrigger{}, err
+		return prTrigger{}, prSource{}, err
 	}
 	var detail struct {
 		RepositoryNames      []string `json:"repositoryNames"`
@@ -165,7 +168,7 @@ func parseCodeCommitPR(body []byte) (prTrigger, error) {
 		Author               string   `json:"author"`
 	}
 	if err := json.Unmarshal(env.Detail, &detail); err != nil {
-		return prTrigger{}, err
+		return prTrigger{}, prSource{}, err
 	}
 	repo := detail.RepositoryName
 	if len(detail.RepositoryNames) > 0 {
@@ -180,6 +183,9 @@ func parseCodeCommitPR(body []byte) (prTrigger, error) {
 		TargetBranch: shortRefName(detail.DestinationReference),
 		HeadSHA:      detail.SourceCommit,
 		Author:       arnPrincipal(detail.Author),
+	}, prSource{
+		IID:     detail.PullRequestID,
+		BaseSHA: detail.DestinationCommit,
 	}, nil
 }
 
@@ -268,7 +274,7 @@ func (s *Server) codecommitPush(w http.ResponseWriter, r *http.Request, body []b
 		}
 	}()
 	*created = s.triggerFromWebhook(w, r, push.Repo, push.Ref, push.SHA, push.Author,
-		compiler.SourceWebhook, nil)
+		compiler.SourceWebhook, nil, nil)
 }
 
 // codecommitPullRequest creates a merge_request pipeline for a CodeCommit PR
@@ -278,7 +284,7 @@ func (s *Server) codecommitPush(w http.ResponseWriter, r *http.Request, body []b
 // CI_PIPELINE_SOURCE=merge_request and the CI_MERGE_REQUEST_* vars are threaded
 // into rules and job env.
 func (s *Server) codecommitPullRequest(w http.ResponseWriter, r *http.Request, body []byte) {
-	pr, err := parseCodeCommitPR(body)
+	pr, src, err := parseCodeCommitPR(body)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON payload")
 		return
@@ -297,6 +303,10 @@ func (s *Server) codecommitPullRequest(w http.ResponseWriter, r *http.Request, b
 		}
 	}()
 	ctx := mergeRequestContext(pr.IID, pr.SourceBranch, pr.TargetBranch, pr.Title)
+	// CodeCommit has no commit-status API, so the PR id and the destination
+	// commit are recorded now — they are the only way to comment on this PR once
+	// the run finishes.
 	*created = s.triggerFromWebhook(w, r, pr.Repo,
-		pr.SourceBranch, pr.HeadSHA, pr.Author, compiler.SourceMergeRequest, ctx)
+		pr.SourceBranch, pr.HeadSHA, pr.Author, compiler.SourceMergeRequest, ctx,
+		&src)
 }

@@ -240,3 +240,102 @@ func (c *ccClients) checkAccess(ctx context.Context, repo CodeCommitRepo, roleAR
 func (f *Fetcher) CheckCodeCommitAccess(ctx context.Context, repo CodeCommitRepo, roleARN string) error {
 	return f.cc.checkAccess(ctx, repo, roleARN)
 }
+
+// MapCodeCommitComment renders the pull-request comment that stands in for a
+// commit status on CodeCommit.
+//
+// CodeCommit has NO commit-status API, so there is no green tick to set. Rather
+// than fake one, Forge posts a comment naming the outcome and linking the
+// pipeline. The leading marker makes Forge's comments identifiable at a glance
+// in a thread that also has human review.
+func MapCodeCommitComment(status, targetURL string) string {
+	var headline string
+	switch status {
+	case "success":
+		headline = "✅ Pipeline succeeded"
+	case "failed":
+		headline = "❌ Pipeline failed"
+	case "canceled":
+		headline = "⚪ Pipeline canceled"
+	case "blocked":
+		headline = "⏸️ Pipeline waiting for approval"
+	case "pending":
+		headline = "⏳ Pipeline queued"
+	default:
+		headline = "⏳ Pipeline running"
+	}
+	body := "**" + StatusContext + "** — " + headline
+	if targetURL != "" {
+		body += "\n\n" + targetURL
+	}
+	return body
+}
+
+// postComment posts a pull-request comment as CodeCommit's stand-in for a
+// commit status. beforeSHA is the PR's destination commit and afterSHA the
+// source commit the pipeline ran on; CodeCommit anchors the comment between the
+// two. Permanent reports whether retrying could ever help, so the caller can
+// decide to keep or release its dedup claim.
+func (c *ccClients) postComment(
+	ctx context.Context, repo CodeCommitRepo, roleARN, prID, beforeSHA, afterSHA, content string,
+) (permanent bool, err error) {
+	cl, cerr := c.client(ctx, repo.Region, roleARN, repo.Profile)
+	if cerr != nil {
+		return true, cerr // misconfiguration, not a blip
+	}
+	// BeforeCommitId is REQUIRED by the API — omitting it fails client-side
+	// validation, which would look transient and be retried forever. When the
+	// event carried no destination commit, anchor the comment at the after commit
+	// instead: the comment is a general one (no Location), so the range only
+	// scopes it, and getting the result onto the pull request matters more than
+	// the anchor being a true diff base.
+	if beforeSHA == "" {
+		beforeSHA = afterSHA
+	}
+	in := &codecommit.PostCommentForPullRequestInput{
+		PullRequestId:  aws.String(prID),
+		RepositoryName: aws.String(repo.Name),
+		BeforeCommitId: aws.String(beforeSHA),
+		AfterCommitId:  aws.String(afterSHA),
+		Content:        aws.String(content),
+	}
+	if _, err := cl.PostCommentForPullRequest(ctx, in); err != nil {
+		return codeCommitPermanent(err), errors.New(awsErrCode(err))
+	}
+	return false, nil
+}
+
+// PostCodeCommitComment posts one pull-request comment for a finished pipeline.
+func (p *Poster) PostCodeCommitComment(
+	ctx context.Context, repo CodeCommitRepo, roleARN, prID, beforeSHA, afterSHA, content string,
+) (permanent bool, err error) {
+	return p.cc.postComment(ctx, repo, roleARN, prID, beforeSHA, afterSHA, content)
+}
+
+// codeCommitPermanent reports whether a CodeCommit failure is a client-side
+// configuration error that retrying cannot fix — the SigV4 analogue of the
+// 400/401/403/404/422 set isPermanent classifies for the HTTP providers.
+// Throttling and service faults are left transient so a later tick retries.
+func codeCommitPermanent(err error) bool {
+	var (
+		noPR     *cctypes.PullRequestDoesNotExistException
+		badPR    *cctypes.InvalidPullRequestIdException
+		noRepo   *cctypes.RepositoryDoesNotExistException
+		badRepo  *cctypes.RepositoryNameRequiredException
+		noCommit *cctypes.CommitDoesNotExistException
+		badArg   *cctypes.InvalidCommitIdException
+	)
+	if errors.As(err, &noPR) || errors.As(err, &badPR) || errors.As(err, &noRepo) ||
+		errors.As(err, &badRepo) || errors.As(err, &noCommit) || errors.As(err, &badArg) {
+		return true
+	}
+	// Access denied is a policy problem: hammering it will not fix the policy.
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.ErrorCode() {
+		case "AccessDeniedException", "UnrecognizedClientException", "InvalidSignatureException":
+			return true
+		}
+	}
+	return false
+}

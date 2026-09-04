@@ -1,5 +1,11 @@
 # GitHub / Bitbucket integration
 
+> **AWS CodeCommit** is also a first-class provider, but it works differently
+> enough — EventBridge instead of webhooks, IAM SigV4 instead of a token, a pull
+> request comment instead of a commit status — that it has its own guide:
+> **[codecommit.md](codecommit.md)**. This page covers the two token-based
+> providers.
+
 Forge is a standalone CI system — it does not host repositories. Three things
 connect it to your VCS:
 
@@ -34,6 +40,8 @@ connect it to your VCS:
 
 2. **A webhook** from the provider — push events, and (GitHub / Bitbucket)
    pull-request events. See [PR/MR-triggered pipelines](#prmr-triggered-pipelines).
+   (CodeCommit has no webhooks; an EventBridge API Destination feeds
+   `/api/v1/webhooks/codecommit` instead — see [codecommit.md](codecommit.md).)
 
 ## GitHub — step by step
 

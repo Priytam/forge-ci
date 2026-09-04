@@ -156,6 +156,19 @@ ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS config_source TEXT NOT NULL DEFAU
 -- siblings, not just downstream dependents.
 ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS fail_fast BOOLEAN NOT NULL DEFAULT FALSE;
 
+-- Pull-request identity for a merge_request pipeline. Needed because CodeCommit
+-- has NO commit-status API: Forge reports a CodeCommit result by commenting on
+-- the originating pull request, and PostCommentForPullRequest requires the pull
+-- request id plus the before/after commits — none of which are recoverable from
+-- (repo, ref, sha) after the fact. mr_iid is TEXT because CodeCommit pull
+-- request ids are strings. mr_base_sha is the destination-branch commit the PR
+-- targets ("before"); the pipeline's own sha is the "after".
+-- Both stay '' for push pipelines and for providers that report via a real
+-- status API, and an empty mr_iid is exactly what marks a run as "nothing to
+-- comment on".
+ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS mr_iid      TEXT NOT NULL DEFAULT '';
+ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS mr_base_sha TEXT NOT NULL DEFAULT '';
+
 -- First-class repo registry: the connection to the real VCS repo. token is
 -- used to build authenticated clone URLs for runners (never returned by the
 -- API, never logged). Plaintext at rest for now — same caveat as variables.

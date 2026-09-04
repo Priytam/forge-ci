@@ -7,6 +7,10 @@ anywhere:
 - **AWS** — `sts assume-role-with-web-identity`
 - **GCP** — Workload Identity Federation
 
+Forge uses this path itself: a runner cloning an **AWS CodeCommit** repository
+exchanges the same token for credentials to sign the git clone, so CodeCommit
+runners hold no AWS key either. See [codecommit.md](codecommit.md).
+
 The cloud provider validates the token against Forge's **public** JWKS (fetched
 over the OIDC discovery document). The whole trust chain is a public key: Forge
 never holds cloud credentials, and the job never holds a long-lived secret. The

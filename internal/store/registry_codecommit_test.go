@@ -220,3 +220,153 @@ func TestRepoConnCodeCommitRepoPrecedence(t *testing.T) {
 		})
 	}
 }
+
+// The candidate scan is where acceptance criterion 5 is actually enforced: a
+// CodeCommit PR run must be offered exactly once, at its terminal phase, and a
+// CodeCommit PUSH run must never be offered at all (nothing to comment on).
+func TestPipelinesPendingStatusPostCodeCommit(t *testing.T) {
+	st := newRegistryTestStore(t)
+	ctx := context.Background()
+
+	if err := st.RegisterRepo(ctx, proto.RepoRegistration{
+		Repo: "tablespace-api", Provider: "codecommit", AWSRegion: "ap-south-1",
+		CloneURL: "codecommit::ap-south-1://tablespace-api", DefaultBranch: "main",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	newPipeline := func(t *testing.T, mrIID, baseSHA, jobStatus string) int64 {
+		t.Helper()
+		var id int64
+		if err := st.pool.QueryRow(ctx,
+			`INSERT INTO pipelines (repo, ref, sha, config_yaml, source, mr_iid, mr_base_sha)
+			 VALUES ('tablespace-api','feature/x','1111','{}','merge_request',$1,$2)
+			 RETURNING id`, mrIID, baseSHA).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.pool.Exec(ctx,
+			`INSERT INTO jobs (pipeline_id, name, stage, stage_idx, script, status)
+			 VALUES ($1,'build','test',0,'echo hi',$2)`,
+			id, jobStatus); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+
+	find := func(t *testing.T, id int64) *StatusCandidate {
+		t.Helper()
+		got, err := st.PipelinesPendingStatusPost(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range got {
+			if got[i].PipelineID == id {
+				return &got[i]
+			}
+		}
+		return nil
+	}
+
+	t.Run("push run is never a candidate", func(t *testing.T) {
+		id := newPipeline(t, "", "", "success")
+		if c := find(t, id); c != nil {
+			t.Errorf("a CodeCommit run with no pull request was offered: %+v", c)
+		}
+	})
+
+	t.Run("PR run mid-flight is not a candidate", func(t *testing.T) {
+		id := newPipeline(t, "42", "2222", "running")
+		if c := find(t, id); c != nil {
+			t.Errorf("a non-terminal phase was offered: %+v — CodeCommit comments only on the final result", c)
+		}
+	})
+
+	t.Run("PR run at a terminal phase is offered with its PR identity", func(t *testing.T) {
+		id := newPipeline(t, "43", "3333", "failed")
+		c := find(t, id)
+		if c == nil {
+			t.Fatal("a finished CodeCommit PR run was not offered")
+		}
+		if c.Status != "failed" {
+			t.Errorf("Status = %q, want failed", c.Status)
+		}
+		if c.MRIID != "43" || c.MRBaseSHA != "3333" {
+			t.Errorf("PR identity = (%q, %q), want (43, 3333)", c.MRIID, c.MRBaseSHA)
+		}
+		if c.Provider != "codecommit" {
+			t.Errorf("Provider = %q", c.Provider)
+		}
+	})
+
+	t.Run("claiming the post removes it from the scan", func(t *testing.T) {
+		id := newPipeline(t, "44", "4444", "success")
+		if find(t, id) == nil {
+			t.Fatal("expected the run to be offered before the claim")
+		}
+		claimed, err := st.ClaimStatusPost(ctx, id, "success")
+		if err != nil || !claimed {
+			t.Fatalf("ClaimStatusPost: claimed=%v err=%v", claimed, err)
+		}
+		if c := find(t, id); c != nil {
+			t.Errorf("run offered again after a terminal post was claimed: %+v", c)
+		}
+	})
+}
+
+// Regression: a GitHub repo with no credential is still excluded, and one with a
+// token is still offered at every phase — CodeCommit's terminal-only rule must
+// not have leaked across.
+func TestPipelinesPendingStatusPostGitHubUnchanged(t *testing.T) {
+	st := newRegistryTestStore(t)
+	ctx := context.Background()
+
+	if err := st.RegisterRepo(ctx, proto.RepoRegistration{
+		Repo: "acme/tokenless", Provider: "github",
+		CloneURL: "https://github.com/acme/tokenless.git", DefaultBranch: "main",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RegisterRepo(ctx, proto.RepoRegistration{
+		Repo: "acme/tokened", Provider: "github", Token: "ghp_x",
+		CloneURL: "https://github.com/acme/tokened.git", DefaultBranch: "main",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, repo := range []string{"acme/tokenless", "acme/tokened"} {
+		var id int64
+		if err := st.pool.QueryRow(ctx,
+			`INSERT INTO pipelines (repo, ref, sha, config_yaml, source)
+			 VALUES ($1,'main','abc','{}','webhook') RETURNING id`, repo).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.pool.Exec(ctx,
+			`INSERT INTO jobs (pipeline_id, name, stage, stage_idx, script, status)
+			 VALUES ($1,'b','test',0,'echo hi','running')`,
+			id); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := st.PipelinesPendingStatusPost(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawTokened, sawTokenless bool
+	for _, c := range got {
+		switch c.Repo {
+		case "acme/tokened":
+			sawTokened = true
+			if c.Status != "running" {
+				t.Errorf("github status = %q, want running — mid-flight phases still post", c.Status)
+			}
+		case "acme/tokenless":
+			sawTokenless = true
+		}
+	}
+	if !sawTokened {
+		t.Error("a tokened GitHub repo was not offered")
+	}
+	if sawTokenless {
+		t.Error("a GitHub repo with no credential was offered")
+	}
+}

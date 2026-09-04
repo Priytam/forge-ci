@@ -285,6 +285,13 @@ type CreatePipelineRequest struct {
 	// Source is the trigger (api | push | webhook | merge_request | schedule).
 	// Empty defaults to 'api'.
 	Source string `json:"source,omitempty"`
+
+	// Pull-request identity for a merge_request pipeline, recorded so a provider
+	// with no commit-status API can report back by commenting on the PR. MRIID is
+	// the provider's pull request id (a string: CodeCommit's are); MRBaseSHA is
+	// the destination-branch commit the PR targets. Both empty for push runs.
+	MRIID     string `json:"mr_iid,omitempty"`
+	MRBaseSHA string `json:"mr_base_sha,omitempty"`
 }
 
 // Schedule is a cron-scheduled pipeline trigger for a (repo, ref). The cron

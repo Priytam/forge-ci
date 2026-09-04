@@ -420,6 +420,7 @@ provides the fallback CI. Full walkthrough: [docs/self-hosted-ci.md](docs/self-h
 ## Docs
 
 - [VCS integration (GitHub/Bitbucket webhooks)](docs/vcs-integration.md)
+- [AWS CodeCommit (EventBridge triggers, IAM SigV4 clone, PR comments)](docs/codecommit.md)
 - [Registering runners (VM/systemd, Docker, Kubernetes)](docs/runners.md)
 - [Kubernetes executor: deployment, access & RBAC (incl. separate-cluster)](docs/kubernetes-deployment.md)
 - [Artifact storage (local, MinIO, S3, GCS)](docs/artifact-storage.md)

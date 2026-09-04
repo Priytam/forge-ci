@@ -337,10 +337,12 @@ func (s *Server) listRegisteredRepos(w http.ResponseWriter, r *http.Request) {
 // (push webhooks pass SourceWebhook; PR/MR webhooks pass SourceMergeRequest).
 // extraCtx carries source-specific context (the CI_MERGE_REQUEST_* vars for a
 // merge_request pipeline); it is visible to rules if: AND injected into every
-// job's Env. For a PR pipeline the caller passes the PR HEAD sha and the PR head
+// job's Env. pr, when non-nil, records which pull request the run belongs to so
+// a provider with no commit-status API (CodeCommit) can comment back on it; it
+// is nil for push pipelines. For a PR pipeline the caller passes the PR HEAD sha and the PR head
 // branch as ref, so only/except and rules matching the branch still work and the
 // commit status lands on the PR head sha.
-func (s *Server) triggerFromWebhook(w http.ResponseWriter, r *http.Request, repo, ref, sha, author, source string, extraCtx map[string]string) bool {
+func (s *Server) triggerFromWebhook(w http.ResponseWriter, r *http.Request, repo, ref, sha, author, source string, extraCtx map[string]string, pr *prSource) bool {
 	if repo == "" || ref == "" || sha == "" {
 		writeErr(w, http.StatusBadRequest, "payload missing repo/ref/sha")
 		return false
@@ -370,8 +372,14 @@ func (s *Server) triggerFromWebhook(w http.ResponseWriter, r *http.Request, repo
 		writeErr(w, http.StatusUnprocessableEntity, "pipeline config error: "+err.Error())
 		return false
 	}
-	p, err := s.store.CreatePipeline(r.Context(),
-		proto.CreatePipelineRequest{Repo: repo, Ref: ref, SHA: sha, Config: config, TriggeredBy: author, ConfigSource: cfgSource, Source: source},
+	create := proto.CreatePipelineRequest{
+		Repo: repo, Ref: ref, SHA: sha, Config: config,
+		TriggeredBy: author, ConfigSource: cfgSource, Source: source,
+	}
+	if pr != nil {
+		create.MRIID, create.MRBaseSHA = pr.IID, pr.BaseSHA
+	}
+	p, err := s.store.CreatePipeline(r.Context(), create,
 		jobs, configVersion, opts.AutoCancel, opts.FailFast)
 	if err != nil {
 		slog.Error("webhook pipeline create", "err", err)
@@ -465,7 +473,17 @@ func (s *Server) githubPush(w http.ResponseWriter, r *http.Request, body []byte)
 	}()
 	ref := strings.TrimPrefix(payload.Ref, "refs/heads/")
 	ref = strings.TrimPrefix(ref, "refs/tags/")
-	*created = s.triggerFromWebhook(w, r, payload.Repository.FullName, ref, payload.After, payload.Pusher.Name, compiler.SourceWebhook, nil)
+	*created = s.triggerFromWebhook(w, r, payload.Repository.FullName, ref, payload.After,
+		payload.Pusher.Name, compiler.SourceWebhook, nil, nil)
+}
+
+// prSource is the pull-request identity recorded on a merge_request pipeline.
+// GitHub and Bitbucket report results through a real commit-status API and only
+// need the id for reference; CodeCommit has no status API at all and needs both
+// the id and the base commit to post a comment on the PR later.
+type prSource struct {
+	IID     string // provider pull request id
+	BaseSHA string // destination-branch commit the PR targets ("before")
 }
 
 // prTrigger is the normalized subset of a PR/MR webhook payload needed to build
@@ -551,7 +569,8 @@ func (s *Server) githubPullRequest(w http.ResponseWriter, r *http.Request, body 
 	}()
 	ctx := mergeRequestContext(pr.IID, pr.SourceBranch, pr.TargetBranch, pr.Title)
 	*created = s.triggerFromWebhook(w, r, pr.Repo,
-		pr.SourceBranch, pr.HeadSHA, pr.Author, compiler.SourceMergeRequest, ctx)
+		pr.SourceBranch, pr.HeadSHA, pr.Author, compiler.SourceMergeRequest, ctx,
+		&prSource{IID: strconv.Itoa(pr.IID)})
 }
 
 // prActionTriggers reports whether a GitHub pull_request / Bitbucket pull-request
@@ -651,7 +670,8 @@ func (s *Server) bitbucketPush(w http.ResponseWriter, r *http.Request, body []by
 	if author == "" {
 		author = payload.Actor.DisplayName
 	}
-	*created = s.triggerFromWebhook(w, r, payload.Repository.FullName, change.Name, change.Target.Hash, author, compiler.SourceWebhook, nil)
+	*created = s.triggerFromWebhook(w, r, payload.Repository.FullName, change.Name,
+		change.Target.Hash, author, compiler.SourceWebhook, nil, nil)
 }
 
 // parseBitbucketPR extracts a prTrigger from a Bitbucket pull-request payload.
@@ -730,7 +750,8 @@ func (s *Server) bitbucketPullRequest(w http.ResponseWriter, r *http.Request, bo
 	}()
 	ctx := mergeRequestContext(pr.IID, pr.SourceBranch, pr.TargetBranch, pr.Title)
 	*created = s.triggerFromWebhook(w, r, pr.Repo,
-		pr.SourceBranch, pr.HeadSHA, pr.Author, compiler.SourceMergeRequest, ctx)
+		pr.SourceBranch, pr.HeadSHA, pr.Author, compiler.SourceMergeRequest, ctx,
+		&prSource{IID: strconv.Itoa(pr.IID)})
 }
 
 // ---- registered pipeline configs ----

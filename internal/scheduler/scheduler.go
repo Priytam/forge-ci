@@ -385,6 +385,12 @@ func (sc *Scheduler) postStatuses(ctx context.Context) {
 // transient failure it releases the claim so a later tick retries. The token is
 // never logged.
 func (sc *Scheduler) deliverStatus(ctx context.Context, c store.StatusCandidate) {
+	// CodeCommit has no commit-status API; its result goes to the pull request
+	// as a comment instead, over an IAM-signed call with no token involved.
+	if c.Provider == "codecommit" {
+		sc.deliverCodeCommitComment(ctx, c)
+		return
+	}
 	provider, token, ok, err := sc.store.RepoStatusTarget(ctx, c.Repo)
 	if err != nil {
 		slog.Error("commit-status: resolve repo token", "err", err, "repo", c.Repo)
@@ -421,6 +427,48 @@ func (sc *Scheduler) deliverStatus(ctx context.Context, c store.StatusCandidate)
 	}
 	slog.Warn("commit-status: transient delivery failure, will retry on a later tick",
 		"repo", c.Repo, "sha", shortSHA(c.SHA), "status", c.Status, "err", err)
+	sc.releaseStatus(ctx, c)
+}
+
+// deliverCodeCommitComment reports a finished CodeCommit pipeline by commenting
+// on the pull request that triggered it. The candidate scan only ever offers
+// terminal phases of runs that HAVE a pull request, so this posts exactly one
+// comment per run and nothing at all for a push run.
+//
+// Claim handling matches the status path: a permanent failure (missing PR, bad
+// commit, denied policy) keeps the dedup claim so a misconfigured repo is not
+// hammered; anything transient releases it for a later tick.
+func (sc *Scheduler) deliverCodeCommitComment(ctx context.Context, c store.StatusCandidate) {
+	repo, roleARN, ok, err := sc.store.CodeCommitStatusTarget(ctx, c.Repo)
+	if err != nil {
+		slog.Error("pr-comment: resolve codecommit target", "err", err, "repo", c.Repo)
+		sc.releaseStatus(ctx, c) // treat as transient; retry later
+		return
+	}
+	if !ok || c.MRIID == "" {
+		// The registry changed under us, or the run has no pull request after
+		// all. Nothing to report, and nothing to retry.
+		slog.Debug("pr-comment: nothing to comment on, skipping",
+			"repo", c.Repo, "pipeline", c.PipelineID)
+		return
+	}
+
+	body := vcs.MapCodeCommitComment(c.Status, pipelineURL(c.PipelineID))
+	permanent, err := sc.poster.PostCodeCommitComment(
+		ctx, repo, roleARN, c.MRIID, c.MRBaseSHA, c.SHA, body)
+	if err == nil {
+		slog.Info("pr-comment posted", "repo", c.Repo, "pull_request", c.MRIID,
+			"sha", shortSHA(c.SHA), "status", c.Status, "provider", "codecommit")
+		return
+	}
+	if permanent {
+		slog.Error("pr-comment: giving up — check the pull request id, the commits "+
+			"and that Forge's AWS identity has codecommit:PostCommentForPullRequest",
+			"repo", c.Repo, "pull_request", c.MRIID, "status", c.Status, "err", err)
+		return // keep the claim: don't re-hammer a misconfigured repo
+	}
+	slog.Warn("pr-comment: transient delivery failure, will retry on a later tick",
+		"repo", c.Repo, "pull_request", c.MRIID, "status", c.Status, "err", err)
 	sc.releaseStatus(ctx, c)
 }
 

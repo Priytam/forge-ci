@@ -275,9 +275,10 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 	p.ConfigVersion = configVersion
 	p.Source = source
 	err = tx.QueryRow(ctx,
-		`INSERT INTO pipelines (repo, ref, sha, config_yaml, triggered_by, config_version, fail_fast, config_source, source)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id, created_at`,
-		req.Repo, req.Ref, req.SHA, req.Config, req.TriggeredBy, configVersion, failFast, configSource, source).Scan(&p.ID, &p.CreatedAt)
+		`INSERT INTO pipelines (repo, ref, sha, config_yaml, triggered_by, config_version, fail_fast, config_source, source, mr_iid, mr_base_sha)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id, created_at`,
+		req.Repo, req.Ref, req.SHA, req.Config, req.TriggeredBy, configVersion, failFast, configSource, source,
+		req.MRIID, req.MRBaseSHA).Scan(&p.ID, &p.CreatedAt)
 	if err != nil {
 		return nil, err
 	}

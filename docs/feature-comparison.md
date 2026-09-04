@@ -1,7 +1,8 @@
 # Forge CI vs GitLab CI — feature comparison & roadmap
 
 Positioning: Forge is a **standalone CI/CD engine** (like Buildkite or Drone),
-not a VCS. It integrates with GitHub/Bitbucket via webhooks rather than owning
+not a VCS. It integrates with GitHub/Bitbucket via webhooks (and AWS CodeCommit
+via EventBridge — see [codecommit.md](codecommit.md)) rather than owning
 the repo, keeps GitLab's UX vocabulary (pipelines → stages → jobs, pill graph,
 settings sections), and aims to absorb ArgoCD-style environment/deployment
 views over time.
@@ -61,8 +62,9 @@ Legend: ✅ shipped · 🟡 partial · ❌ not yet (roadmap).
 | Feature | GitLab (owns repo) | Forge | Notes |
 |---|---|---|---|
 | Push webhooks GitHub/Bitbucket | n/a (native) | ✅ | HMAC verified (GitHub) |
+| AWS CodeCommit as a source provider | ❌ | ✅ | EventBridge push/PR triggers, `.forge-ci.yml` via GetFile at the event sha, IAM SigV4 clone keyed on per-job OIDC (no static credentials anywhere) — see [codecommit.md](codecommit.md) |
 | Pipeline config source | in-repo `.gitlab-ci.yml` | ✅ | in-repo `.forge-ci.yml` fetched via the provider contents API at the event sha (config rides in the commit/PR), with automatic fall-back to the registered config; per-repo `config_source` toggle (`repo` default / `registered`) — see [vcs-integration.md](vcs-integration.md#config-from-the-repo-forge-ciyml) |
-| Commit status write-back (✓/✗ on commit, PR checks) | native | ✅ | GitHub commit-status API + Bitbucket build status, context `forge-ci`, `target_url` → pipeline page; async idempotent posting (needs a token with commit-status scope) — see [vcs-integration.md](vcs-integration.md#commit-status-write-back) |
+| Commit status write-back (✓/✗ on commit, PR checks) | native | ✅ | GitHub commit-status API + Bitbucket build status, context `forge-ci`, `target_url` → pipeline page; async idempotent posting (needs a token with commit-status scope) — see [vcs-integration.md](vcs-integration.md#commit-status-write-back). **CodeCommit has no status API at all**: its runs report as a pull-request comment instead, and push runs report nothing — see [codecommit.md](codecommit.md) |
 | PR/MR-triggered pipelines | ✅ | ✅ | GitHub `pull_request` (opened/synchronize/reopened) + Bitbucket `pullrequest:created`/`:updated` build the PR HEAD sha with `CI_PIPELINE_SOURCE=merge_request` and `CI_MERGE_REQUEST_*` context; commit status lands on the PR head, and a new push/sync auto-cancels the older PR pipeline — see [vcs-integration.md](vcs-integration.md#prmr-triggered-pipelines) |
 
 ## UI (GitLab-themed)

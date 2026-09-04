@@ -148,7 +148,7 @@ func TestParseCodeCommitPushZeroSHA(t *testing.T) {
 }
 
 func TestParseCodeCommitPR(t *testing.T) {
-	pr, err := parseCodeCommitPR([]byte(ccPREvent))
+	pr, src, err := parseCodeCommitPR([]byte(ccPREvent))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,6 +164,15 @@ func TestParseCodeCommitPR(t *testing.T) {
 	if pr != want {
 		t.Errorf("parseCodeCommitPR = %+v, want %+v", pr, want)
 	}
+	// The comment path needs the RAW string id and the destination commit; a
+	// commit status would need neither, which is why they ride separately.
+	wantSrc := prSource{
+		IID:     "42",
+		BaseSHA: "2222222222222222222222222222222222222222",
+	}
+	if src != wantSrc {
+		t.Errorf("prSource = %+v, want %+v", src, wantSrc)
+	}
 }
 
 // Some CodeCommit PR events name the repo with the singular key rather than the
@@ -172,7 +181,7 @@ func TestParseCodeCommitPRSingularRepoKey(t *testing.T) {
 	body := `{"detail":{"event":"pullRequestCreated","repositoryName":"solo-repo",
 		"pullRequestId":"7","sourceReference":"refs/heads/x","destinationReference":"refs/heads/main",
 		"sourceCommit":"aaa"}}`
-	pr, err := parseCodeCommitPR([]byte(body))
+	pr, _, err := parseCodeCommitPR([]byte(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +194,7 @@ func TestParseCodeCommitPRSingularRepoKey(t *testing.T) {
 }
 
 func TestParseCodeCommitPRMalformed(t *testing.T) {
-	if _, err := parseCodeCommitPR([]byte(`{not json`)); err == nil {
+	if _, _, err := parseCodeCommitPR([]byte(`{not json`)); err == nil {
 		t.Error("expected an error for malformed JSON")
 	}
 	if _, err := parseCodeCommitPush([]byte(`{not json`)); err == nil {

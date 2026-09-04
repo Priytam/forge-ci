@@ -4,6 +4,12 @@
 // build statuses — and maps Forge's pipeline phase onto each. Provider "other"
 // has no status API and is never routed here.
 //
+// CodeCommit is the deliberate exception: it has NO commit-status API of any
+// kind, so a CodeCommit result is reported as a comment on the originating pull
+// request (see MapCodeCommitComment and PostCodeCommitComment in
+// codecommit.go). There is no status to fake, and a run with no pull request
+// reports nothing at all.
+//
 // The store owns token decryption; this package receives a plaintext token per
 // call and uses it only in the outbound Authorization header. Tokens are never
 // logged and never appear in the errors returned here.
@@ -125,6 +131,7 @@ type Poster struct {
 	bitbucketBase string
 	maxAttempts   int
 	backoff       time.Duration
+	cc            ccClients // CodeCommit API clients, cached per region/role
 }
 
 // NewPoster builds a Poster from the environment. GITHUB_API_BASE and
@@ -220,6 +227,7 @@ func (p *Poster) build(req PostRequest) (url string, body []byte, err error) {
 		})
 		url = fmt.Sprintf("%s/2.0/repositories/%s/%s/commit/%s/statuses/build", p.bitbucketBase, owner, name, req.SHA)
 	default:
+		// CodeCommit reaches its comment path before build() is ever called.
 		return "", nil, fmt.Errorf("provider %q has no commit-status API", req.Provider)
 	}
 	return url, body, nil
