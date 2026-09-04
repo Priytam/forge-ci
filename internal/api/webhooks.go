@@ -30,6 +30,9 @@ import (
 func (s *Server) registerWebhookRoutes() {
 	s.mux.HandleFunc("POST /api/v1/webhooks/github", s.githubWebhook)
 	s.mux.HandleFunc("POST /api/v1/webhooks/bitbucket", s.bitbucketWebhook)
+	// CodeCommit has no webhooks: this route is fed by an EventBridge API
+	// Destination. See internal/api/webhooks_codecommit.go.
+	s.mux.HandleFunc("POST /api/v1/webhooks/codecommit", s.codecommitWebhook)
 	s.mux.HandleFunc("PUT /api/v1/repo-configs", s.putRepoConfig)
 	s.mux.HandleFunc("GET /api/v1/repo-configs", s.getRepoConfig)
 	s.mux.HandleFunc("GET /api/v1/repo-configs/versions", s.listConfigVersions)
