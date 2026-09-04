@@ -338,25 +338,32 @@ func (s *Store) ResolveRef(ctx context.Context, repo, ref string) (string, error
 // (see resolveRepoAuth) — the runner is handed a ready-to-use authed URL either
 // way.
 func (s *Store) cloneAuth(ctx context.Context, repo string) (cloneURL, token string, err error) {
+	cloneURL, token, _, err = s.cloneTarget(ctx, repo)
+	return cloneURL, token, err
+}
+
+// cloneTarget is cloneAuth plus the resolved connection, for callers that need
+// the provider and its AWS context to tell the runner HOW to authenticate.
+func (s *Store) cloneTarget(ctx context.Context, repo string) (cloneURL, token string, conn repoConn, err error) {
 	conn, found, err := s.resolveRepoAuth(ctx, repo)
 	if err != nil {
-		return "", "", err
+		return "", "", repoConn{}, err
 	}
 	if !found {
-		return "", "", nil
+		return "", "", repoConn{}, nil
 	}
 	// CodeCommit is handed to the runner unauthenticated on purpose: there is no
 	// token to embed, and the runner signs the clone with its own IAM identity.
 	// Falling through would splice a bogus x-access-token into the URL.
 	if conn.Provider == "codecommit" {
-		return conn.CloneURL, "", nil
+		return conn.CloneURL, "", conn, nil
 	}
 	if conn.Token == "" {
-		return conn.CloneURL, "", nil
+		return conn.CloneURL, "", conn, nil
 	}
 	u, perr := url.Parse(conn.CloneURL)
 	if perr != nil || !strings.HasPrefix(u.Scheme, "http") {
-		return conn.CloneURL, conn.Token, nil
+		return conn.CloneURL, conn.Token, conn, nil
 	}
 	switch conn.Provider {
 	case "bitbucket":
@@ -364,7 +371,7 @@ func (s *Store) cloneAuth(ctx context.Context, repo string) (cloneURL, token str
 	default: // github and generic HTTPS token auth
 		u.User = url.UserPassword("x-access-token", conn.Token)
 	}
-	return u.String(), conn.Token, nil
+	return u.String(), conn.Token, conn, nil
 }
 
 // ValidateCodeCommitAccess proves a CodeCommit registration is usable before it

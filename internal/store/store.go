@@ -1083,7 +1083,7 @@ func (s *Store) AcquireJob(ctx context.Context, req proto.AcquireRequest) (*prot
 	_ = json.Unmarshal(servicesRaw, &j.Services)
 
 	// Source checkout info when the repo is registered against a real VCS.
-	cloneURL, token, err := s.cloneAuth(ctx, repo)
+	cloneURL, token, conn, err := s.cloneTarget(ctx, repo)
 	if err != nil {
 		return nil, err
 	}
@@ -1091,6 +1091,16 @@ func (s *Store) AcquireJob(ctx context.Context, req proto.AcquireRequest) (*prot
 		j.CloneURL, j.SHA, j.Ref, j.RepoName = cloneURL, sha, ref, repo
 		if token != "" {
 			j.RedactValues = append(j.RedactValues, token)
+		}
+		// CodeCommit hands the runner an unauthenticated URL and the AWS context
+		// to sign it with. The credential is minted on the runner from the OIDC
+		// token above, so it never travels over the runner protocol at all.
+		if conn.Provider == "codecommit" {
+			if cc, ok := conn.codeCommitRepo(); ok {
+				j.CloneAuth = proto.CloneAuthAWSSigV4
+				j.AWSRegion = cc.Region
+				j.AWSRoleARN = conn.AWS.RoleARN
+			}
 		}
 	}
 

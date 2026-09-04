@@ -97,6 +97,17 @@ type RunnerJob struct {
 	RepoName     string   `json:"repo_name,omitempty"`
 	RedactValues []string `json:"redact_values,omitempty"`
 
+	// CloneAuth selects how the runner authenticates the checkout. Empty means
+	// the historical behaviour: CloneURL already carries whatever credential is
+	// needed (an embedded token, or none for a public repo). CloneAuthAWSSigV4
+	// means CloneURL carries NO credential and the runner must sign it with its
+	// own AWS identity — see internal/vcs.SignCloneURL. AWSRegion is the
+	// repository's region; AWSRoleARN, when set, is the role the runner assumes
+	// (by default via the job's OIDC token, keylessly).
+	CloneAuth  string `json:"clone_auth,omitempty"`
+	AWSRegion  string `json:"aws_region,omitempty"`
+	AWSRoleARN string `json:"aws_role_arn,omitempty"`
+
 	// Artifacts of the jobs this job needs — restored into the workspace
 	// before the script runs (GitLab-style artifact passing).
 	Dependencies []DependencyArtifact `json:"dependencies,omitempty"`
@@ -109,6 +120,10 @@ type RunnerJob struct {
 	// executor rejects any job that declares services. See docs/pipeline-dsl.md.
 	Services []ServiceSpec `json:"services,omitempty"`
 }
+
+// CloneAuthAWSSigV4 marks a checkout that must be signed with the runner's AWS
+// identity rather than cloned with a credential embedded by the control plane.
+const CloneAuthAWSSigV4 = "aws-sigv4"
 
 // ServiceSpec is one sidecar service container attached to a job.
 type ServiceSpec struct {

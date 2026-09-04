@@ -27,6 +27,7 @@ import (
 
 	"github.com/priytamjeepandey/forge-ci/internal/executor"
 	"github.com/priytamjeepandey/forge-ci/internal/proto"
+	"github.com/priytamjeepandey/forge-ci/internal/vcs"
 )
 
 const (
@@ -373,6 +374,20 @@ func cloneSource(ctx context.Context, logs *logStreamer, job *proto.RunnerJob, w
 	logs.printf("Checking out %s @ %s (%s)\n", job.RepoName, short, job.Ref)
 	cctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
+
+	// CodeCommit arrives without a credential: the control plane cannot embed one
+	// because none exists. The runner signs the remote with its OWN AWS identity
+	// here, so the credential is minted on the runner, lives for one clone, and
+	// never travels over the runner protocol.
+	remote := job.CloneURL
+	if job.CloneAuth == proto.CloneAuthAWSSigV4 {
+		signed, err := signedCodeCommitRemote(cctx, logs, job)
+		if err != nil {
+			return err
+		}
+		remote = signed
+	}
+
 	run := func(args ...string) error {
 		cmd := osexec.CommandContext(cctx, "git", args...)
 		cmd.Dir = workdir
@@ -390,7 +405,7 @@ func cloneSource(ctx context.Context, logs *logStreamer, job *proto.RunnerJob, w
 	if err := run("init", "-q"); err != nil {
 		return err
 	}
-	if err := run("remote", "add", "origin", job.CloneURL); err != nil {
+	if err := run("remote", "add", "origin", remote); err != nil {
 		return err
 	}
 	// Prefer the exact SHA; fall back to the ref tip (some servers refuse
@@ -406,6 +421,63 @@ func cloneSource(ctx context.Context, logs *logStreamer, job *proto.RunnerJob, w
 	}
 	logs.printf("Checkout complete\n")
 	return nil
+}
+
+// signedCodeCommitRemote resolves the runner's AWS identity and returns a
+// SigV4-signed CodeCommit remote URL for this job.
+//
+// The identity is keyless by default: the per-job OIDC token Forge already
+// injects (FORGE_OIDC_TOKEN) is exchanged for short-lived credentials on the
+// repo's role, so the runner holds no AWS key and the role's trust policy can
+// condition on the token's repo/ref claims. Operators who would rather use an
+// EC2/ECS role set FORGE_AWS_AUTH=instance; FORGE_AWS_ROLE_ARN overrides the
+// role the registry supplied.
+//
+// Every credential component is added to the redaction set BEFORE the signed URL
+// is built, so neither the signature nor the session token can reach a log line
+// even if git fails and echoes the remote back.
+func signedCodeCommitRemote(ctx context.Context, logs *logStreamer, job *proto.RunnerJob) (string, error) {
+	repo, ok := vcs.ParseCodeCommitURL(job.CloneURL)
+	if !ok {
+		return "", fmt.Errorf("codecommit checkout: clone URL %q is not a CodeCommit URL", job.CloneURL)
+	}
+	if job.AWSRegion != "" {
+		repo.Region = job.AWSRegion
+	}
+
+	roleARN := job.AWSRoleARN
+	if v := strings.TrimSpace(os.Getenv("FORGE_AWS_ROLE_ARN")); v != "" {
+		roleARN = v
+	}
+	forceInstance := strings.EqualFold(strings.TrimSpace(os.Getenv("FORGE_AWS_AUTH")), "instance")
+	sessionName := fmt.Sprintf("forge-%d", job.ID)
+
+	creds, source, err := vcs.ResolveRunnerAWSCredentials(
+		ctx, repo.Region, roleARN, job.Env["FORGE_OIDC_TOKEN"], sessionName, forceInstance)
+	if err != nil {
+		return "", fmt.Errorf("codecommit checkout: %w", err)
+	}
+	// Redact before signing: the signature is derived from the secret, and the
+	// session token appears verbatim in the URL's userinfo. job.RedactValues is
+	// updated too because cloneSource scrubs git's own output with that list.
+	mask := func(values ...string) {
+		logs.redact(values...)
+		for _, v := range values {
+			if v != "" {
+				job.RedactValues = append(job.RedactValues, v)
+			}
+		}
+	}
+	mask(creds.SecretAccessKey, creds.SessionToken)
+
+	signed, err := vcs.SignCloneURL(repo, creds, time.Now())
+	if err != nil {
+		return "", fmt.Errorf("codecommit checkout: %w", err)
+	}
+	mask(signed)
+	logs.printf("Authenticated to CodeCommit in %s via %s (no static credentials)\n",
+		repo.Region, source)
+	return signed, nil
 }
 
 // restoreDependency downloads an upstream job's artifact archive and unpacks
@@ -743,17 +815,19 @@ func uploadJUnitReports(c *client, logs *logStreamer, job *proto.RunnerJob, work
 
 // logStreamer batches log bytes and flushes them to the server periodically.
 type logStreamer struct {
-	c      *client
-	jobID  int64
-	redact []string
-	mu     sync.Mutex
+	c     *client
+	jobID int64
+	mu    sync.Mutex
+	// masked is read on every flush and appended to when a credential is
+	// resolved mid-job; both happen under mu.
+	masked []string
 	buf    bytes.Buffer
 	done   chan struct{}
 	wg     sync.WaitGroup
 }
 
 func newLogStreamer(c *client, jobID int64, redact []string) *logStreamer {
-	ls := &logStreamer{c: c, jobID: jobID, redact: redact, done: make(chan struct{})}
+	ls := &logStreamer{c: c, jobID: jobID, masked: redact, done: make(chan struct{})}
 	ls.wg.Add(1)
 	go func() {
 		defer ls.wg.Done()
@@ -781,6 +855,19 @@ func (ls *logStreamer) printf(format string, args ...any) {
 	ls.write(fmt.Appendf(nil, format, args...))
 }
 
+// redact adds secret-equivalent values to the mask applied to every log chunk.
+// Credentials that only exist once a job is running — a CodeCommit clone
+// signature, say — are registered here before the value is ever used.
+func (ls *logStreamer) redact(values ...string) {
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+	for _, v := range values {
+		if v != "" {
+			ls.masked = append(ls.masked, v)
+		}
+	}
+}
+
 func (ls *logStreamer) flush() {
 	ls.mu.Lock()
 	if ls.buf.Len() == 0 {
@@ -789,8 +876,11 @@ func (ls *logStreamer) flush() {
 	}
 	chunk := ls.buf.String()
 	ls.buf.Reset()
+	// Snapshot under the lock: redact() may append while a flush is in flight.
+	masked := make([]string, len(ls.masked))
+	copy(masked, ls.masked)
 	ls.mu.Unlock()
-	for _, v := range ls.redact {
+	for _, v := range masked {
 		chunk = strings.ReplaceAll(chunk, v, "[REDACTED]")
 	}
 
