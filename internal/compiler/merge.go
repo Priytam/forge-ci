@@ -37,7 +37,7 @@ func (s *stringOrSlice) UnmarshalYAML(n *yaml.Node) error {
 // and include: (parent = included fragment, child = main config job).
 //
 // Merge rules per field:
-//   - scalars (stage/image/environment/timeout/when): child non-empty overrides
+//   - scalars (stage/image/environment/timeout/when/network): child non-empty overrides
 //   - pointers (retry/allowFailure/parallel): child non-nil overrides
 //   - slices (script/needs/only/except/tags/rules/artifact paths/services): child
 //     non-nil replaces (GitLab replaces arrays; it does not element-merge them)
@@ -63,6 +63,9 @@ func mergeSpec(parent, child jobSpec) jobSpec {
 	}
 	if child.When != "" {
 		out.When = child.When
+	}
+	if child.Network != "" {
+		out.Network = child.Network
 	}
 	if child.Retry != nil {
 		out.Retry = child.Retry

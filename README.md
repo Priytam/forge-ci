@@ -225,12 +225,13 @@ jobs:
 
 | Executor | How services run | Reachability |
 |----------|------------------|--------------|
-| **docker** | dedicated per-job network `forge-net-<id>`; each service attached with its alias as a network-alias; the job container joins the same network (replacing `--network none`) | `<alias>` resolves via docker DNS, e.g. `psql -h db` |
+| **docker** | dedicated per-job network `forge-net-<id>`; each service attached with its alias as a network-alias; the job container joins the same network (instead of its own `network:`) | `<alias>` resolves via docker DNS, e.g. `psql -h db` |
 | **kubernetes** | extra containers in the job's pod; `hostAliases` map each alias to `127.0.0.1` | `<alias>` (→ localhost) **and** `localhost:<port>` |
 | **shell** | **not supported** — the job fails fast with an explanatory log line | — |
 
-Jobs **without** services are unaffected: the docker executor keeps its
-`--network none` isolation. Readiness is best-effort — the executor waits for
+Jobs **without** services are unaffected: the docker executor puts them on the
+network their `network:` field selects (default `bridge`; `network: none` for no
+egress). Readiness is best-effort — the executor waits for
 each service container to be running (and *healthy* when the image ships a
 HEALTHCHECK), but scripts should still poll the service protocol (e.g.
 `until pg_isready`). `$FORGE_SERVICE_ALIASES` lists the aliases in the job

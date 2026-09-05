@@ -116,9 +116,14 @@ type RunnerJob struct {
 	// reachable from the script by their alias hostname (docker: a per-job
 	// network with network-aliases; kubernetes: extra containers in the same pod
 	// with the alias mapped to 127.0.0.1 via hostAliases). Empty = no services,
-	// and the docker executor keeps its --network none isolation. The shell
+	// and the docker executor uses the job's own Network setting. The shell
 	// executor rejects any job that declares services. See docs/pipeline-dsl.md.
 	Services []ServiceSpec `json:"services,omitempty"`
+
+	// Network is the container network for the job (docker executor). Empty
+	// means the executor default (bridge). A job with services is always given
+	// its own per-job network instead, so the two are mutually exclusive.
+	Network string `json:"network,omitempty"`
 }
 
 // CloneAuthAWSSigV4 marks a checkout that must be signed with the runner's AWS

@@ -257,6 +257,15 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cache_policy    TEXT  NOT NULL DEFAULT
 -- script reaches them by alias. '[]' = no services. docker/kubernetes only.
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS services        JSONB NOT NULL DEFAULT '[]';
 
+-- Container network for a docker job. '' means the executor default, which is
+-- BRIDGE: a job that cannot resolve DNS cannot install dependencies, fetch rule
+-- sets or download a vulnerability database, so an isolated default silently
+-- broke every network-dependent tool (including the shipped security/* scans).
+-- 'none' is the explicit opt-out for jobs that genuinely want no egress.
+-- A job declaring services is unaffected: it always gets its own per-job
+-- network (forge-net-<id>) so it can resolve the service aliases.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS network         TEXT NOT NULL DEFAULT '';
+
 -- Runner registry: runners self-register on their first acquire and update
 -- last_contact_at on every poll. Paused runners receive no jobs.
 CREATE TABLE IF NOT EXISTS runners (

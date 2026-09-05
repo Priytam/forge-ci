@@ -101,6 +101,7 @@ type jobSpec struct {
 	Parallel     *parallelSpec     `yaml:"parallel"`
 	When         string            `yaml:"when"`          // on_success|manual|never|always (job-level; rules override)
 	AllowFailure *bool             `yaml:"allow_failure"` // failure does not fail dependents/pipeline
+	Network      string            `yaml:"network"`       // container network: bridge (default) | none | host | <named>
 }
 
 type artifactSpec struct {
@@ -294,6 +295,45 @@ func parseExpireIn(where, v string) (int, error) {
 	return int(d.Seconds()), nil
 }
 
+// DefaultJobNetwork is the container network a docker job gets when it declares
+// no `network:` and no services.
+//
+// It is bridge, not none: a CI job that cannot resolve DNS cannot install
+// dependencies, fetch rule sets, or pull a vulnerability database, which ruled
+// out every network-dependent tool — including Forge's own security/* built-ins
+// (semgrep fetches rules from semgrep.dev; trivy downloads its vuln DB). Every
+// other CI runner gives jobs egress by default. `network: none` keeps the
+// isolated behaviour for jobs that genuinely want it.
+const DefaultJobNetwork = "bridge"
+
+// validateNetwork checks a job's `network:` value. Empty is valid and means the
+// executor default. Beyond the well-known modes any docker network NAME is
+// allowed, so a job can join a network the operator manages — but the value is
+// charset-checked and may not begin with '-', so it can never be mistaken for a
+// flag when it reaches the `docker run` argv.
+func validateNetwork(where, v string) (string, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "", nil
+	}
+	switch v {
+	case "none", "bridge", "host":
+		return v, nil
+	}
+	if strings.HasPrefix(v, "-") {
+		return "", fmt.Errorf("%s: network %q may not start with '-'", where, v)
+	}
+	for _, r := range v {
+		ok := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.'
+		if !ok {
+			return "", fmt.Errorf("%s: invalid network %q "+
+				"(want none, bridge, host, or a docker network name)", where, v)
+		}
+	}
+	return v, nil
+}
+
 func parseTimeout(where, v string) (int, error) {
 	if v == "" {
 		return 0, nil
@@ -334,6 +374,10 @@ type CompiledJob struct {
 	AllowFailure  bool     // failure does not block dependents or fail the pipeline
 	// Services are sidecar containers started alongside the job (docker/k8s only).
 	Services []proto.ServiceSpec
+	// Network is the container network for the job (docker executor). Empty
+	// means the executor default (bridge). A job declaring services always gets
+	// its own per-job network instead, so the two are mutually exclusive.
+	Network string
 }
 
 // buildContext assembles the base variable context for rules if: expressions.
@@ -590,6 +634,18 @@ func Compile(yml, ref, source string, tmpl TemplateFunc, extra ...map[string]str
 			return nil, err
 		}
 
+		// Network: a job with services gets a dedicated per-job network so it can
+		// resolve service aliases, so the two settings cannot both apply. Reject
+		// rather than silently ignoring one of them.
+		network, err := validateNetwork(fmt.Sprintf("job %q", inst.orig), spec.Network)
+		if err != nil {
+			return nil, err
+		}
+		if network != "" && len(services) > 0 {
+			return nil, fmt.Errorf("job %q: network: and services: are mutually exclusive "+
+				"(a job with services runs on its own network so it can resolve the aliases)", inst.orig)
+		}
+
 		// Artifacts: per-job expiry (0 = none). reports.junit is carried as-is.
 		expireSec, err := parseExpireIn(fmt.Sprintf("job %q", inst.orig), spec.Artifacts.ExpireIn)
 		if err != nil {
@@ -660,6 +716,7 @@ func Compile(yml, ref, source string, tmpl TemplateFunc, extra ...map[string]str
 			Manual:                inst.manual,
 			AllowFailure:          inst.allowFailure,
 			Services:              services,
+			Network:               network,
 		})
 	}
 	return out, nil

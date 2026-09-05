@@ -212,6 +212,10 @@ complete runnable config.
   such as `build`/`deploy` — scans run "security-first". To place scans at a
   specific point in the order, declare `test` yourself in the main `stages:`
   list.
+- Every scanner **needs network egress** (semgrep fetches its rule set from
+  `semgrep.dev`; trivy downloads its vulnerability database). Jobs get egress by
+  default — see [`network:`](#network--container-network) — so a scan job must
+  not be given `network: none`.
 - `security/container` scans the image named by the **`SCAN_IMAGE`** variable
   (default `alpine:3.19`). Point it at the image your pipeline builds by
   overriding that variable (see below).
@@ -558,7 +562,7 @@ jobs:
 
 | Executor | Mechanism | How the script reaches a service |
 |----------|-----------|----------------------------------|
-| **docker** | A dedicated per-job bridge network `forge-net-<id>`. Each service runs as `forge-svc-<id>-<i>` attached with `--network-alias <alias>`. The **job container joins the same network** (replacing `--network none`). | By alias via docker DNS: `psql -h db`. `$FORGE_SERVICE_ALIASES` lists the aliases. |
+| **docker** | A dedicated per-job bridge network `forge-net-<id>`. Each service runs as `forge-svc-<id>-<i>` attached with `--network-alias <alias>`. The **job container joins the same network** (instead of its own `network:`). | By alias via docker DNS: `psql -h db`. `$FORGE_SERVICE_ALIASES` lists the aliases. |
 | **kubernetes** | Extra containers in the job's pod (`svc-<i>`), sharing the pod network namespace. `spec.hostAliases` maps every alias to `127.0.0.1`. | By alias (→ `127.0.0.1`) **or** `localhost:<port>` — the same `-h <alias>` script works on both executors. |
 | **shell** | **Unsupported** — no container runtime. | The job **fails immediately** with `shell executor cannot run service containers…`; route it to a docker/kubernetes runner (matching tags). |
 
@@ -576,9 +580,12 @@ jobs:
   networks, containers, or pods are leaked.
 - **Caps** — at most **5 services per job**. Each service requires an image and a
   valid, unique alias; violations are compile-time errors.
-- **Isolation preserved** — a job that declares **no** services is unchanged: the
-  docker executor keeps `--network none`, and the k8s executor keeps its
-  single-container `kubectl run` pod.
+- **Isolation** — a job that declares **no** services runs a single container on
+  the network its `network:` field selects (default `bridge` — see
+  [`network:`](#network--container-network)); the k8s executor keeps its
+  single-container `kubectl run` pod. `network:` and `services:` are mutually
+  exclusive: a job with services must be on its own network to resolve the
+  aliases, so declaring both is a compile-time error.
 
 ### Merge & matrix
 
@@ -586,6 +593,53 @@ jobs:
 child's list **replaces** the parent's wholesale (arrays are not element-merged).
 Services survive `parallel`/`matrix` expansion — every generated instance carries
 the same resolved services.
+
+---
+
+## `network:` — container network
+
+Selects the container network for a job on the **docker** executor.
+
+```yaml
+jobs:
+  scan:
+    image: aquasec/trivy
+    script: [trivy fs --exit-code 1 --no-progress .]
+    # network: bridge      # the default — the job has DNS and egress
+
+  airgapped:
+    image: alpine:3
+    network: none          # no network namespace at all
+    script: [./offline-build.sh]
+```
+
+| Value | Effect |
+|-------|--------|
+| *(unset)* | **`bridge`** — the docker default network: DNS and outbound egress |
+| `bridge` | the same, stated explicitly |
+| `none` | no network namespace — no DNS, no egress |
+| `host` | the host's network namespace |
+| *any other name* | an existing docker network the operator manages (e.g. one with an egress proxy) |
+
+**The default is `bridge`, and deliberately so.** A job with no network cannot
+install dependencies, fetch a rule set, or download a vulnerability database, so
+an isolated default silently broke every network-dependent tool — including the
+[built-in security templates](#built-in-security-templates), where semgrep pulls
+rules from `semgrep.dev` and trivy downloads its vuln DB. Use `network: none` for
+jobs that genuinely should have no egress; it is a real isolation boundary, not a
+hint.
+
+**Notes**
+
+- **docker only.** The shell executor runs in the host's network namespace, and
+  kubernetes pods always have pod networking; `network:` is ignored there.
+- **Mutually exclusive with `services:`** — a job with services is placed on its
+  own per-job network so it can resolve the service aliases. Declaring both is a
+  compile-time error rather than a silently-ignored key.
+- Participates in `extends`/`include` merge like the other scalars: a child's
+  non-empty value overrides the parent's.
+- The value is charset-checked at compile time and may not begin with `-`, so it
+  can never be mistaken for a flag in the container runtime's argv.
 
 ---
 

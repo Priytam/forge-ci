@@ -19,6 +19,25 @@ import (
 
 const defaultImage = "alpine:3"
 
+// defaultNetwork is the container network a service-less docker job runs on
+// when it declares no `network:`.
+//
+// It is the default bridge rather than `none`. Running every job in an empty
+// network namespace left them with no DNS and no egress, which broke any tool
+// that has to fetch something — including Forge's own security/* built-ins
+// (semgrep pulls rules from semgrep.dev, trivy downloads its vulnerability
+// database) — while every other CI runner gives jobs network by default. Jobs
+// that genuinely want isolation ask for it with `network: none`.
+const defaultNetwork = "bridge"
+
+// jobNetwork resolves the docker network for a service-less job.
+func jobNetwork(job *proto.RunnerJob) string {
+	if job.Network != "" {
+		return job.Network
+	}
+	return defaultNetwork
+}
+
 type Executor interface {
 	Name() string
 	// Start launches the job in workdir (the job's workspace — artifacts are
@@ -144,11 +163,11 @@ func (dockerExecutor) Start(ctx context.Context, job *proto.RunnerJob, workdir s
 	}
 	name := fmt.Sprintf("forge-job-%d", job.ID)
 
-	// No services: keep the original isolated path (--network none).
+	// No services: a single container on the job's chosen network.
 	if len(job.Services) == 0 {
 		// The workspace is bind-mounted so artifacts land on the host for
 		// collection after the container exits.
-		args := dockerRunArgs(job, workdir, image, name, "none")
+		args := dockerRunArgs(job, workdir, image, name, jobNetwork(job))
 		pr, wait, err := start(exec.CommandContext(ctx, "docker", args...))
 		if err != nil {
 			return nil, nil, err

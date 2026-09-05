@@ -130,3 +130,22 @@ func TestDockerRunArgsScriptIsSingleArgument(t *testing.T) {
 		t.Errorf("script appears split across arguments: %v", args)
 	}
 }
+
+// A service-less job with no `network:` must get egress. Running it in an empty
+// network namespace is what stopped semgrep resolving semgrep.dev and trivy
+// downloading its vulnerability database.
+func TestJobNetworkDefaultsToBridge(t *testing.T) {
+	if got := jobNetwork(&proto.RunnerJob{ID: 1}); got != "bridge" {
+		t.Errorf("jobNetwork = %q, want bridge", got)
+	}
+}
+
+// `network: none` remains available as an explicit opt-out for jobs that want
+// no egress at all.
+func TestJobNetworkHonoursExplicitValue(t *testing.T) {
+	for _, network := range []string{"none", "host", "ci-egress"} {
+		if got := jobNetwork(&proto.RunnerJob{ID: 1, Network: network}); got != network {
+			t.Errorf("jobNetwork(%q) = %q, want %q", network, got, network)
+		}
+	}
+}
