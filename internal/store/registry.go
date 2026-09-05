@@ -389,3 +389,42 @@ func (s *Store) ValidateCodeCommitAccess(ctx context.Context, r proto.RepoRegist
 	}
 	return s.fetcher.CheckCodeCommitAccess(ctx, repo, r.AWSRoleARN)
 }
+
+// ConfigFileURL deep-links the pipeline config a run used, in the origin
+// provider's web UI at the run's commit. It returns "" (with a nil error) when
+// no correct link can be built, which the API surfaces as "no link" rather than
+// an error — a missing link is a normal state, not a failure.
+//
+// The link is emitted ONLY for a run whose config came from the repo
+// (configSource "repo"). A run that used the REGISTERED config did not run the
+// file sitting in git at that commit, so linking to it would show a pipeline
+// definition that is not the one that executed — the exact confusion the link
+// exists to remove. Registered runs already carry their version in the config
+// chip, and the config Forge holds is retrievable per version through
+// /api/v1/repo-configs. (Persisting and serving each run's exact config, so
+// custom runs get a faithful link too, is tracked separately.)
+func (s *Store) ConfigFileURL(ctx context.Context, repo, sha, configSource string) (string, error) {
+	if configSource != "repo" {
+		return "", nil
+	}
+	conn, found, err := s.resolveRepoAuth(ctx, repo)
+	if err != nil || !found {
+		return "", err
+	}
+	_, cfgPath, err := s.repoConfigSource(ctx, repo)
+	if err != nil {
+		return "", err
+	}
+	link, ok := vcs.ConfigFileURL(vcs.ConfigLinkRequest{
+		Provider: conn.Provider,
+		Repo:     repo,
+		SHA:      sha,
+		Path:     cfgPath,
+		CloneURL: conn.CloneURL,
+		Region:   conn.AWS.Region,
+	})
+	if !ok {
+		return "", nil
+	}
+	return link, nil
+}

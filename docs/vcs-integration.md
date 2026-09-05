@@ -230,6 +230,34 @@ default, registered fallback).
 The manual API path (`POST /api/v1/pipelines` with an explicit `config`) is
 unchanged — it always runs the config you supply.
 
+### Viewing the config a run used
+
+A pipeline built from the repo carries a **`config_url`** on
+`GET /api/v1/pipelines/{id}`, and the pipeline detail page renders it as a
+**view config ↗** link. It opens the config file **at that run's commit** in the
+provider's own web UI, so re-reading an old run shows the definition that
+actually executed rather than whatever the branch says now:
+
+| Provider | Link shape |
+|---|---|
+| GitHub | `https://<host>/<owner>/<name>/blob/<sha>/<path>` |
+| Bitbucket | `https://<host>/<workspace>/<slug>/src/<sha>/<path>` |
+| AWS CodeCommit | `https://<region>.console.aws.amazon.com/codesuite/codecommit/repositories/<name>/browse/<sha>/--/<path>?region=<region>` |
+
+The host comes from the **registered clone URL** when that is an HTTPS URL, so a
+self-hosted GitHub Enterprise or Bitbucket Server install links to itself; only
+the public hosts are defaults. The repo's `config_path` override is honored.
+
+**The link appears only for a `config_source = repo` run.** A
+registered-config run did not execute the file sitting in git at that commit, so
+linking there would show a pipeline definition that is not the one that ran —
+the exact confusion the link exists to remove. Those runs keep their `config
+vN` chip, and the registry serves each version at
+`GET /api/v1/repo-configs?repo=…&version=N`. Every other case where a correct
+URL cannot be built — provider `other`, an unregistered repo, a CodeCommit repo
+with no region, a missing sha — omits `config_url` entirely, and the page renders
+normally with nothing to click. There is never a broken link.
+
 ## Behavior notes
 
 - The ref from the webhook drives `only`/`except`, so pushes to `main` and to

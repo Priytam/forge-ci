@@ -31,6 +31,14 @@ export interface Pipeline {
   stages: StageStatus[];
   /** Registered config version this run used; null = one-off custom config. */
   config_version: number | null;
+  /** Where the config that ran came from: 'repo' (in-repo file) | 'registered'. */
+  config_source?: string;
+  /**
+   * Deep link to the config file this run used, in the provider's web UI at the
+   * run's commit. Absent when no correct link exists (unsupported provider,
+   * registered config, missing CodeCommit region) — render nothing then.
+   */
+  config_url?: string;
   /** Trigger: api | push | webhook | merge_request | schedule. */
   source?: string;
 }

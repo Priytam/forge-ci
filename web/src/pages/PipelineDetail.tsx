@@ -222,6 +222,17 @@ export default function PipelineDetail() {
           <div className="pipeline-meta">
             <span className="mono sha">{shortSha(pipeline.sha)}</span>
             <ConfigChip version={pipeline.config_version ?? null} />
+            {pipeline.config_url && (
+              <a
+                className="cfg-link"
+                href={pipeline.config_url}
+                target="_blank"
+                rel="noreferrer"
+                title={`View the config this run used, at ${shortSha(pipeline.sha)}`}
+              >
+                view config ↗
+              </a>
+            )}
             {sourceLabel(pipeline.source) && (
               <span className="source-chip">{sourceLabel(pipeline.source)}</span>
             )}

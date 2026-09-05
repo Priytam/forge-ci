@@ -804,6 +804,22 @@ tbody tr:last-child td {
   --pillglow: rgba(210, 153, 34, 0.09);
 }
 
+/* Deep link to the .forge-ci.yml a run used, in the provider's web UI at the
+   run's commit. Styled as a chip so it sits with config/source chips. */
+.cfg-link {
+  font-size: 11px;
+  color: var(--blue);
+  text-decoration: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+.cfg-link:hover {
+  border-color: var(--blue);
+  text-decoration: underline;
+}
+
 .allowfail-tag {
   font-size: 9px;
   font-weight: 700;

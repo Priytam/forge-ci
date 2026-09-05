@@ -14,6 +14,13 @@ type Pipeline struct {
 	// ConfigVersion is the registered config version this pipeline ran;
 	// nil means a one-off custom config was supplied at run time.
 	ConfigVersion *int `json:"config_version"`
+	// ConfigSource is where the config that ran came from: 'repo' (the in-repo
+	// .forge-ci.yml fetched at SHA) or 'registered' (Forge's own registry).
+	ConfigSource string `json:"config_source,omitempty"`
+	// ConfigURL deep-links the config file this run used, in the provider's web
+	// UI at SHA. Empty when no correct link can be built — see
+	// Store.ConfigFileURL — and the UI then simply shows none.
+	ConfigURL string `json:"config_url,omitempty"`
 	// Source is the trigger: api | push | webhook | merge_request | schedule.
 	Source    string    `json:"source"`
 	CreatedAt time.Time `json:"created_at"`

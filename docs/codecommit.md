@@ -214,6 +214,12 @@ repo's `config_source` toggle and `config_path` override — the same behaviour 
 the other providers. A missing file (or unknown commit/repo) falls back to the
 registered config rather than failing the pipeline.
 
+The pipeline detail page links the file it used, opening the CodeCommit console's
+file browser at that commit. The console is region-scoped, so the link needs
+`aws_region` (registered, or encoded in the clone URL); without one the page
+simply shows no link. See
+[vcs-integration.md](vcs-integration.md#viewing-the-config-a-run-used).
+
 ## Troubleshooting
 
 | Symptom | Cause |

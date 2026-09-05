@@ -370,3 +370,109 @@ func TestPipelinesPendingStatusPostGitHubUnchanged(t *testing.T) {
 		t.Error("a GitHub repo with no credential was offered")
 	}
 }
+
+// The config link is emitted only for a run that actually used the in-repo
+// file. A registered-config run did NOT run whatever is in git at that commit,
+// so linking there would show the wrong pipeline definition.
+func TestConfigFileURLOnlyForRepoSourcedRuns(t *testing.T) {
+	st := newRegistryTestStore(t)
+	ctx := context.Background()
+
+	if err := st.RegisterRepo(ctx, proto.RepoRegistration{
+		Repo: "acme/app", Provider: "github", Token: "ghp_x",
+		CloneURL: "https://github.com/acme/app.git", DefaultBranch: "main",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	link, err := st.ConfigFileURL(ctx, "acme/app", "deadbeef", "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if link != "https://github.com/acme/app/blob/deadbeef/.forge-ci.yml" {
+		t.Errorf("repo-sourced link = %q", link)
+	}
+
+	for _, source := range []string{"registered", ""} {
+		link, err := st.ConfigFileURL(ctx, "acme/app", "deadbeef", source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if link != "" {
+			t.Errorf("config_source=%q produced a link (%q); the git file is not what ran",
+				source, link)
+		}
+	}
+}
+
+// A repo's config_path override must be reflected in the link.
+func TestConfigFileURLHonoursConfigPath(t *testing.T) {
+	st := newRegistryTestStore(t)
+	ctx := context.Background()
+
+	if err := st.RegisterRepo(ctx, proto.RepoRegistration{
+		Repo: "acme/app", Provider: "github", Token: "ghp_x",
+		CloneURL: "https://github.com/acme/app.git", DefaultBranch: "main",
+		ConfigSource: "repo", ConfigPath: "ci/forge.yml",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	link, err := st.ConfigFileURL(ctx, "acme/app", "abc123", "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if link != "https://github.com/acme/app/blob/abc123/ci/forge.yml" {
+		t.Errorf("link = %q, want the repo's config_path", link)
+	}
+}
+
+// An unregistered repo, and one on provider "other", must both yield no link
+// and no error — the page renders normally with nothing to click.
+func TestConfigFileURLNoLinkCases(t *testing.T) {
+	st := newRegistryTestStore(t)
+	ctx := context.Background()
+
+	link, err := st.ConfigFileURL(ctx, "never/registered", "abc", "repo")
+	if err != nil {
+		t.Fatalf("unregistered repo should not error: %v", err)
+	}
+	if link != "" {
+		t.Errorf("unregistered repo produced a link: %q", link)
+	}
+
+	if err := st.RegisterRepo(ctx, proto.RepoRegistration{
+		Repo: "acme/selfhosted", Provider: "other",
+		CloneURL: "https://git.example.com/acme/selfhosted.git", DefaultBranch: "main",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	link, err = st.ConfigFileURL(ctx, "acme/selfhosted", "abc", "repo")
+	if err != nil {
+		t.Fatalf(`provider "other" should not error: %v`, err)
+	}
+	if link != "" {
+		t.Errorf(`provider "other" produced a link: %q`, link)
+	}
+}
+
+// A CodeCommit run links into the region-scoped console browser.
+func TestConfigFileURLCodeCommit(t *testing.T) {
+	st := newRegistryTestStore(t)
+	ctx := context.Background()
+
+	if err := st.RegisterRepo(ctx, proto.RepoRegistration{
+		Repo: "tablespace-api", Provider: "codecommit", AWSRegion: "ap-south-1",
+		CloneURL: "codecommit::ap-south-1://tablespace-api", DefaultBranch: "main",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	link, err := st.ConfigFileURL(ctx, "tablespace-api", "9fceb02d", "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "https://ap-south-1.console.aws.amazon.com/codesuite/codecommit/" +
+		"repositories/tablespace-api/browse/9fceb02d/--/.forge-ci.yml?region=ap-south-1"
+	if link != want {
+		t.Errorf("link =\n  %q\nwant\n  %q", link, want)
+	}
+}

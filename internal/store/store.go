@@ -564,8 +564,10 @@ func (s *Store) ListRepos(ctx context.Context) ([]proto.RepoSummary, error) {
 func (s *Store) GetPipeline(ctx context.Context, id int64) (*proto.Pipeline, []proto.Job, error) {
 	var p proto.Pipeline
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, repo, ref, sha, config_version, source, created_at FROM pipelines WHERE id=$1`, id).
-		Scan(&p.ID, &p.Repo, &p.Ref, &p.SHA, &p.ConfigVersion, &p.Source, &p.CreatedAt)
+		`SELECT id, repo, ref, sha, config_version, config_source, source, created_at
+		 FROM pipelines WHERE id=$1`, id).
+		Scan(&p.ID, &p.Repo, &p.Ref, &p.SHA, &p.ConfigVersion, &p.ConfigSource,
+			&p.Source, &p.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil, ErrNotFound
 	}

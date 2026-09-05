@@ -263,6 +263,14 @@ func (s *Server) getPipeline(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "failed to load pipeline")
 		return
 	}
+	// Deep-link the config this run used. No link is a normal outcome
+	// (unsupported provider, registered config, no CodeCommit region), so a
+	// failure resolving it must not fail the page — the link is just omitted.
+	if link, lerr := s.store.ConfigFileURL(r.Context(), p.Repo, p.SHA, p.ConfigSource); lerr != nil {
+		slog.Warn("config link", "err", lerr, "pipeline", p.ID)
+	} else {
+		p.ConfigURL = link
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"pipeline": p, "jobs": jobs})
 }
 
