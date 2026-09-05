@@ -112,6 +112,31 @@ type dockerExecutor struct{}
 
 func (dockerExecutor) Name() string { return "docker" }
 
+// dockerRunArgs builds the `docker run` argv for a job container.
+//
+// The script is run through `sh -ce` as the container's ENTRYPOINT, not as its
+// command. Passing it as the command leaves the image's own ENTRYPOINT in
+// place, so an image that declares one (aquasec/trivy is `["trivy"]`,
+// zricethezav/gitleaks is `["gitleaks"]`) receives the shell invocation as
+// arguments — `trivy sh -ce <script>` — and fails with `unknown command "sh"`.
+// Forcing --entrypoint means a job's script runs the same way whatever the
+// image does, which is the contract every other executor already keeps.
+//
+// Both the service-less and the with-services paths go through here so they
+// cannot drift apart again.
+func dockerRunArgs(job *proto.RunnerJob, workdir, image, name, network string, extraEnv ...string) []string {
+	args := []string{"run", "--rm", "--name", name, "--network", network,
+		"-v", workdir + ":/workspace", "-w", "/workspace"}
+	for _, kv := range ciEnv(job) {
+		args = append(args, "-e", kv)
+	}
+	for _, kv := range extraEnv {
+		args = append(args, "-e", kv)
+	}
+	args = append(args, "--entrypoint", "sh", image, "-ce", job.Script)
+	return args
+}
+
 func (dockerExecutor) Start(ctx context.Context, job *proto.RunnerJob, workdir string) (io.ReadCloser, func() int, error) {
 	image := job.Image
 	if image == "" {
@@ -123,12 +148,7 @@ func (dockerExecutor) Start(ctx context.Context, job *proto.RunnerJob, workdir s
 	if len(job.Services) == 0 {
 		// The workspace is bind-mounted so artifacts land on the host for
 		// collection after the container exits.
-		args := []string{"run", "--rm", "--name", name, "--network", "none",
-			"-v", workdir + ":/workspace", "-w", "/workspace"}
-		for _, kv := range ciEnv(job) {
-			args = append(args, "-e", kv)
-		}
-		args = append(args, image, "sh", "-ce", job.Script)
+		args := dockerRunArgs(job, workdir, image, name, "none")
 		pr, wait, err := start(exec.CommandContext(ctx, "docker", args...))
 		if err != nil {
 			return nil, nil, err
@@ -214,17 +234,12 @@ func startDockerWithServices(ctx context.Context, job *proto.RunnerJob, workdir,
 
 	// Run the job container on the same network so the script resolves service
 	// aliases. A convenience env var lists the aliases available.
-	args := []string{"run", "--rm", "--name", name, "--network", network,
-		"-v", workdir + ":/workspace", "-w", "/workspace"}
-	for _, kv := range ciEnv(job) {
-		args = append(args, "-e", kv)
-	}
 	aliases := make([]string, len(job.Services))
 	for i, svc := range job.Services {
 		aliases[i] = svc.Alias
 	}
-	args = append(args, "-e", "FORGE_SERVICE_ALIASES="+strings.Join(aliases, ","))
-	args = append(args, image, "sh", "-ce", job.Script)
+	args := dockerRunArgs(job, workdir, image, name, network,
+		"FORGE_SERVICE_ALIASES="+strings.Join(aliases, ","))
 
 	pr, wait, err := start(exec.CommandContext(ctx, "docker", args...))
 	if err != nil {
