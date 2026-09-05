@@ -274,11 +274,13 @@ export default function PipelineDetail() {
               {stage.jobs.map((job) => {
                 const dur = duration(job.started_at, job.finished_at);
                 // An allow_failure job that failed doesn't fail the pipeline —
-                // show it as a warning, not a hard red.
+                // show it as a warning, not a hard red. It is FINISHED though,
+                // so it gets its own "warning" state rather than borrowing
+                // "blocked", whose glyph means "waiting".
                 const allowedFail =
                   job.allow_failure === true && job.status === "failed";
                 const pillClass = allowedFail
-                  ? "pill-blocked"
+                  ? "pill-warning"
                   : `pill-${job.status}`;
                 const tooltip = [
                   job.name,
@@ -305,7 +307,7 @@ export default function PipelineDetail() {
                       }
                     >
                       <StatusIcon
-                        status={allowedFail ? "blocked" : job.status}
+                        status={allowedFail ? "warning" : job.status}
                       />
                       <span className="job-pill-name">{job.name}</span>
                       {job.allow_failure && (

@@ -526,6 +526,16 @@ tbody tr:last-child td {
   font-size: 8px;
 }
 
+/* A job that ran and failed under allow_failure: the same warning orange as
+   .dot-blocked, but a bold "!" at normal glyph size — finished and flagged,
+   not waiting. */
+.dot-warning {
+  border-color: var(--orange);
+  color: #fb923c;
+  background: rgba(232, 131, 58, 0.18);
+  font-weight: 700;
+}
+
 .dot-pending {
   border-color: var(--yellow);
   color: #fbbf24;
@@ -785,6 +795,9 @@ tbody tr:last-child td {
   --pillglow: rgba(88, 166, 255, 0.14);
 }
 .pill-blocked {
+  --pillglow: rgba(210, 153, 34, 0.14);
+}
+.pill-warning {
   --pillglow: rgba(210, 153, 34, 0.14);
 }
 .pill-pending {

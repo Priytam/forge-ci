@@ -9,6 +9,11 @@ function symbolFor(status: string): string {
       return "✕";
     case "blocked":
       return "⏸";
+    // "warning" is a job that RAN and failed under allow_failure. It shares the
+    // orange of "blocked" but must not share its pause glyph: ⏸ reads as
+    // "waiting for something", and this job is finished.
+    case "warning":
+      return "!";
     case "canceled":
       return "–";
     default:
@@ -21,6 +26,7 @@ const KNOWN = new Set([
   "failed",
   "running",
   "blocked",
+  "warning",
   "pending",
   "created",
   "canceled",
