@@ -20,13 +20,16 @@ import "sort"
 // built-in by registering its own template under the same name.
 //
 // Each scan job lands in a `test` stage and defaults to allow_failure: true so
-// a finding surfaces in the pipeline without hard-blocking it. Because
-// include: stages are unioned ahead of stages declared only in the main
-// config, the `test` stage sorts before main-only stages (e.g. build/deploy);
-// scans therefore run first ("security-first"). To place scans at a specific
-// point in your stage order, declare `test` yourself in the main config's
-// `stages:` list. See docs/pipeline-dsl.md for how to make a scan blocking
+// a finding surfaces in the pipeline without hard-blocking it. A `test` stage
+// the main config does not declare is unioned ahead of main-only stages (e.g.
+// build/deploy), so scans run first ("security-first"); a main config that DOES
+// declare `test` in its `stages:` positions it itself (see mergeStages in
+// include.go). See docs/pipeline-dsl.md for how to make a scan blocking
 // (override allow_failure) or point a scan at a different target.
+//
+// Every scanner needs network egress — semgrep fetches its rule set and trivy
+// downloads a vulnerability database — which jobs have by default; do not give
+// a scan job `network: none`.
 
 // builtin template names — kept as exported-ish constants for callers/tests.
 const (

@@ -207,11 +207,12 @@ complete runnable config.
 - Every scan job lands in the **`test`** stage and is **`allow_failure: true`**
   by default — a finding is surfaced in the pipeline (the job reports `failed`)
   but does **not** block dependents or mark the pipeline failed.
-- Because included stages are **unioned ahead** of stages that appear only in
-  your main config, the `test` stage (scans) sorts **before** main-only stages
-  such as `build`/`deploy` — scans run "security-first". To place scans at a
-  specific point in the order, declare `test` yourself in the main `stages:`
-  list.
+- A stage that exists **only** in an include is unioned **ahead** of stages that
+  appear only in your main config, so an unpositioned `test` stage (scans) sorts
+  **before** main-only stages such as `build`/`deploy` — scans run
+  "security-first". To place scans anywhere else, **declare `test` in your main
+  `stages:` list**: when the main config names a stage, the main config's
+  position for it wins.
 - Every scanner **needs network egress** (semgrep fetches its rule set from
   `semgrep.dev`; trivy downloads its vulnerability database). Jobs get egress by
   default — see [`network:`](#network--container-network) — so a scan job must

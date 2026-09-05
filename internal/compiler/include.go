@@ -106,25 +106,11 @@ func resolveIncludesDepth(main config, tmpl TemplateFunc, depth int) (config, er
 }
 
 // mergeConfig merges an overlay config over a base: jobs are deep-merged by
-// name (overlay wins per key via mergeSpec), stage lists are unioned preserving
-// order, default/auto_cancel are taken from the overlay when it sets them.
+// name (overlay wins per key via mergeSpec), stage lists are unioned (see
+// mergeStages), default/auto_cancel are taken from the overlay when it sets them.
 func mergeConfig(base, overlay config) config {
 	out := config{}
-
-	// Stages: union, base order first, then any new overlay stages.
-	seen := map[string]bool{}
-	for _, s := range base.Stages {
-		if !seen[s] {
-			out.Stages = append(out.Stages, s)
-			seen[s] = true
-		}
-	}
-	for _, s := range overlay.Stages {
-		if !seen[s] {
-			out.Stages = append(out.Stages, s)
-			seen[s] = true
-		}
-	}
+	out.Stages = mergeStages(base.Stages, overlay.Stages)
 
 	// Jobs: deep-merge by name.
 	out.Jobs = map[string]jobSpec{}
@@ -158,6 +144,49 @@ func mergeConfig(base, overlay config) config {
 	out.FailFast = base.FailFast
 	if overlay.FailFast != nil {
 		out.FailFast = overlay.FailFast
+	}
+	return out
+}
+
+// mergeStages unions two stage lists. Stages the overlay does not mention keep
+// their base order and come first; everything the overlay lists follows in the
+// OVERLAY's order.
+//
+// The overlay is the main config (includes are merged underneath it), so this is
+// what lets an explicit `stages:` mean what it says. Previously the base order
+// was emitted wholesale first, so a config declaring
+//
+//	stages: [lint, test, build, deploy]
+//
+// that included a built-in (each declares `stages: [test]`) rendered as
+//
+//	[test, lint, build, deploy]
+//
+// — the included `test` outranking a `lint` the author had put before it.
+//
+// Stages that appear ONLY in an include still sort ahead of main-only stages,
+// which is what makes an unpositioned scan run security-first; declaring the
+// stage in the main config is now the way to place it.
+func mergeStages(base, overlay []string) []string {
+	inOverlay := make(map[string]bool, len(overlay))
+	for _, s := range overlay {
+		inOverlay[s] = true
+	}
+	out := make([]string, 0, len(base)+len(overlay))
+	seen := map[string]bool{}
+	// Base-only stages, in base order.
+	for _, s := range base {
+		if !inOverlay[s] && !seen[s] {
+			out = append(out, s)
+			seen[s] = true
+		}
+	}
+	// Then the overlay's own order, which positions anything it names.
+	for _, s := range overlay {
+		if !seen[s] {
+			out = append(out, s)
+			seen[s] = true
+		}
 	}
 	return out
 }
