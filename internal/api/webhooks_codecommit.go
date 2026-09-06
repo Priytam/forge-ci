@@ -273,8 +273,12 @@ func (s *Server) codecommitPush(w http.ResponseWriter, r *http.Request, body []b
 			_ = s.store.ForgetWebhookDelivery(r.Context(), "codecommit", deliveryID)
 		}
 	}()
-	*created = s.triggerFromWebhook(w, r, push.Repo, push.Ref, push.SHA, push.Author,
-		compiler.SourceWebhook, nil, nil)
+	// CodeCommit's EventBridge payload carries no commit author or message —
+	// only the commit id — so both stay empty rather than being guessed at.
+	*created = s.triggerFromWebhook(w, r, webhookRun{
+		Repo: push.Repo, Ref: push.Ref, SHA: push.SHA,
+		Actor: push.Author, Source: compiler.SourceWebhook,
+	})
 }
 
 // codecommitPullRequest creates a merge_request pipeline for a CodeCommit PR
@@ -306,7 +310,9 @@ func (s *Server) codecommitPullRequest(w http.ResponseWriter, r *http.Request, b
 	// CodeCommit has no commit-status API, so the PR id and the destination
 	// commit are recorded now — they are the only way to comment on this PR once
 	// the run finishes.
-	*created = s.triggerFromWebhook(w, r, pr.Repo,
-		pr.SourceBranch, pr.HeadSHA, pr.Author, compiler.SourceMergeRequest, ctx,
-		&src)
+	*created = s.triggerFromWebhook(w, r, webhookRun{
+		Repo: pr.Repo, Ref: pr.SourceBranch, SHA: pr.HeadSHA,
+		Actor: pr.Author, Source: compiler.SourceMergeRequest,
+		CommitMessage: pr.Title, ExtraCtx: ctx, PR: &src,
+	})
 }

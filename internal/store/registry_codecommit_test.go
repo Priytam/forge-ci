@@ -7,9 +7,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/priytamjeepandey/forge-ci/internal/compiler"
 	"github.com/priytamjeepandey/forge-ci/internal/proto"
 )
 
@@ -600,5 +602,71 @@ func TestGetJobCarriesApprovalGateState(t *testing.T) {
 	}
 	if j.Approvals[0].Comment != "hold until the index migration lands" {
 		t.Errorf("comment = %q", j.Approvals[0].Comment)
+	}
+}
+
+// The commit facts describe the CODE; triggered_by describes the person. A
+// merge is the case that separates them, and both must survive the round trip.
+func TestPipelineCarriesCommitIdentity(t *testing.T) {
+	st := newRegistryTestStore(t)
+	ctx := context.Background()
+
+	p, err := st.CreatePipeline(ctx, proto.CreatePipelineRequest{
+		Repo: "acme/app", Ref: "main", SHA: "abc123",
+		Config: "jobs:\n  build:\n    script: echo hi",
+		// alice merged dana's work: the actor is not the author.
+		TriggeredBy:   "alice@acme.test",
+		CommitAuthor:  "dana",
+		CommitMessage: "Fix booking race condition\n\nbody nobody reads",
+		Source:        "webhook",
+	}, []compiler.CompiledJob{{
+		Name: "build", Stage: "test", StageIdx: 0, Script: "echo hi",
+	}}, nil, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, _, err := st.GetPipeline(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TriggeredBy != "alice@acme.test" {
+		t.Errorf("TriggeredBy = %q", got.TriggeredBy)
+	}
+	if got.CommitAuthor != "dana" {
+		t.Errorf("CommitAuthor = %q, want dana — the author is not the actor", got.CommitAuthor)
+	}
+	if got.CommitMessage != "Fix booking race condition\n\nbody nobody reads" {
+		t.Errorf("CommitMessage = %q", got.CommitMessage)
+	}
+
+	// The list views feed the pipeline table and repo cards, so they carry it too.
+	list, err := st.ListPipelines(ctx, "acme/app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("got %d pipelines, want 1", len(list))
+	}
+	if list[0].CommitAuthor != "dana" || list[0].TriggeredBy != "alice@acme.test" {
+		t.Errorf("list row lost the identities: %+v", list[0])
+	}
+}
+
+// A commit message is an unbounded field written from an external event, so it
+// is capped — and cut on a rune boundary, never mid-character.
+func TestCommitMessageIsCapped(t *testing.T) {
+	long := strings.Repeat("a", maxCommitMessageBytes+500)
+	if got := capCommitMessage(long); len(got) != maxCommitMessageBytes {
+		t.Errorf("len = %d, want %d", len(got), maxCommitMessageBytes)
+	}
+	if got := capCommitMessage("short"); got != "short" {
+		t.Errorf("a short message must pass through unchanged, got %q", got)
+	}
+	// A multi-byte rune straddling the cap must not be sliced in half.
+	multi := strings.Repeat("a", maxCommitMessageBytes-1) + "é" + "tail"
+	got := capCommitMessage(multi)
+	if !utf8.ValidString(got) {
+		t.Errorf("cap produced invalid UTF-8: %q", got[len(got)-4:])
 	}
 }

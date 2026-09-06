@@ -14,7 +14,9 @@ import {
   shortSha,
   sourceLabel,
   triggerVerb,
+  commitSubject,
   type Job,
+  type Pipeline,
 } from "../api";
 import { usePoll } from "../hooks/usePoll";
 import StatusBadge from "../components/StatusBadge";
@@ -109,6 +111,25 @@ function groupByDepth(jobs: Job[]): Stage[] {
 }
 
 type GroupMode = "stage" | "deps";
+
+/**
+ * authorDiffers reports whether the commit author is a DIFFERENT person from
+ * the one who started the run, and is therefore worth naming separately.
+ *
+ * The comparison is loose on purpose: providers report the same human under
+ * different spellings across the two fields (a GitHub username in one, a git
+ * author name in the other), and showing "alice authored · alice pushed" for
+ * every ordinary push would be noise that trains people to ignore the line.
+ */
+function authorDiffers(p: Pipeline): boolean {
+  const author = (p.commit_author ?? "").trim().toLowerCase();
+  const actor = (p.triggered_by ?? "").trim().toLowerCase();
+  if (!author || !actor) return false;
+  if (author === actor) return false;
+  // Compare local parts too: "alice" vs "alice@corp.com" is one person.
+  const local = (s: string) => s.split("@")[0];
+  return local(author) !== local(actor);
+}
 
 export default function PipelineDetail() {
   const { id } = useParams<{ id: string }>();
@@ -228,9 +249,26 @@ export default function PipelineDetail() {
             {pipeline.repo} <span className="muted">·</span>{" "}
             <span className="ref-tag">{pipeline.ref}</span>
           </h1>
+          {/* What this run is. A bare sha says nothing; the subject line is the
+              one thing that identifies a run to a human reading the page. */}
+          {commitSubject(pipeline.commit_message) && (
+            <div className="commit-subject" title={pipeline.commit_message}>
+              {commitSubject(pipeline.commit_message)}
+            </div>
+          )}
           <div className="pipeline-meta">
             {/* Who started this run — the first question anyone asks of a
                 pipeline, and previously not answered anywhere on the page. */}
+            {/* Author and actor are shown separately ONLY when they differ —
+                a merge, a bot push, or a re-run of someone else's commit. When
+                they are the same person one avatar is the honest rendering. */}
+            {authorDiffers(pipeline) && (
+              <span className="actor">
+                <Avatar identity={pipeline.commit_author!} size={22} />
+                <span className="actor-name">{displayName(pipeline.commit_author!)}</span>
+                <span className="actor-verb">authored</span>
+              </span>
+            )}
             <span className="actor">
               <Avatar identity={pipeline.triggered_by ?? ""} size={22} />
               {pipeline.triggered_by && (

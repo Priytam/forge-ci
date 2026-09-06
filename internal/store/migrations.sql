@@ -166,6 +166,19 @@ ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS fail_fast BOOLEAN NOT NULL DEFAUL
 -- Both stay '' for push pipelines and for providers that report via a real
 -- status API, and an empty mr_iid is exactly what marks a run as "nothing to
 -- comment on".
+-- What the run is, and who wrote it — as distinct from who STARTED it
+-- (triggered_by). The two differ exactly where it matters: a merge, a rebase, a
+-- bot push, or a re-run of an old commit all have an actor who is not the
+-- author. Recorded at ingest from the provider event, because Forge does not
+-- host the repo and cannot look a commit up later.
+--   commit_author  who wrote the code; '' when the event does not say
+--                  (CodeCommit's EventBridge payload carries no author).
+--   commit_message what the run is about: the commit message for a push, the
+--                  pull-request title for a PR run. Capped at ingest — the UI
+--                  shows the subject line, and an unbounded body has no reader.
+ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS commit_author  TEXT NOT NULL DEFAULT '';
+ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS commit_message TEXT NOT NULL DEFAULT '';
+
 ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS mr_iid      TEXT NOT NULL DEFAULT '';
 ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS mr_base_sha TEXT NOT NULL DEFAULT '';
 

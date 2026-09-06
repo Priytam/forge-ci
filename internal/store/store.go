@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -275,10 +276,10 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 	p.ConfigVersion = configVersion
 	p.Source = source
 	err = tx.QueryRow(ctx,
-		`INSERT INTO pipelines (repo, ref, sha, config_yaml, triggered_by, config_version, fail_fast, config_source, source, mr_iid, mr_base_sha)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id, created_at`,
+		`INSERT INTO pipelines (repo, ref, sha, config_yaml, triggered_by, config_version, fail_fast, config_source, source, mr_iid, mr_base_sha, commit_author, commit_message)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id, created_at`,
 		req.Repo, req.Ref, req.SHA, req.Config, req.TriggeredBy, configVersion, failFast, configSource, source,
-		req.MRIID, req.MRBaseSHA).Scan(&p.ID, &p.CreatedAt)
+		req.MRIID, req.MRBaseSHA, req.CommitAuthor, capCommitMessage(req.CommitMessage)).Scan(&p.ID, &p.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -421,7 +422,8 @@ type stageJob struct {
 // its derived overall status and per-stage statuses.
 func (s *Store) ListPipelines(ctx context.Context, repo string) ([]proto.Pipeline, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT p.id, p.repo, p.ref, p.sha, p.config_version, p.source, p.triggered_by, p.created_at,
+		`SELECT p.id, p.repo, p.ref, p.sha, p.config_version, p.source, p.triggered_by,
+		        p.commit_author, p.commit_message, p.created_at,
 		        COALESCE(json_agg(json_build_object(
 		            'stage', j.stage, 'idx', j.stage_idx, 'status', CASE WHEN j.status='failed' AND j.allow_failure THEN 'success' ELSE j.status END
 		        ) ORDER BY j.stage_idx) FILTER (WHERE j.id IS NOT NULL), '[]')
@@ -438,7 +440,7 @@ func (s *Store) ListPipelines(ctx context.Context, repo string) ([]proto.Pipelin
 		var p proto.Pipeline
 		var raw []byte
 		if err := rows.Scan(&p.ID, &p.Repo, &p.Ref, &p.SHA, &p.ConfigVersion, &p.Source,
-			&p.TriggeredBy, &p.CreatedAt, &raw); err != nil {
+			&p.TriggeredBy, &p.CommitAuthor, &p.CommitMessage, &p.CreatedAt, &raw); err != nil {
 			return nil, err
 		}
 		var sjs []stageJob
@@ -466,7 +468,8 @@ func (s *Store) ListPipelinesPage(ctx context.Context, repo string, limit, offse
 		return nil, 0, err
 	}
 	rows, err := s.pool.Query(ctx,
-		`SELECT p.id, p.repo, p.ref, p.sha, p.config_version, p.source, p.triggered_by, p.created_at,
+		`SELECT p.id, p.repo, p.ref, p.sha, p.config_version, p.source, p.triggered_by,
+		        p.commit_author, p.commit_message, p.created_at,
 		        COALESCE(json_agg(json_build_object(
 		            'stage', j.stage, 'idx', j.stage_idx, 'status', CASE WHEN j.status='failed' AND j.allow_failure THEN 'success' ELSE j.status END
 		        ) ORDER BY j.stage_idx) FILTER (WHERE j.id IS NOT NULL), '[]')
@@ -483,7 +486,7 @@ func (s *Store) ListPipelinesPage(ctx context.Context, repo string, limit, offse
 		var p proto.Pipeline
 		var raw []byte
 		if err := rows.Scan(&p.ID, &p.Repo, &p.Ref, &p.SHA, &p.ConfigVersion, &p.Source,
-			&p.TriggeredBy, &p.CreatedAt, &raw); err != nil {
+			&p.TriggeredBy, &p.CommitAuthor, &p.CommitMessage, &p.CreatedAt, &raw); err != nil {
 			return nil, 0, err
 		}
 		var sjs []stageJob
@@ -567,10 +570,10 @@ func (s *Store) GetPipeline(ctx context.Context, id int64) (*proto.Pipeline, []p
 	var p proto.Pipeline
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, repo, ref, sha, config_version, config_source, source,
-		        triggered_by, created_at
+		        triggered_by, commit_author, commit_message, created_at
 		 FROM pipelines WHERE id=$1`, id).
 		Scan(&p.ID, &p.Repo, &p.Ref, &p.SHA, &p.ConfigVersion, &p.ConfigSource,
-			&p.Source, &p.TriggeredBy, &p.CreatedAt)
+			&p.Source, &p.TriggeredBy, &p.CommitAuthor, &p.CommitMessage, &p.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil, ErrNotFound
 	}
@@ -1079,6 +1082,24 @@ func (s *Store) Approve(ctx context.Context, jobID int64, req proto.ApprovalRequ
 		return nil, err
 	}
 	return s.GetJob(ctx, jobID)
+}
+
+// maxCommitMessageBytes bounds what a provider event can push into a pipeline
+// row. The UI renders the subject line; a body beyond this has no reader, and
+// an unbounded field is an unbounded write from an external event.
+const maxCommitMessageBytes = 2000
+
+// capCommitMessage truncates an over-long commit message on a rune boundary, so
+// a multi-byte character can never be cut in half.
+func capCommitMessage(msg string) string {
+	if len(msg) <= maxCommitMessageBytes {
+		return msg
+	}
+	cut := msg[:maxCommitMessageBytes]
+	for len(cut) > 0 && !utf8.ValidString(cut) {
+		cut = cut[:len(cut)-1]
+	}
+	return cut
 }
 
 // ---- runner queue ----

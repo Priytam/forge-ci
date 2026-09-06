@@ -342,7 +342,30 @@ func (s *Server) listRegisteredRepos(w http.ResponseWriter, r *http.Request) {
 // is nil for push pipelines. For a PR pipeline the caller passes the PR HEAD sha and the PR head
 // branch as ref, so only/except and rules matching the branch still work and the
 // commit status lands on the PR head sha.
-func (s *Server) triggerFromWebhook(w http.ResponseWriter, r *http.Request, repo, ref, sha, author, source string, extraCtx map[string]string, pr *prSource) bool {
+// webhookRun is everything a provider event tells us about the run to create.
+// It replaced a nine-argument call: the arguments had grown past the point
+// where a reader could tell which string was which at a call site.
+type webhookRun struct {
+	Repo   string
+	Ref    string
+	SHA    string
+	Actor  string // who STARTED the run (pusher, PR author, API caller)
+	Source string // compiler.Source*
+
+	// Commit describes the CODE, where Actor describes the person who set it
+	// going. They differ on a merge, a rebase, a bot push, or a re-run.
+	CommitAuthor  string
+	CommitMessage string
+
+	// ExtraCtx carries source-specific variables (the CI_MERGE_REQUEST_* set);
+	// PR identifies the pull request a merge_request run belongs to.
+	ExtraCtx map[string]string
+	PR       *prSource
+}
+
+func (s *Server) triggerFromWebhook(w http.ResponseWriter, r *http.Request, run webhookRun) bool {
+	repo, ref, sha, author, source := run.Repo, run.Ref, run.SHA, run.Actor, run.Source
+	extraCtx, pr := run.ExtraCtx, run.PR
 	if repo == "" || ref == "" || sha == "" {
 		writeErr(w, http.StatusBadRequest, "payload missing repo/ref/sha")
 		return false
@@ -375,6 +398,7 @@ func (s *Server) triggerFromWebhook(w http.ResponseWriter, r *http.Request, repo
 	create := proto.CreatePipelineRequest{
 		Repo: repo, Ref: ref, SHA: sha, Config: config,
 		TriggeredBy: author, ConfigSource: cfgSource, Source: source,
+		CommitAuthor: run.CommitAuthor, CommitMessage: run.CommitMessage,
 	}
 	if pr != nil {
 		create.MRIID, create.MRBaseSHA = pr.IID, pr.BaseSHA
@@ -440,8 +464,10 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// githubPush creates a pipeline for a branch/tag push at the pushed sha.
-func (s *Server) githubPush(w http.ResponseWriter, r *http.Request, body []byte) {
+// parseGitHubPush extracts the run to create from a GitHub push payload.
+// Pure, like parseGitHubPR, so the actor/author distinction is testable without
+// standing up a server.
+func parseGitHubPush(body []byte) (webhookRun, error) {
 	var payload struct {
 		Ref        string `json:"ref"` // refs/heads/main
 		After      string `json:"after"`
@@ -451,8 +477,42 @@ func (s *Server) githubPush(w http.ResponseWriter, r *http.Request, body []byte)
 		Pusher struct {
 			Name string `json:"name"`
 		} `json:"pusher"`
+		// head_commit is the tip after the push — who WROTE it and what it says,
+		// which is not the same as who pushed. Null on a branch deletion.
+		HeadCommit *struct {
+			Message string `json:"message"`
+			Author  struct {
+				Name     string `json:"name"`
+				Username string `json:"username"`
+			} `json:"author"`
+		} `json:"head_commit"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
+		return webhookRun{}, err
+	}
+	ref := strings.TrimPrefix(payload.Ref, "refs/heads/")
+	ref = strings.TrimPrefix(ref, "refs/tags/")
+	var commitAuthor, commitMessage string
+	if c := payload.HeadCommit; c != nil {
+		// Prefer the GitHub username (it matches the actor's namespace) and fall
+		// back to the git author name when the commit is from an unlinked email.
+		commitAuthor = c.Author.Username
+		if commitAuthor == "" {
+			commitAuthor = c.Author.Name
+		}
+		commitMessage = c.Message
+	}
+	return webhookRun{
+		Repo: payload.Repository.FullName, Ref: ref, SHA: payload.After,
+		Actor: payload.Pusher.Name, Source: compiler.SourceWebhook,
+		CommitAuthor: commitAuthor, CommitMessage: commitMessage,
+	}, nil
+}
+
+// githubPush creates a pipeline for a branch/tag push at the pushed sha.
+func (s *Server) githubPush(w http.ResponseWriter, r *http.Request, body []byte) {
+	run, err := parseGitHubPush(body)
+	if err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON payload")
 		return
 	}
@@ -471,10 +531,7 @@ func (s *Server) githubPush(w http.ResponseWriter, r *http.Request, body []byte)
 			_ = s.store.ForgetWebhookDelivery(r.Context(), "github", deliveryID)
 		}
 	}()
-	ref := strings.TrimPrefix(payload.Ref, "refs/heads/")
-	ref = strings.TrimPrefix(ref, "refs/tags/")
-	*created = s.triggerFromWebhook(w, r, payload.Repository.FullName, ref, payload.After,
-		payload.Pusher.Name, compiler.SourceWebhook, nil, nil)
+	*created = s.triggerFromWebhook(w, r, run)
 }
 
 // prSource is the pull-request identity recorded on a merge_request pipeline.
@@ -568,9 +625,14 @@ func (s *Server) githubPullRequest(w http.ResponseWriter, r *http.Request, body 
 		}
 	}()
 	ctx := mergeRequestContext(pr.IID, pr.SourceBranch, pr.TargetBranch, pr.Title)
-	*created = s.triggerFromWebhook(w, r, pr.Repo,
-		pr.SourceBranch, pr.HeadSHA, pr.Author, compiler.SourceMergeRequest, ctx,
-		&prSource{IID: strconv.Itoa(pr.IID)})
+	// A PR payload carries no head-commit author or message; the PR title is
+	// what the run is about, and the PR author is already the actor.
+	*created = s.triggerFromWebhook(w, r, webhookRun{
+		Repo: pr.Repo, Ref: pr.SourceBranch, SHA: pr.HeadSHA,
+		Actor: pr.Author, Source: compiler.SourceMergeRequest,
+		CommitMessage: pr.Title, ExtraCtx: ctx,
+		PR: &prSource{IID: strconv.Itoa(pr.IID)},
+	})
 }
 
 // prActionTriggers reports whether a GitHub pull_request / Bitbucket pull-request
@@ -622,8 +684,9 @@ func (s *Server) bitbucketWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// bitbucketPush creates a pipeline for a repo:push at the pushed sha.
-func (s *Server) bitbucketPush(w http.ResponseWriter, r *http.Request, body []byte) {
+// parseBitbucketPush extracts the run to create from a repo:push payload. ok is
+// false when the push carries no change to build (which the caller answers 202).
+func parseBitbucketPush(body []byte) (webhookRun, bool, error) {
 	var payload struct {
 		Repository struct {
 			FullName string `json:"full_name"`
@@ -637,18 +700,55 @@ func (s *Server) bitbucketPush(w http.ResponseWriter, r *http.Request, body []by
 				New struct {
 					Name   string `json:"name"`
 					Target struct {
-						Hash string `json:"hash"`
+						Hash    string `json:"hash"`
+						Message string `json:"message"`
+						Author  struct {
+							Raw  string `json:"raw"` // "Name <email>"
+							User struct {
+								Nickname    string `json:"nickname"`
+								DisplayName string `json:"display_name"`
+							} `json:"user"`
+						} `json:"author"`
 					} `json:"target"`
 				} `json:"new"`
 			} `json:"changes"`
 		} `json:"push"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
+		return webhookRun{}, false, err
+	}
+	if len(payload.Push.Changes) == 0 {
+		return webhookRun{}, false, nil
+	}
+	change := payload.Push.Changes[0].New
+	author := payload.Actor.Nickname
+	if author == "" {
+		author = payload.Actor.DisplayName
+	}
+	commitAuthor := change.Target.Author.User.Nickname
+	if commitAuthor == "" {
+		commitAuthor = change.Target.Author.User.DisplayName
+	}
+	if commitAuthor == "" {
+		// Unlinked commit: the raw "Name <email>" header is all Bitbucket has.
+		commitAuthor = rawAuthorName(change.Target.Author.Raw)
+	}
+	return webhookRun{
+		Repo: payload.Repository.FullName, Ref: change.Name, SHA: change.Target.Hash,
+		Actor: author, Source: compiler.SourceWebhook,
+		CommitAuthor: commitAuthor, CommitMessage: change.Target.Message,
+	}, true, nil
+}
+
+// bitbucketPush creates a pipeline for a repo:push at the pushed sha.
+func (s *Server) bitbucketPush(w http.ResponseWriter, r *http.Request, body []byte) {
+	run, ok, err := parseBitbucketPush(body)
+	if err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON payload")
 		return
 	}
-	if len(payload.Push.Changes) == 0 {
-		w.WriteHeader(http.StatusAccepted)
+	if !ok {
+		w.WriteHeader(http.StatusAccepted) // nothing to build
 		return
 	}
 	// Dedup: Bitbucket sends X-Request-UUID; fall back to a hash of the body.
@@ -665,13 +765,7 @@ func (s *Server) bitbucketPush(w http.ResponseWriter, r *http.Request, body []by
 			_ = s.store.ForgetWebhookDelivery(r.Context(), "bitbucket", deliveryID)
 		}
 	}()
-	change := payload.Push.Changes[0].New
-	author := payload.Actor.Nickname
-	if author == "" {
-		author = payload.Actor.DisplayName
-	}
-	*created = s.triggerFromWebhook(w, r, payload.Repository.FullName, change.Name,
-		change.Target.Hash, author, compiler.SourceWebhook, nil, nil)
+	*created = s.triggerFromWebhook(w, r, run)
 }
 
 // parseBitbucketPR extracts a prTrigger from a Bitbucket pull-request payload.
@@ -749,9 +843,23 @@ func (s *Server) bitbucketPullRequest(w http.ResponseWriter, r *http.Request, bo
 		}
 	}()
 	ctx := mergeRequestContext(pr.IID, pr.SourceBranch, pr.TargetBranch, pr.Title)
-	*created = s.triggerFromWebhook(w, r, pr.Repo,
-		pr.SourceBranch, pr.HeadSHA, pr.Author, compiler.SourceMergeRequest, ctx,
-		&prSource{IID: strconv.Itoa(pr.IID)})
+	*created = s.triggerFromWebhook(w, r, webhookRun{
+		Repo: pr.Repo, Ref: pr.SourceBranch, SHA: pr.HeadSHA,
+		Actor: pr.Author, Source: compiler.SourceMergeRequest,
+		CommitMessage: pr.Title, ExtraCtx: ctx,
+		PR: &prSource{IID: strconv.Itoa(pr.IID)},
+	})
+}
+
+// rawAuthorName extracts the display name from a git author header
+// ("Ada Lovelace <ada@example.com>" -> "Ada Lovelace"), falling back to the
+// whole string when there is no angle-bracket form.
+func rawAuthorName(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if i := strings.Index(raw, "<"); i > 0 {
+		return strings.TrimSpace(raw[:i])
+	}
+	return raw
 }
 
 // ---- registered pipeline configs ----

@@ -25,8 +25,15 @@ type Pipeline struct {
 	Source string `json:"source"`
 	// TriggeredBy is the identity that started the run — the pusher/PR author
 	// for a webhook, the caller for an API run, "" for a schedule (nobody did).
-	TriggeredBy string    `json:"triggered_by,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
+	TriggeredBy string `json:"triggered_by,omitempty"`
+	// CommitAuthor is who WROTE the code, which is not always who started the
+	// run: a merge, a rebase, a bot push or a re-run of an old commit all have
+	// an actor who is not the author. "" when the provider event does not say.
+	CommitAuthor string `json:"commit_author,omitempty"`
+	// CommitMessage is what the run is about — the commit message for a push,
+	// the pull-request title for a PR run.
+	CommitMessage string    `json:"commit_message,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 // StageStatus is the derived status of one stage, for the mini per-stage
@@ -325,6 +332,12 @@ type CreatePipelineRequest struct {
 	// the destination-branch commit the PR targets. Both empty for push runs.
 	MRIID     string `json:"mr_iid,omitempty"`
 	MRBaseSHA string `json:"mr_base_sha,omitempty"`
+
+	// CommitAuthor and CommitMessage describe the CODE, where TriggeredBy
+	// describes the actor. Optional on an API run; webhooks fill them from the
+	// provider event.
+	CommitAuthor  string `json:"commit_author,omitempty"`
+	CommitMessage string `json:"commit_message,omitempty"`
 }
 
 // Schedule is a cron-scheduled pipeline trigger for a (repo, ref). The cron

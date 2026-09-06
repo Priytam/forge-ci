@@ -892,6 +892,39 @@ tbody tr:last-child td {
   color: var(--gray);
 }
 
+/* What the run IS — the commit subject, or a PR title. Sits under the repo/ref
+   heading, because a sha identifies a run to a machine and this identifies it
+   to a person. */
+.commit-subject {
+  margin-top: 6px;
+  font-size: 14px;
+  color: var(--text);
+  line-height: 1.35;
+  max-width: 70ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Same idea in a list row: subject leads, sha and chips sit under it. */
+.row-subject {
+  font-size: 13px;
+  color: var(--text);
+  max-width: 46ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row-sha {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
 /* Who started the run, in the pipeline header meta row. */
 .actor {
   display: inline-flex;

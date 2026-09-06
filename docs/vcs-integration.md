@@ -230,6 +230,32 @@ default, registered fallback).
 The manual API path (`POST /api/v1/pipelines` with an explicit `config`) is
 unchanged — it always runs the config you supply.
 
+### Who did what
+
+Forge records three separate identities per run, because they are three
+different facts and conflating them is how "who deployed this?" gets the wrong
+answer:
+
+| Field | Question it answers | Source |
+|---|---|---|
+| `triggered_by` | who **started** the run | pusher (push), PR author (PR), caller (API), `schedule` |
+| `commit_author` | who **wrote** the code | GitHub `head_commit.author`, Bitbucket push target author |
+| approvals | who **released** it | the `job_approvals` vote record, with comments |
+
+The first two differ exactly where it matters — a merge, a rebase, a bot push,
+or a re-run of an old commit all have an actor who is not the author. The
+pipeline page names them separately only when they differ; for an ordinary push
+by the person who wrote the code, one identity is the honest rendering.
+
+`commit_message` carries what the run is about — the commit message for a push,
+the pull-request title for a PR run — and the UI shows its subject line, so a
+run is identified by what it does rather than by a hex sha.
+
+**CodeCommit is the gap:** its EventBridge payload carries only the commit id,
+no author and no message, so both stay empty for a CodeCommit push (the PR title
+is available and is used for PR runs). Filling them would need a `GetCommit`
+call at ingest; Forge does not make one.
+
 ### Viewing the config a run used
 
 A pipeline built from the repo carries a **`config_url`** on

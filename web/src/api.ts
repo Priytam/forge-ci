@@ -43,6 +43,18 @@ export interface Pipeline {
   source?: string;
   /** Identity that started the run; absent for a schedule (nobody did). */
   triggered_by?: string;
+  /** Who WROTE the code — differs from triggered_by on merges, bot pushes and
+   *  re-runs. Absent when the provider event does not say. */
+  commit_author?: string;
+  /** What the run is about: the commit message, or the PR title for a PR run. */
+  commit_message?: string;
+}
+
+/** First line of a commit message — the subject, which is what a header shows. */
+export function commitSubject(message?: string): string {
+  if (!message) return "";
+  const line = message.split("\n", 1)[0].trim();
+  return line;
 }
 
 /**

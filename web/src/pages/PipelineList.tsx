@@ -7,11 +7,13 @@ import {
   relativeTime,
   shortSha,
   sourceLabel,
+  commitSubject,
 } from "../api";
 import { usePoll } from "../hooks/usePoll";
 import StatusBadge from "../components/StatusBadge";
 import StageDots from "../components/StageDots";
 import ConfigChip from "../components/ConfigChip";
+import Avatar from "../components/Avatar";
 import { ProviderChip } from "./Repos";
 
 export default function PipelineList() {
@@ -74,7 +76,7 @@ export default function PipelineList() {
                 <th>ID</th>
                 <th>Repo</th>
                 <th>Ref</th>
-                <th>SHA</th>
+                <th>Commit</th>
                 <th>Stages</th>
                 <th>Status</th>
                 <th>Created</th>
@@ -90,12 +92,22 @@ export default function PipelineList() {
                   <td className="mono">#{p.id}</td>
                   <td>{p.repo}</td>
                   <td>{p.ref}</td>
-                  <td className="mono">
-                    {shortSha(p.sha)}{" "}
-                    <ConfigChip version={p.config_version ?? null} />
-                    {sourceLabel(p.source) && (
-                      <span className="source-chip">{sourceLabel(p.source)}</span>
+                  <td>
+                    {/* The subject line identifies a run; a column of shas does
+                        not. It leads, with the sha kept for reference. */}
+                    {commitSubject(p.commit_message) && (
+                      <div className="row-subject" title={p.commit_message}>
+                        {commitSubject(p.commit_message)}
+                      </div>
                     )}
+                    <div className="row-sha">
+                      <Avatar identity={p.triggered_by ?? ""} size={18} />
+                      <span className="mono">{shortSha(p.sha)}</span>{" "}
+                      <ConfigChip version={p.config_version ?? null} />
+                      {sourceLabel(p.source) && (
+                        <span className="source-chip">{sourceLabel(p.source)}</span>
+                      )}
+                    </div>
                   </td>
                   <td>
                     <StageDots stages={p.stages ?? []} />
