@@ -421,7 +421,7 @@ type stageJob struct {
 // its derived overall status and per-stage statuses.
 func (s *Store) ListPipelines(ctx context.Context, repo string) ([]proto.Pipeline, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT p.id, p.repo, p.ref, p.sha, p.config_version, p.source, p.created_at,
+		`SELECT p.id, p.repo, p.ref, p.sha, p.config_version, p.source, p.triggered_by, p.created_at,
 		        COALESCE(json_agg(json_build_object(
 		            'stage', j.stage, 'idx', j.stage_idx, 'status', CASE WHEN j.status='failed' AND j.allow_failure THEN 'success' ELSE j.status END
 		        ) ORDER BY j.stage_idx) FILTER (WHERE j.id IS NOT NULL), '[]')
@@ -437,7 +437,8 @@ func (s *Store) ListPipelines(ctx context.Context, repo string) ([]proto.Pipelin
 	for rows.Next() {
 		var p proto.Pipeline
 		var raw []byte
-		if err := rows.Scan(&p.ID, &p.Repo, &p.Ref, &p.SHA, &p.ConfigVersion, &p.Source, &p.CreatedAt, &raw); err != nil {
+		if err := rows.Scan(&p.ID, &p.Repo, &p.Ref, &p.SHA, &p.ConfigVersion, &p.Source,
+			&p.TriggeredBy, &p.CreatedAt, &raw); err != nil {
 			return nil, err
 		}
 		var sjs []stageJob
@@ -465,7 +466,7 @@ func (s *Store) ListPipelinesPage(ctx context.Context, repo string, limit, offse
 		return nil, 0, err
 	}
 	rows, err := s.pool.Query(ctx,
-		`SELECT p.id, p.repo, p.ref, p.sha, p.config_version, p.source, p.created_at,
+		`SELECT p.id, p.repo, p.ref, p.sha, p.config_version, p.source, p.triggered_by, p.created_at,
 		        COALESCE(json_agg(json_build_object(
 		            'stage', j.stage, 'idx', j.stage_idx, 'status', CASE WHEN j.status='failed' AND j.allow_failure THEN 'success' ELSE j.status END
 		        ) ORDER BY j.stage_idx) FILTER (WHERE j.id IS NOT NULL), '[]')
@@ -481,7 +482,8 @@ func (s *Store) ListPipelinesPage(ctx context.Context, repo string, limit, offse
 	for rows.Next() {
 		var p proto.Pipeline
 		var raw []byte
-		if err := rows.Scan(&p.ID, &p.Repo, &p.Ref, &p.SHA, &p.ConfigVersion, &p.Source, &p.CreatedAt, &raw); err != nil {
+		if err := rows.Scan(&p.ID, &p.Repo, &p.Ref, &p.SHA, &p.ConfigVersion, &p.Source,
+			&p.TriggeredBy, &p.CreatedAt, &raw); err != nil {
 			return nil, 0, err
 		}
 		var sjs []stageJob
@@ -564,10 +566,11 @@ func (s *Store) ListRepos(ctx context.Context) ([]proto.RepoSummary, error) {
 func (s *Store) GetPipeline(ctx context.Context, id int64) (*proto.Pipeline, []proto.Job, error) {
 	var p proto.Pipeline
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, repo, ref, sha, config_version, config_source, source, created_at
+		`SELECT id, repo, ref, sha, config_version, config_source, source,
+		        triggered_by, created_at
 		 FROM pipelines WHERE id=$1`, id).
 		Scan(&p.ID, &p.Repo, &p.Ref, &p.SHA, &p.ConfigVersion, &p.ConfigSource,
-			&p.Source, &p.CreatedAt)
+			&p.Source, &p.TriggeredBy, &p.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil, ErrNotFound
 	}
@@ -611,6 +614,9 @@ func (s *Store) GetPipeline(ctx context.Context, id int64) (*proto.Pipeline, []p
 	}
 	p.Status = deriveStatus(statuses)
 	p.Stages = deriveStages(sjs)
+	if err := s.attachApprovals(ctx, p.Repo, jobs); err != nil {
+		return nil, nil, err
+	}
 	return &p, jobs, nil
 }
 
@@ -628,7 +634,85 @@ func (s *Store) GetJob(ctx context.Context, id int64) (*proto.Job, error) {
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
-	return &j, err
+	if err != nil {
+		return nil, err
+	}
+	// The job page renders the same approval gate as the pipeline DAG, so it
+	// needs the same vote record.
+	var repo string
+	if err := s.pool.QueryRow(ctx,
+		`SELECT repo FROM pipelines WHERE id=$1`, j.PipelineID).Scan(&repo); err != nil {
+		return nil, err
+	}
+	one := []proto.Job{j}
+	if err := s.attachApprovals(ctx, repo, one); err != nil {
+		return nil, err
+	}
+	return &one[0], nil
+}
+
+// attachApprovals fills in the approval-gate state for every job in jobs that
+// targets an environment: the append-only vote record and the number of
+// approvals the environment's rule requires.
+//
+// It exists because the gate's state is not derivable from a job's status — a
+// 'blocked' job looks identical whether nobody has voted or one of two
+// approvers already has, which left a reviewer unable to tell whether they
+// were the first or the last vote. Jobs with no environment are left untouched,
+// so a pipeline without gates costs one bounded query and no rule lookups.
+func (s *Store) attachApprovals(ctx context.Context, repo string, jobs []proto.Job) error {
+	ids := make([]int64, 0, len(jobs))
+	for _, j := range jobs {
+		if j.Environment != nil && *j.Environment != "" {
+			ids = append(ids, j.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+
+	rows, err := s.pool.Query(ctx,
+		`SELECT job_id, approver, verdict, COALESCE(comment, ''), created_at
+		 FROM job_approvals WHERE job_id = ANY($1) ORDER BY created_at`, ids)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	votes := map[int64][]proto.JobApproval{}
+	for rows.Next() {
+		var jobID int64
+		var a proto.JobApproval
+		if err := rows.Scan(&jobID, &a.Approver, &a.Verdict, &a.Comment, &a.CreatedAt); err != nil {
+			return err
+		}
+		votes[jobID] = append(votes[jobID], a)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	// One rule lookup per distinct environment, not per job.
+	required := map[string]int{}
+	for i := range jobs {
+		if jobs[i].Environment == nil || *jobs[i].Environment == "" {
+			continue
+		}
+		env := *jobs[i].Environment
+		if _, seen := required[env]; !seen {
+			rule, rerr := s.resolveProtectedEnv(ctx, repo, env)
+			if rerr != nil {
+				return rerr
+			}
+			if rule != nil {
+				required[env] = rule.RequiredApprovals
+			} else {
+				required[env] = 0 // unprotected environment: no gate
+			}
+		}
+		jobs[i].Approvals = votes[jobs[i].ID]
+		jobs[i].RequiredApprovals = required[env]
+	}
+	return nil
 }
 
 // ---- logs ----

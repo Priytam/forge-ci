@@ -16,6 +16,11 @@ type DashboardStats struct {
 		ActiveExecutors int `json:"active_executors"` // forked executors/pods right now
 		PipelinesToday  int `json:"pipelines_today"`
 		SuccessRate24h  int `json:"success_rate_24h"` // percent, -1 when no finished pipelines
+		// Finished24h is the DENOMINATOR SuccessRate24h is computed over
+		// (success + failed in the window; cancelled runs are excluded). A
+		// percentage without its sample size reads the same at n=1 as at
+		// n=200, so the UI shows this beside it.
+		Finished24h int `json:"finished_24h"`
 	} `json:"now"`
 	Pipelines []PipelineBucket `json:"pipelines"` // last 24 hourly buckets
 	Jobs      []JobBucket      `json:"jobs"`
@@ -130,6 +135,7 @@ func (s *Store) DashboardStats(ctx context.Context) (*DashboardStats, error) {
 	}
 
 	st.Now.SuccessRate24h = -1
+	st.Now.Finished24h = finished
 	if finished > 0 {
 		st.Now.SuccessRate24h = succeeded * 100 / finished
 	}

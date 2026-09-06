@@ -476,3 +476,129 @@ func TestConfigFileURLCodeCommit(t *testing.T) {
 		t.Errorf("link =\n  %q\nwant\n  %q", link, want)
 	}
 }
+
+// The approval gate's state is not derivable from a job's status: a 'blocked'
+// job looks identical whether nobody has voted or one of two approvers already
+// has. GetPipeline must therefore carry the vote record and the requirement.
+func TestGetPipelineCarriesApprovalGateState(t *testing.T) {
+	st := newRegistryTestStore(t)
+	ctx := context.Background()
+
+	if _, err := st.pool.Exec(ctx,
+		`INSERT INTO protected_environments (repo, name, required_approvals, allow_self_approval)
+		 VALUES ('acme/app', 'production', 2, true)`); err != nil {
+		t.Fatal(err)
+	}
+
+	var pid int64
+	if err := st.pool.QueryRow(ctx,
+		`INSERT INTO pipelines (repo, ref, sha, config_yaml, source, triggered_by)
+		 VALUES ('acme/app','main','abc','{}','webhook','alice@acme.test') RETURNING id`).
+		Scan(&pid); err != nil {
+		t.Fatal(err)
+	}
+	newJob := func(t *testing.T, name, env, status string) int64 {
+		t.Helper()
+		var id int64
+		var envArg any
+		if env != "" {
+			envArg = env
+		}
+		if err := st.pool.QueryRow(ctx,
+			`INSERT INTO jobs (pipeline_id, name, stage, stage_idx, script, status, environment)
+			 VALUES ($1,$2,'deploy',0,'echo hi',$3,$4) RETURNING id`,
+			pid, name, status, envArg).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	gated := newJob(t, "deploy-prod", "production", "blocked")
+	newJob(t, "build", "", "success")
+
+	if _, err := st.pool.Exec(ctx,
+		`INSERT INTO job_approvals (job_id, approver, verdict, comment)
+		 VALUES ($1,'bob@acme.test','approved','checked the migration plan')`, gated); err != nil {
+		t.Fatal(err)
+	}
+
+	p, jobs, err := st.GetPipeline(ctx, pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Who started the run — previously not exposed at all.
+	if p.TriggeredBy != "alice@acme.test" {
+		t.Errorf("TriggeredBy = %q, want alice@acme.test", p.TriggeredBy)
+	}
+
+	byName := map[string]proto.Job{}
+	for _, j := range jobs {
+		byName[j.Name] = j
+	}
+
+	got := byName["deploy-prod"]
+	if got.RequiredApprovals != 2 {
+		t.Errorf("RequiredApprovals = %d, want 2", got.RequiredApprovals)
+	}
+	if len(got.Approvals) != 1 {
+		t.Fatalf("got %d approvals, want 1", len(got.Approvals))
+	}
+	if got.Approvals[0].Approver != "bob@acme.test" ||
+		got.Approvals[0].Verdict != "approved" ||
+		got.Approvals[0].Comment != "checked the migration plan" {
+		t.Errorf("approval = %+v", got.Approvals[0])
+	}
+
+	// A job with no environment has no gate and must stay untouched, so a
+	// pipeline without gates costs no rule lookups.
+	if ungated := byName["build"]; ungated.RequiredApprovals != 0 || len(ungated.Approvals) != 0 {
+		t.Errorf("ungated job carries gate state: required=%d approvals=%d",
+			ungated.RequiredApprovals, len(ungated.Approvals))
+	}
+}
+
+// The job page renders the same gate as the DAG, so GetJob must carry it too.
+func TestGetJobCarriesApprovalGateState(t *testing.T) {
+	st := newRegistryTestStore(t)
+	ctx := context.Background()
+
+	if _, err := st.pool.Exec(ctx,
+		`INSERT INTO protected_environments (repo, name, required_approvals)
+		 VALUES ('', 'staging', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	var pid int64
+	if err := st.pool.QueryRow(ctx,
+		`INSERT INTO pipelines (repo, ref, sha, config_yaml, source)
+		 VALUES ('acme/app','main','abc','{}','api') RETURNING id`).Scan(&pid); err != nil {
+		t.Fatal(err)
+	}
+	var jid int64
+	if err := st.pool.QueryRow(ctx,
+		`INSERT INTO jobs (pipeline_id, name, stage, stage_idx, script, status, environment)
+		 VALUES ($1,'deploy','deploy',0,'echo hi','failed','staging') RETURNING id`, pid).
+		Scan(&jid); err != nil {
+		t.Fatal(err)
+	}
+	// A rejection ends the gate and flips the job to 'failed'. The record has to
+	// survive that, or the UI loses who rejected the deploy and why.
+	if _, err := st.pool.Exec(ctx,
+		`INSERT INTO job_approvals (job_id, approver, verdict, comment)
+		 VALUES ($1,'carol@acme.test','rejected','hold until the index migration lands')`,
+		jid); err != nil {
+		t.Fatal(err)
+	}
+
+	j, err := st.GetJob(ctx, jid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.RequiredApprovals != 1 {
+		t.Errorf("RequiredApprovals = %d, want 1 (global rule)", j.RequiredApprovals)
+	}
+	if len(j.Approvals) != 1 || j.Approvals[0].Verdict != "rejected" {
+		t.Fatalf("approvals = %+v, want the rejection preserved on a finished job", j.Approvals)
+	}
+	if j.Approvals[0].Comment != "hold until the index migration lands" {
+		t.Errorf("comment = %q", j.Approvals[0].Comment)
+	}
+}

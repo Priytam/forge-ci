@@ -22,8 +22,11 @@ type Pipeline struct {
 	// Store.ConfigFileURL — and the UI then simply shows none.
 	ConfigURL string `json:"config_url,omitempty"`
 	// Source is the trigger: api | push | webhook | merge_request | schedule.
-	Source    string    `json:"source"`
-	CreatedAt time.Time `json:"created_at"`
+	Source string `json:"source"`
+	// TriggeredBy is the identity that started the run — the pusher/PR author
+	// for a webhook, the caller for an API run, "" for a schedule (nobody did).
+	TriggeredBy string    `json:"triggered_by,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 // StageStatus is the derived status of one stage, for the mini per-stage
@@ -64,6 +67,24 @@ type Job struct {
 	// when the job's failure does not fail dependents or the pipeline.
 	Manual       bool `json:"manual"`
 	AllowFailure bool `json:"allow_failure"`
+
+	// Approval gate, populated only for a job that targets a protected
+	// environment. Approvals is the append-only vote record (one per approver,
+	// oldest first) and RequiredApprovals the count the gate needs, so a
+	// reviewer can see where the gate stands before voting. Both are zero for a
+	// job with no gate.
+	Approvals         []JobApproval `json:"approvals,omitempty"`
+	RequiredApprovals int           `json:"required_approvals,omitempty"`
+}
+
+// JobApproval is one recorded vote on an approval-gated job. Votes are
+// append-only and unique per approver, so this doubles as the audit record of
+// who released a deployment.
+type JobApproval struct {
+	Approver  string    `json:"approver"`
+	Verdict   string    `json:"verdict"` // approved | rejected
+	Comment   string    `json:"comment,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // RunnerJob is the payload handed to a runner when it acquires a job.
