@@ -8,6 +8,7 @@ import {
 } from "../api";
 import { usePoll } from "../hooks/usePoll";
 import StatusBadge from "../components/StatusBadge";
+import Avatar from "../components/Avatar";
 import StageDots from "../components/StageDots";
 import Dashboard from "../components/Dashboard";
 
@@ -38,6 +39,13 @@ function RepoCard({
   const refs = summary.refs ?? [];
   const shownRefs = refs.slice(0, MAX_REF_CHIPS);
   const extraRefs = refs.length - shownRefs.length;
+
+  // Runs that neither passed nor failed: cancelled (superseded), blocked, or
+  // still going. Counting them keeps the tally honest.
+  const other = Math.max(
+    summary.pipeline_count - summary.success_count - summary.failed_count,
+    0
+  );
 
   const lastStatus = last?.status;
   const tint =
@@ -85,6 +93,10 @@ function RepoCard({
 
       {last ? (
         <div className="repo-last-run">
+          {/* whose push the latest run belongs to, at a glance */}
+          {last.triggered_by && (
+            <Avatar identity={last.triggered_by} size={18} title={last.triggered_by} />
+          )}
           <span className="ref-tag">{last.ref}</span>
           <span className="mono sha">{shortSha(last.sha)}</span>
           <StatusBadge status={last.status} />
@@ -102,12 +114,14 @@ function RepoCard({
         </div>
       )}
 
+      {/* Every run is accounted for. The old tally read
+          "3 pipelines · 0 passed · 0 failed", leaving a reader to wonder where
+          the other three went — they were cancelled or are still running. */}
       <div className="repo-counts muted">
-        {summary.pipeline_count} pipeline{summary.pipeline_count === 1 ? "" : "s"}
-        {" · "}
-        {summary.success_count} passed
-        {" · "}
-        {summary.failed_count} failed
+        {summary.pipeline_count} run{summary.pipeline_count === 1 ? "" : "s"}
+        {summary.success_count > 0 && ` · ${summary.success_count} passed`}
+        {summary.failed_count > 0 && ` · ${summary.failed_count} failed`}
+        {other > 0 && ` · ${other} other`}
       </div>
 
       {shownRefs.length > 0 && (

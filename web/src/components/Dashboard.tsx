@@ -310,6 +310,7 @@ export default function Dashboard() {
   const { now } = data;
 
   const rate = now.success_rate_24h;
+  const finished = now.finished_24h ?? 0;
   const rateClass =
     rate < 0 ? "" : rate >= 90 ? "stat-good" : rate >= 70 ? "stat-warn" : "stat-bad";
 
@@ -343,8 +344,28 @@ export default function Dashboard() {
           accent="#bc8cff"
         />
         <StatTile
-          value={rate < 0 ? "—" : `${rate}%`}
+          value={
+            rate < 0 ? (
+              "—"
+            ) : (
+              <>
+                {rate}%
+                <span className="stat-denominator">
+                  of {finished} run{finished === 1 ? "" : "s"}
+                </span>
+              </>
+            )
+          }
           label="Success rate 24h"
+          /* The sample size sits beside the percentage: without it, 0% of one
+             run is indistinguishable from 0% of two hundred. */
+          sublabel={
+            rate < 0
+              ? "no runs finished yet"
+              : now.blocked_jobs > 0
+                ? `${now.blocked_jobs} still awaiting approval`
+                : undefined
+          }
           valueClass={rateClass}
           accent={
             rate < 0

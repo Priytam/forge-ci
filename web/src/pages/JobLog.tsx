@@ -19,7 +19,7 @@ import {
 } from "../api";
 import { usePoll } from "../hooks/usePoll";
 import StatusBadge from "../components/StatusBadge";
-import ApprovalButtons from "../components/ApprovalButtons";
+import ApprovalGate from "../components/ApprovalGate";
 import PlayButton from "../components/PlayButton";
 
 /**
@@ -276,12 +276,18 @@ export default function JobLog() {
         </div>
       )}
 
-      {job && job.status === "blocked" && (
+      {job && (job.status === "blocked" || (job.approvals?.length ?? 0) > 0) && (
         <div className="card blocked-card glow glow-orange">
           {job.manual ? (
             <PlayButton jobId={job.id} onDone={refreshPipeline} />
           ) : (
-            <ApprovalButtons jobId={job.id} onDone={refreshPipeline} />
+            <ApprovalGate
+              jobId={job.id}
+              approvals={job.approvals}
+              required={job.required_approvals}
+              status={job.status}
+              onDone={refreshPipeline}
+            />
           )}
         </div>
       )}

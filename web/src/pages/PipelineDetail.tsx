@@ -7,12 +7,21 @@ import {
   useState,
 } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { duration, getPipeline, isTerminalStatus, shortSha, sourceLabel, type Job } from "../api";
+import {
+  duration,
+  getPipeline,
+  isTerminalStatus,
+  shortSha,
+  sourceLabel,
+  triggerVerb,
+  type Job,
+} from "../api";
 import { usePoll } from "../hooks/usePoll";
 import StatusBadge from "../components/StatusBadge";
 import { StatusIcon } from "../components/StageDots";
 import ConfigChip from "../components/ConfigChip";
-import ApprovalButtons from "../components/ApprovalButtons";
+import Avatar, { displayName } from "../components/Avatar";
+import ApprovalGate from "../components/ApprovalGate";
 import PlayButton from "../components/PlayButton";
 
 interface Stage {
@@ -220,6 +229,15 @@ export default function PipelineDetail() {
             <span className="ref-tag">{pipeline.ref}</span>
           </h1>
           <div className="pipeline-meta">
+            {/* Who started this run — the first question anyone asks of a
+                pipeline, and previously not answered anywhere on the page. */}
+            <span className="actor">
+              <Avatar identity={pipeline.triggered_by ?? ""} size={22} />
+              {pipeline.triggered_by && (
+                <span className="actor-name">{displayName(pipeline.triggered_by)}</span>
+              )}
+              <span className="actor-verb">{triggerVerb(pipeline.source)}</span>
+            </span>
             <span className="mono sha">{shortSha(pipeline.sha)}</span>
             <ConfigChip version={pipeline.config_version ?? null} />
             {pipeline.config_url && (
@@ -305,8 +323,13 @@ export default function PipelineDetail() {
                 // Approve/Reject. When the payload can't distinguish, show both.
                 const showPlay =
                   job.status === "blocked" && job.manual !== false;
+                // The gate is shown while blocked, AND after it settles when
+                // votes were cast: a rejected job goes straight to 'failed', and
+                // dropping the panel there would erase who rejected the deploy
+                // and why — the one record worth keeping.
                 const showApproval =
-                  job.status === "blocked" && job.manual !== true;
+                  (job.status === "blocked" && job.manual !== true) ||
+                  (job.approvals?.length ?? 0) > 0;
                 return (
                   <div key={job.id} className="job-node">
                     <div
@@ -336,7 +359,13 @@ export default function PipelineDetail() {
                           <PlayButton jobId={job.id} onDone={refresh} />
                         )}
                         {showApproval && (
-                          <ApprovalButtons jobId={job.id} onDone={refresh} />
+                          <ApprovalGate
+                            jobId={job.id}
+                            approvals={job.approvals}
+                            required={job.required_approvals}
+                            status={job.status}
+                            onDone={refresh}
+                          />
                         )}
                       </div>
                     )}

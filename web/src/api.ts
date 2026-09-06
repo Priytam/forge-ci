@@ -41,6 +41,27 @@ export interface Pipeline {
   config_url?: string;
   /** Trigger: api | push | webhook | merge_request | schedule. */
   source?: string;
+  /** Identity that started the run; absent for a schedule (nobody did). */
+  triggered_by?: string;
+}
+
+/**
+ * What the run's actor DID, for the line beside their avatar. Kept separate
+ * from sourceLabel (which labels the run) because this reads as a sentence:
+ * "alice pushed", "alice opened the PR".
+ */
+export function triggerVerb(source?: string): string {
+  switch (source) {
+    case "push":
+    case "webhook":
+      return "pushed";
+    case "merge_request":
+      return "opened the PR";
+    case "schedule":
+      return "scheduled run";
+    default:
+      return "started this run";
+  }
 }
 
 /** Human label for a pipeline trigger source; "" for the ordinary api/push case. */
@@ -72,6 +93,18 @@ export interface Job {
   manual?: boolean;
   /** failure of this job does not fail the pipeline */
   allow_failure?: boolean;
+  /** append-only vote record, oldest first; only for environment-gated jobs */
+  approvals?: JobApproval[];
+  /** votes the environment's rule requires; absent when the job has no gate */
+  required_approvals?: number;
+}
+
+/** One recorded vote on an approval-gated job. */
+export interface JobApproval {
+  approver: string;
+  verdict: "approved" | "rejected";
+  comment?: string;
+  created_at: string;
 }
 
 export interface PipelineDetail {
@@ -718,6 +751,8 @@ export interface StatsNow {
   pipelines_today: number;
   /** -1 = no data in the window */
   success_rate_24h: number;
+  /** runs the rate is computed over (success + failed); 0 = nothing finished */
+  finished_24h?: number;
 }
 
 export interface PipelineBucket {

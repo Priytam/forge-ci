@@ -871,24 +871,207 @@ tbody tr:last-child td {
 
 /* ---------- Approvals ---------- */
 
+/* ── identity avatar ─────────────────────────────────────────────────────
+   Initials over a tint hashed from the identity string (see Avatar.tsx).
+   Construction matches the status chips: colour at 0.18 behind a bright
+   foreground, hairline at 0.35 — the tint itself is set inline per identity. */
+.avatar {
+  border-radius: 50%;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  letter-spacing: -0.2px;
+  line-height: 1;
+  user-select: none;
+}
+
+.avatar-unknown {
+  background: transparent;
+  color: var(--gray);
+}
+
+/* Who started the run, in the pipeline header meta row. */
+.actor {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.actor-name {
+  color: var(--text);
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.actor-verb {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* ── approval gate ───────────────────────────────────────────────────────
+   The gate shows its own state: how many votes are in, who cast them, and
+   what they said. A "blocked" job looks identical whether nobody has voted
+   or one of two approvers already has. See ApprovalGate.tsx. */
 .approval {
   margin-top: 10px;
   padding-top: 10px;
   border-top: 1px dashed var(--border);
   cursor: default;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.approval-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 .approval-note {
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 700;
+  letter-spacing: 0.2px;
   color: var(--orange);
-  margin-bottom: 8px;
+}
+
+.approval-note-done {
+  color: #4ade80;
+}
+
+.approval-note-rejected {
+  color: #f87171;
+}
+
+.approval-tally {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.approval-tally-muted {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.approval-count {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.approval-of {
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.approval-pips {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.approval-pip {
+  width: 16px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.approval-pip-on {
+  background: var(--green);
+}
+
+.approval-votes {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.approval-vote {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+}
+
+.approval-vote-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.approval-vote-line {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.approval-who {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.approval-verdict-yes,
+.approval-verdict-no {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.approval-verdict-yes {
+  color: #4ade80;
+}
+
+.approval-verdict-no {
+  color: #f87171;
+}
+
+.approval-when {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.approval-comment {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.45;
+  text-wrap: pretty;
+}
+
+.approval-pending {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.approval-pending-text {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.approval-voted {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
 }
 
 .approval-actions {
   display: flex;
   gap: 8px;
 }
+
 
 .approval-error {
   margin-top: 8px;
@@ -1735,9 +1918,21 @@ select:focus {
   line-height: 1.1;
   font-variant-numeric: tabular-nums;
   display: flex;
-  align-items: center;
-  gap: 10px;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
   text-shadow: 0 0 24px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+/* Sample size beside the percentage, so 0% of one run cannot read like 0% of
+   two hundred. Deliberately small and muted — it qualifies the number, it is
+   not the number, and it never inherits the value's warning colour. */
+.stat-denominator {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+  white-space: nowrap;
+  text-shadow: none;
 }
 
 .stat-label {
