@@ -25,6 +25,7 @@ import ConfigChip from "../components/ConfigChip";
 import Avatar, { displayName } from "../components/Avatar";
 import ApprovalGate from "../components/ApprovalGate";
 import PlayButton from "../components/PlayButton";
+import PipelineActions from "../components/PipelineActions";
 
 interface Stage {
   name: string;
@@ -294,7 +295,14 @@ export default function PipelineDetail() {
             )}
           </div>
         </div>
-        <StatusBadge status={pipeline.status} />
+        <div className="pipeline-head-side">
+          <StatusBadge status={pipeline.status} />
+          <PipelineActions
+            pipelineId={pipeline.id}
+            status={pipeline.status}
+            onDone={refresh}
+          />
+        </div>
       </div>
 
       {error && <div className="error-banner">Refresh failed: {error}</div>}

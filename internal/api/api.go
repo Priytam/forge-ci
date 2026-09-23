@@ -63,6 +63,7 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 	m.HandleFunc("GET /api/v1/pipelines", srv.listPipelines)
 	m.HandleFunc("GET /api/v1/pipelines/{id}", srv.getPipeline)
 	m.HandleFunc("POST /api/v1/pipelines/{id}/cancel", srv.cancelPipeline)
+	m.HandleFunc("POST /api/v1/pipelines/{id}/retry", srv.retryPipeline)
 	m.HandleFunc("GET /api/v1/repos", srv.listRepos)
 	m.HandleFunc("GET /api/v1/stats", srv.dashboardStats)
 	m.HandleFunc("GET /api/v1/jobs/{id}/logs", srv.getLogs)
@@ -406,6 +407,65 @@ func (s *Server) cancelPipeline(w http.ResponseWriter, r *http.Request) {
 	slog.Info("pipeline cancel requested", "pipeline", id)
 	s.audit(r, "pipeline.cancel", strconv.FormatInt(id, 10), p.Repo, "ok", nil)
 	writeJSON(w, http.StatusOK, map[string]any{"pipeline": p, "jobs": jobs})
+}
+
+// retryPipeline creates a NEW pipeline that reproduces a prior one exactly —
+// same repo/ref/sha, same config content, not a re-resolve. Jobs are
+// immutable history (see internal/store/store.go CreatePipeline), so a retry
+// is a fresh pipeline rather than resurrected job rows; the audit trail links
+// it back to the pipeline it retried.
+func (s *Server) retryPipeline(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid pipeline id")
+		return
+	}
+	src, err := s.store.RetrySource(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "pipeline not found")
+		return
+	}
+	if err != nil {
+		slog.Error("retry source", "err", err)
+		writeErr(w, http.StatusInternalServerError, "failed to load pipeline")
+		return
+	}
+
+	jobs, err := compiler.Compile(src.Config, src.Ref, compiler.SourceAPI, s.store.TemplateResolver(r.Context(), src.Repo))
+	if err != nil {
+		writeErr(w, http.StatusUnprocessableEntity, "stored config no longer compiles: "+err.Error())
+		return
+	}
+	opts, err := compiler.Options(src.Config)
+	if err != nil {
+		writeErr(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+
+	create := proto.CreatePipelineRequest{
+		Repo: src.Repo, Ref: src.Ref, SHA: src.SHA, Config: src.Config,
+		TriggeredBy:   s.sessionActor(r), // "" in open bootstrap mode
+		ConfigSource:  src.ConfigSource,
+		CommitAuthor:  src.CommitAuthor,
+		CommitMessage: src.CommitMessage,
+	}
+	p, err := s.store.CreatePipeline(r.Context(), create, jobs, src.ConfigVersion, opts.AutoCancel, opts.FailFast)
+	if err != nil {
+		slog.Error("retry create pipeline", "err", err)
+		writeErr(w, http.StatusInternalServerError, "failed to create retry pipeline")
+		return
+	}
+
+	s.audit(r, "pipeline.retry", strconv.FormatInt(p.ID, 10), src.Repo, "ok", map[string]any{
+		"retried_pipeline_id": id,
+		"sha":                 src.SHA,
+		"ref":                 src.Ref,
+	})
+	slog.Info("pipeline retried", "repo", src.Repo, "retried_pipeline", id, "new_pipeline", p.ID)
+	writeJSON(w, http.StatusCreated, map[string]any{"pipeline": p})
 }
 
 // cancelJob cancels a single job by its current state. Idempotent for terminal

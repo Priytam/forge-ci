@@ -21,6 +21,7 @@ import { usePoll } from "../hooks/usePoll";
 import StatusBadge from "../components/StatusBadge";
 import ApprovalGate from "../components/ApprovalGate";
 import PlayButton from "../components/PlayButton";
+import CancelJobButton from "../components/CancelJobButton";
 
 /**
  * Live job log: an SSE EventSource on /logs/stream?offset=0 that appends
@@ -272,7 +273,12 @@ export default function JobLog() {
               )}
             </div>
           </div>
-          <StatusBadge status={job.status} />
+          <div className="pipeline-head-side">
+            <StatusBadge status={job.status} />
+            {!isTerminalStatus(job.status) && (
+              <CancelJobButton jobId={job.id} onDone={refreshPipeline} />
+            )}
+          </div>
         </div>
       )}
 

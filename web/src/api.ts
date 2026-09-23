@@ -967,6 +967,33 @@ export function playJob(jobId: number | string): Promise<{ job: Job }> {
   return postJSON<{ job: Job }>(`/jobs/${jobId}/play`, {});
 }
 
+/** Cancel every non-terminal job in a pipeline. Idempotent — a finished
+ * pipeline is a no-op returning its current state. */
+export function cancelPipeline(
+  pipelineId: number | string
+): Promise<{ pipeline: Pipeline; jobs: Job[] }> {
+  return postJSON<{ pipeline: Pipeline; jobs: Job[] }>(
+    `/pipelines/${pipelineId}/cancel`,
+    {}
+  );
+}
+
+/** Cancel a single job by its current state. Idempotent for terminal jobs; a
+ * running job is signaled to stop via its next heartbeat. */
+export function cancelJob(jobId: number | string): Promise<{ job: Job }> {
+  return postJSON<{ job: Job }>(`/jobs/${jobId}/cancel`, {});
+}
+
+/** Create a NEW pipeline that replays a prior one's exact config_yaml — same
+ * repo/ref/sha and commit identity, not a re-resolve against whatever the
+ * registry has drifted to since. Jobs are immutable history: this never
+ * resurrects the original's job rows, it starts a fresh run. */
+export function retryPipeline(
+  pipelineId: number | string
+): Promise<{ pipeline: Pipeline }> {
+  return postJSON<{ pipeline: Pipeline }>(`/pipelines/${pipelineId}/retry`, {});
+}
+
 export function createPipeline(
   body: CreatePipelineRequest
 ): Promise<{ pipeline: Pipeline }> {

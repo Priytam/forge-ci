@@ -274,7 +274,11 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 	p.Repo, p.Ref, p.SHA = req.Repo, req.Ref, req.SHA
 	p.Status = "created"
 	p.ConfigVersion = configVersion
+	p.ConfigSource = configSource
 	p.Source = source
+	p.TriggeredBy = req.TriggeredBy
+	p.CommitAuthor = req.CommitAuthor
+	p.CommitMessage = capCommitMessage(req.CommitMessage)
 	err = tx.QueryRow(ctx,
 		`INSERT INTO pipelines (repo, ref, sha, config_yaml, triggered_by, config_version, fail_fast, config_source, source, mr_iid, mr_base_sha, commit_author, commit_message)
 		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id, created_at`,
@@ -621,6 +625,45 @@ func (s *Store) GetPipeline(ctx context.Context, id int64) (*proto.Pipeline, []p
 		return nil, nil, err
 	}
 	return &p, jobs, nil
+}
+
+// RetrySource is everything CreatePipeline needs to reproduce a prior pipeline
+// exactly: same repo/ref/sha, same config CONTENT and provenance — not a
+// re-resolve, which could silently pick up a registry change since the
+// original run. An admin retrying a flaky failure needs to know whether it
+// fails again under identical conditions, not under whatever config exists
+// now. config_yaml stores precisely what compiled (see migrations.sql), so
+// this is a faithful replay.
+type RetrySource struct {
+	Repo          string
+	Ref           string
+	SHA           string
+	Config        string
+	ConfigVersion *int
+	ConfigSource  string
+	CommitAuthor  string
+	CommitMessage string
+}
+
+// RetrySource loads the (repo, ref, sha, config) a pipeline ran with, for
+// retryPipeline. MR identity (mr_iid/mr_base_sha) is deliberately not carried
+// forward — CI_MERGE_REQUEST_* build vars depend on PR context this method
+// does not reconstruct, so a retry of a merge_request pipeline runs the same
+// commit without them rather than risk stale or wrong PR context.
+func (s *Store) RetrySource(ctx context.Context, id int64) (*RetrySource, error) {
+	var rs RetrySource
+	err := s.pool.QueryRow(ctx,
+		`SELECT repo, ref, sha, config_yaml, config_version, config_source, commit_author, commit_message
+		 FROM pipelines WHERE id=$1`, id).
+		Scan(&rs.Repo, &rs.Ref, &rs.SHA, &rs.Config, &rs.ConfigVersion, &rs.ConfigSource,
+			&rs.CommitAuthor, &rs.CommitMessage)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &rs, nil
 }
 
 func (s *Store) GetJob(ctx context.Context, id int64) (*proto.Job, error) {
