@@ -343,7 +343,7 @@ func (s *Server) uploadReport(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "failed to read report body")
 		return
 	}
-	report, parsed := parseJUnit(body, id)
+	report, cases, parsed := parseJUnit(body, id)
 	if !parsed {
 		// Empty/malformed/zero-test XML: not a job failure, just no report.
 		writeJSON(w, http.StatusOK, map[string]any{"parsed": false})
@@ -353,6 +353,12 @@ func (s *Server) uploadReport(w http.ResponseWriter, r *http.Request) {
 		slog.Error("save junit report", "err", err, "job", id)
 		writeErr(w, http.StatusInternalServerError, "failed to store report")
 		return
+	}
+	// Best-effort: the aggregate summary above already saved successfully, so a
+	// failure recording per-case history must not fail the upload (the runner
+	// would otherwise retry a report that in fact succeeded).
+	if err := s.store.SaveTestCaseResults(r.Context(), id, cases); err != nil {
+		slog.Error("save test case results", "err", err, "job", id)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"parsed": true, "total": report.Total, "failed": report.Failed, "skipped": report.Skipped,

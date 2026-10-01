@@ -46,6 +46,13 @@ export default function PipelineList() {
             Environments
           </Link>
           <Link
+            to={`/repos/${encodeURIComponent(repo)}/tests`}
+            className="btn"
+            title="Test history"
+          >
+            Tests
+          </Link>
+          <Link
             to={`/repos/${encodeURIComponent(repo)}/settings`}
             className="btn"
             title="CI/CD Settings"

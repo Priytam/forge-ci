@@ -268,6 +268,30 @@ type JUnitFailure struct {
 	Message   string `json:"message,omitempty"` // trimmed failure/error message
 }
 
+// TestCaseResult is one test case's outcome from a single job's JUnit report.
+// Unlike JUnitReport (an aggregate summary, overwritten on re-upload), a row is
+// kept for every case on every run, so a case's pass/fail trend can be read
+// back across jobs — see internal/store SaveTestCaseResults/ListTestCaseHistory.
+type TestCaseResult struct {
+	ID              int64     `json:"id"`
+	JobID           int64     `json:"job_id"`
+	Name            string    `json:"name"`
+	Classname       string    `json:"classname,omitempty"`
+	Status          string    `json:"status"` // passed | failed | skipped
+	DurationSeconds float64   `json:"duration_seconds"`
+	Message         string    `json:"message,omitempty"` // only set for failed/error cases
+	CreatedAt       time.Time `json:"created_at"`
+}
+
+// TestCaseHistory is one test case's identity plus its recent runs, newest
+// first — the data behind a repo's Tests tab. Runs is capped per case by the
+// ?limit on GET /api/v1/test-history (see store.ListTestCaseHistory).
+type TestCaseHistory struct {
+	Name      string           `json:"name"`
+	Classname string           `json:"classname,omitempty"`
+	Runs      []TestCaseResult `json:"runs"`
+}
+
 // Variable is a repo-scoped CI/CD variable. Value is redacted ("") in list
 // responses when masked, unless reveal was requested.
 type Variable struct {

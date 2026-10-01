@@ -181,6 +181,26 @@ export interface JUnitReport {
   created_at: string;
 }
 
+/** One test case's outcome from a single job's JUnit report. */
+export interface TestCaseResult {
+  id: number;
+  job_id: number;
+  name: string;
+  classname?: string;
+  status: "passed" | "failed" | "skipped";
+  duration_seconds: number;
+  /** Only set for a failed/errored case. */
+  message?: string;
+  created_at: string;
+}
+
+/** One test case's identity plus its recent runs, newest first. */
+export interface TestCaseHistory {
+  name: string;
+  classname?: string;
+  runs: TestCaseResult[];
+}
+
 export interface Member {
   id: number;
   repo: string;
@@ -635,6 +655,15 @@ export function listEnvironments(repo: string): Promise<Environment[]> {
   return getJSON<Environment[]>(
     `/environments?repo=${encodeURIComponent(repo)}`
   );
+}
+
+/** ?limit caps runs PER CASE (not the total row count); omit for the server default. */
+export function listTestHistory(
+  repo: string,
+  limit?: number
+): Promise<TestCaseHistory[]> {
+  const qs = `?repo=${encodeURIComponent(repo)}${limit ? `&limit=${limit}` : ""}`;
+  return getJSON<TestCaseHistory[]>(`/test-history${qs}`);
 }
 
 export async function listDeployments(

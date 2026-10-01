@@ -1,6 +1,10 @@
 package api
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/priytamjeepandey/forge-ci/internal/proto"
+)
 
 func TestParseJUnitTestsuitesNested(t *testing.T) {
 	xml := `<?xml version="1.0" encoding="UTF-8"?>
@@ -12,7 +16,7 @@ func TestParseJUnitTestsuitesNested(t *testing.T) {
     </testcase>
   </testsuite>
 </testsuites>`
-	r, ok := parseJUnit([]byte(xml), 42)
+	r, _, ok := parseJUnit([]byte(xml), 42)
 	if !ok {
 		t.Fatal("expected parsed=true")
 	}
@@ -36,7 +40,7 @@ func TestParseJUnitBareTestsuiteWithErrorAndSkip(t *testing.T) {
   <testcase name="broke"><error message="boom">stack</error></testcase>
   <testcase name="later"><skipped/></testcase>
 </testsuite>`
-	r, ok := parseJUnit([]byte(xml), 7)
+	r, cases, ok := parseJUnit([]byte(xml), 7)
 	if !ok {
 		t.Fatal("expected parsed=true")
 	}
@@ -45,6 +49,30 @@ func TestParseJUnitBareTestsuiteWithErrorAndSkip(t *testing.T) {
 	}
 	if r.Failures[0].Type != "error" || r.Failures[0].Name != "broke" {
 		t.Fatalf("error case = %+v", r.Failures[0])
+	}
+
+	// Every case gets a row — including the passed and skipped ones, which the
+	// aggregate report only counts (this is the point of returning cases at all).
+	if len(cases) != 3 {
+		t.Fatalf("expected 3 case rows, got %d: %+v", len(cases), cases)
+	}
+	byName := map[string]proto.TestCaseResult{}
+	for _, c := range cases {
+		byName[c.Name] = c
+	}
+	if byName["ok"].Status != "passed" {
+		t.Errorf(`"ok" status = %q, want "passed"`, byName["ok"].Status)
+	}
+	if byName["broke"].Status != "failed" || byName["broke"].Message != "boom" {
+		t.Errorf(`"broke" = %+v, want status=failed message="boom"`, byName["broke"])
+	}
+	if byName["later"].Status != "skipped" {
+		t.Errorf(`"later" status = %q, want "skipped"`, byName["later"].Status)
+	}
+	for _, c := range cases {
+		if c.JobID != 7 {
+			t.Errorf("case %q: JobID = %d, want 7", c.Name, c.JobID)
+		}
 	}
 }
 
@@ -58,7 +86,7 @@ func TestParseJUnitNestedSuites(t *testing.T) {
     <testcase name="top_pass"/>
   </testsuite>
 </testsuites>`
-	r, ok := parseJUnit([]byte(xml), 1)
+	r, _, ok := parseJUnit([]byte(xml), 1)
 	if !ok {
 		t.Fatal("expected parsed=true")
 	}
@@ -72,7 +100,7 @@ func TestParseJUnitMultipleConcatenatedDocuments(t *testing.T) {
 	// upload; the parser must sum across all top-level roots.
 	xml := `<?xml version="1.0"?><testsuite name="a"><testcase name="a1"/></testsuite>
 <?xml version="1.0"?><testsuite name="b"><testcase name="b1"/><testcase name="b2"><failure/></testcase></testsuite>`
-	r, ok := parseJUnit([]byte(xml), 1)
+	r, _, ok := parseJUnit([]byte(xml), 1)
 	if !ok {
 		t.Fatal("expected parsed=true")
 	}
@@ -89,7 +117,7 @@ func TestParseJUnitMalformedOrEmpty(t *testing.T) {
 		"<testsuite><testcase name=\"x\">", // truncated / unclosed
 		"<other><thing/></other>",          // valid XML but no test cases
 	} {
-		if r, ok := parseJUnit([]byte(in), 1); ok {
+		if r, _, ok := parseJUnit([]byte(in), 1); ok {
 			t.Errorf("parseJUnit(%q): expected parsed=false, got %+v", in, r)
 		}
 	}

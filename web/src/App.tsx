@@ -13,6 +13,7 @@ import Login from "./pages/Login";
 import AdminSso from "./pages/AdminSso";
 import AdminAudit from "./pages/AdminAudit";
 import Environments from "./pages/Environments";
+import TestHistory from "./pages/TestHistory";
 import AuthMenu from "./components/AuthMenu";
 import AdminNav from "./components/AdminNav";
 
@@ -49,6 +50,7 @@ export default function App() {
           <Route path="/repos/:repo" element={<PipelineList />} />
           <Route path="/repos/:repo/settings" element={<RepoSettings />} />
           <Route path="/repos/:repo/environments" element={<Environments />} />
+          <Route path="/repos/:repo/tests" element={<TestHistory />} />
           <Route path="/runners" element={<Runners />} />
           <Route path="/docs" element={<Docs />} />
           <Route path="/docs/:guide" element={<Docs />} />

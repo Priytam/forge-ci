@@ -331,6 +331,29 @@ CREATE TABLE IF NOT EXISTS job_reports (
     created_at       TIMESTAMPTZ      NOT NULL DEFAULT now()
 );
 
+-- Per-test-case history: one row per (job, test case), populated by the same
+-- report_junit upload that writes job_reports (see internal/api/junit.go). This
+-- is append-only ACROSS jobs — unlike job_reports, which is an aggregate
+-- overwritten on re-upload — so a case's pass/fail trend can be read back
+-- across every run Forge has seen (internal/store ListTestCaseHistory). A
+-- re-upload of the SAME job's report still replaces that job's own rows
+-- (SaveTestCaseResults deletes job_id's rows before inserting), matching
+-- job_reports' re-upload semantics without duplicating history.
+CREATE TABLE IF NOT EXISTS test_case_results (
+    id               BIGSERIAL PRIMARY KEY,
+    job_id           BIGINT           NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    name             TEXT             NOT NULL,
+    classname        TEXT             NOT NULL DEFAULT '',
+    status           TEXT             NOT NULL CHECK (status IN ('passed','failed','skipped')),
+    duration_seconds DOUBLE PRECISION NOT NULL DEFAULT 0,
+    message          TEXT             NOT NULL DEFAULT '',
+    created_at       TIMESTAMPTZ      NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS test_case_results_job_idx ON test_case_results (job_id);
+-- Drives ListTestCaseHistory's per-repo, per-case "most recent runs" query.
+CREATE INDEX IF NOT EXISTS test_case_results_name_idx
+    ON test_case_results (classname, name, created_at DESC);
+
 -- Cache entries: the runner restores/saves per-job caches through the server.
 -- Unlike artifacts (per-job, per-pipeline), a cache is SHARED across pipelines
 -- for the same repo+key, so it survives the retention sweep of the pipeline that
