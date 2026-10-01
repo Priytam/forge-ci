@@ -19,7 +19,7 @@ FROM alpine:3
 RUN adduser -D forge
 COPY --from=build /out/forge-server /usr/local/bin/forge-server
 COPY --from=build /out/downloads /usr/local/share/forge-downloads
-COPY deploy/downloads/install-runner.sh deploy/downloads/install-runner.ps1 /usr/local/share/forge-downloads/
+COPY deploy/downloads/install-runner.sh deploy/downloads/install-runner.ps1 deploy/downloads/qa-test-template.csv /usr/local/share/forge-downloads/
 RUN chown -R forge:forge /usr/local/share/forge-downloads
 USER forge
 EXPOSE 8080

@@ -14,6 +14,7 @@ export const GUIDE_GROUPS = [
   "Runners",
   "Pipelines",
   "Security",
+  "QA & testing",
 ] as const;
 
 /* ================= Getting started ================= */
@@ -1330,7 +1331,202 @@ function SsoGithub() {
   );
 }
 
+/* ================= QA & testing ================= */
+
+function QaAiTestGeneration() {
+  return (
+    <>
+      <p>
+        Turns a plain-language QA sheet into a reviewed, self-verifying,
+        tracked Playwright suite — no new service, no separate app. Every
+        piece here is a feature Forge already has: a runner, a pipeline job,
+        <Link to="/admin/runner-tokens">a runner token</Link>, and the{" "}
+        <code>reports.junit</code> ingestion that already feeds your repo's{" "}
+        <strong>Tests</strong> tab. The only new thing per repo is the Claude
+        Code skill that writes the specs, which lives in{" "}
+        <em>your</em> repo, not here. Follow these in order.
+      </p>
+
+      <Steps>
+        <li>
+          <strong>Start from the sheet template.</strong>{" "}
+          <a href="/api/v1/downloads/qa-test-template.csv">
+            Download qa-test-template.csv
+          </a>{" "}
+          — one row per test case. The skill below maps these columns
+          directly, so keep the header names if you add your own:
+          <DocTable
+            head={["Column", "Meaning"]}
+            rows={[
+              ["TC ID", "Unique id — becomes the spec filename and test title."],
+              ["Module", "Groups specs into tests/<module>/."],
+              ["Test Scenario", "One line describing what's being checked."],
+              [
+                "Role / Required Account",
+                <>
+                  Who runs this, and what account it needs —{" "}
+                  <code>(none)</code> means Playwright's default, unauthenticated
+                  context is enough.
+                </>,
+              ],
+              ["Steps", "Plain-language actions — becomes Playwright calls."],
+              ["Expected Result", "What must be true afterwards — becomes assertions."],
+              [
+                "Automation Candidate",
+                <>
+                  <code>Yes</code>/<code>No</code>/<code>Conditional</code> — only{" "}
+                  <code>Yes</code> rows with <code>Required Account: (none)</code>{" "}
+                  are safe to automate without also wiring test credentials.
+                </>,
+              ],
+            ]}
+          />
+        </li>
+
+        <li>
+          <strong>Add the codegen skill to your repo</strong> at{" "}
+          <code>.claude/skills/qa-codegen/SKILL.md</code>:
+          <CodeBlock
+            code={`# qa-codegen
+
+Given one row from the QA sheet, write a Playwright spec at
+tests/<module-slug>/<TC-ID>.spec.ts:
+
+- Test title: "\${TC ID} \${Test Scenario}"
+- Steps become actions; Expected Result becomes assertions. Don't invent
+  selectors you haven't verified — assert on a real URL, a real heading, a
+  real role/text locator, whatever the app actually renders.
+- Required Account: (none) means Playwright's default fresh, cookie-less
+  context — do nothing to authenticate.
+- Self-verify: actually run \`npx playwright test tests/<path>/<TC-ID>.spec.ts\`
+  yourself before handing the spec back. If it fails, read why and fix the
+  spec — don't hand back one you haven't run.`}
+          />
+          This file is committed to <em>your</em> repo and reviewed like any
+          other code — it's what makes the generated specs consistent instead
+          of a fresh guess every time.
+        </li>
+
+        <li>
+          <strong>
+            Add two jobs to your <code>.forge-ci.yml</code>
+          </strong>
+          , tagged for the runner you're about to register:
+          <CodeBlock
+            code={`jobs:
+  generate-and-verify:
+    stage: test
+    tags: [qa-laptop]
+    only: [qa-sheet-sync]        # a branch/PR you push sheet edits from
+    script:
+      - npx playwright install --with-deps chromium
+      - node scripts/sync-test-suite.js   # diffs the sheet by TC ID, invokes
+                                           # claude per new/changed row (step 6)
+      - npx playwright test --reporter=junit > junit-results.xml
+    artifacts:
+      reports:
+        junit: [junit-results.xml]        # NOT a top-level report_junit: key
+
+  run-selected:
+    stage: test
+    tags: [qa-laptop]
+    when: manual                          # edit the script line for "this run only"
+    script:
+      - npx playwright test --reporter=junit > junit-results.xml
+    artifacts:
+      reports:
+        junit: [junit-results.xml]`}
+          />
+          <Note tone="warn" title="The one mistake everyone makes here">
+            The JUnit key is nested — <code>artifacts: reports: junit:</code>{" "}
+            — not a flat <code>report_junit:</code>. The flat key is silently
+            ignored (no error, the job just never shows up in Tests). See{" "}
+            <Link to="/docs/writing-yaml">Writing pipeline YAML</Link>.
+          </Note>
+        </li>
+
+        <li>
+          <strong>
+            Generate a <Link to="/admin/runner-tokens">runner token</Link>
+          </strong>{" "}
+          (Admin → Runner tokens → Generate token). Needed whenever the
+          server runs <code>RUNNER_AUTH=on</code>; skip this on a local
+          server that doesn't.
+        </li>
+
+        <li>
+          <strong>Register your laptop as the runner</strong> — the token
+          page gives you this filled in; the shape is:
+          <CodeBlock
+            code={`curl -fsSL <server>/api/v1/downloads/install-runner.sh \\
+  | SERVER=<server> TOKEN=<token> TAGS=qa-laptop sh`}
+          />
+          Downloads <code>forge-runner</code>, registers it, and starts it —
+          no git clone, no Go toolchain. Windows: the same page gives you a
+          PowerShell one-liner (needs{" "}
+          <a href="https://git-scm.com/download/win" target="_blank" rel="noreferrer">
+            Git for Windows
+          </a>{" "}
+          first, for the <code>sh</code> the jobs run under). Leave the
+          terminal window open — that's the runner.
+        </li>
+
+        <li>
+          <strong>Write <code>scripts/sync-test-suite.js</code></strong> —
+          the thing <code>generate-and-verify</code> actually calls. It reads
+          your sheet, diffs rows against a <code>manifest.json</code> of
+          TC IDs already generated, and for each new/changed row runs:
+          <CodeBlock
+            code={`claude -p "Follow .claude/skills/qa-codegen/SKILL.md for this row: $ROW" \\
+  --permission-mode bypassPermissions`}
+          />
+          <Note tone="warn" title="Verify this in your own shell first">
+            <code>bypassPermissions</code> is what makes self-verify possible
+            unattended (Playwright and the browser need to actually run) —
+            plain <code>acceptEdits</code> only covers file writes, not
+            running anything. Run that exact command by hand once before
+            trusting it in a job: Claude Code's own safety layer can refuse
+            it when invoked from inside another orchestrating session,
+            though not when it's just you, directly, in your own terminal.
+            If you'd rather not grant that, skip this step and run{" "}
+            <code>claude</code> interactively yourself per sheet row instead —
+            everything from step 4 onward works identically either way; only
+            who clicks "generate" changes.
+          </Note>
+        </li>
+
+        <li>
+          <strong>Push, review, merge</strong> — the job opens a PR with the
+          generated spec(s) and attaches a trace/video for anything that
+          failed self-verify (standard <Link to="/docs/artifacts">artifacts</Link>{" "}
+          — add <code>paths: [trace.zip, video.webm]</code> keyed off{" "}
+          <code>retain-on-failure</code> in your Playwright config). Review
+          it like any other diff; merge.
+        </li>
+
+        <li>
+          <strong>Run it.</strong> <code>run-selected</code> is{" "}
+          <code>when: manual</code> — edit the <code>script:</code> line in
+          the Run pipeline form to target one spec "for this run only" when
+          you just want a quick check. For the whole suite on a schedule, add
+          a <Link to="/docs/schedules">Schedule</Link> targeting{" "}
+          <code>generate-and-verify</code>'s branch (or a dedicated nightly
+          job running the merged suite). Either way, results land in your
+          repo's <strong>Tests</strong> tab automatically — every case,
+          pass/fail/skip, run over run, no extra wiring.
+        </li>
+      </Steps>
+    </>
+  );
+}
+
 export const GUIDES: Guide[] = [
+  {
+    slug: "qa-ai-test-generation",
+    group: "QA & testing",
+    title: "AI-assisted QA test generation",
+    render: QaAiTestGeneration,
+  },
   {
     slug: "add-a-repo",
     group: "Getting started",

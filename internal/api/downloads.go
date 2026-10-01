@@ -18,6 +18,7 @@ var downloadableFiles = map[string]string{
 	"forge-runner-windows-amd64.exe": "application/octet-stream",
 	"install-runner.sh":              "text/x-shellscript; charset=utf-8",
 	"install-runner.ps1":             "text/plain; charset=utf-8",
+	"qa-test-template.csv":           "text/csv; charset=utf-8",
 }
 
 // downloadsDir is where deploy/Dockerfile.server stages the prebuilt runner

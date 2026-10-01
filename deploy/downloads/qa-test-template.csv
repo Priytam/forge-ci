@@ -1,0 +1,4 @@
+TC ID,Module,Test Scenario,Role,Required Account,Steps,Expected Result,Automation Candidate
+TC-001,Authentication,Unauthenticated user is redirected to login,Unauthenticated user,(none),"1. Without logging in, navigate directly to a protected page URL. 2. Observe the result.",User is redirected to the login page; no protected content is rendered,Yes
+TC-002,Authentication,Valid user can sign in,Any,test account,"1. Open the sign-in page. 2. Enter valid credentials. 3. Submit.",User lands on the authenticated home page,Yes
+TC-003,<module>,<what this test checks>,<role>,<account needed, or (none)>,"1. <step one>. 2. <step two>.",<what must be true afterwards>,<Yes / No / Conditional>
