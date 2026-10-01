@@ -12,6 +12,7 @@ import AddRepo from "./pages/AddRepo";
 import Login from "./pages/Login";
 import AdminSso from "./pages/AdminSso";
 import AdminAudit from "./pages/AdminAudit";
+import AdminRunnerTokens from "./pages/AdminRunnerTokens";
 import Environments from "./pages/Environments";
 import TestHistory from "./pages/TestHistory";
 import AuthMenu from "./components/AuthMenu";
@@ -59,6 +60,7 @@ export default function App() {
           <Route path="/login" element={<Login />} />
           <Route path="/admin/sso" element={<AdminSso />} />
           <Route path="/admin/audit" element={<AdminAudit />} />
+          <Route path="/admin/runner-tokens" element={<AdminRunnerTokens />} />
           <Route path="/pipelines/:id" element={<PipelineDetail />} />
           <Route path="/jobs/:id" element={<JobLog />} />
           <Route path="/new" element={<NewPipeline />} />

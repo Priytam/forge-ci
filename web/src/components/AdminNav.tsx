@@ -52,6 +52,9 @@ export default function AdminNav() {
           <Link to="/admin/audit" role="menuitem" onClick={() => setOpen(false)}>
             Audit log
           </Link>
+          <Link to="/admin/runner-tokens" role="menuitem" onClick={() => setOpen(false)}>
+            Runner tokens
+          </Link>
         </div>
       )}
     </div>

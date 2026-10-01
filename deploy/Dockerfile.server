@@ -6,9 +6,21 @@ COPY cmd ./cmd
 COPY internal ./internal
 RUN CGO_ENABLED=0 go build -o /out/forge-server ./cmd/server
 
+# Prebuilt forge-runner binaries, served from /api/v1/downloads/ so a QA
+# machine can register as a runner with a copy-paste command instead of
+# cloning this repo and building Go toolchain locally (see
+# deploy/downloads/install-runner.sh, internal/api/downloads.go).
+RUN CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -o /out/downloads/forge-runner-darwin-arm64       ./cmd/runner && \
+    CGO_ENABLED=0 GOOS=darwin  GOARCH=amd64 go build -o /out/downloads/forge-runner-darwin-amd64       ./cmd/runner && \
+    CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -o /out/downloads/forge-runner-linux-amd64        ./cmd/runner && \
+    CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o /out/downloads/forge-runner-windows-amd64.exe  ./cmd/runner
+
 FROM alpine:3
 RUN adduser -D forge
-USER forge
 COPY --from=build /out/forge-server /usr/local/bin/forge-server
+COPY --from=build /out/downloads /usr/local/share/forge-downloads
+COPY deploy/downloads/install-runner.sh deploy/downloads/install-runner.ps1 /usr/local/share/forge-downloads/
+RUN chown -R forge:forge /usr/local/share/forge-downloads
+USER forge
 EXPOSE 8080
 ENTRYPOINT ["forge-server"]

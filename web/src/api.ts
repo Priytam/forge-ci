@@ -758,6 +758,34 @@ export async function listAuditLog(params: {
   return { items, total };
 }
 
+// --- Runner tokens (RUNNER_AUTH) ---
+
+/** A runner auth token. Token is only ever populated by createRunnerToken's
+ *  response — list responses carry TokenSuffix instead, never the raw value. */
+export interface RunnerToken {
+  id: number;
+  token?: string;
+  token_suffix: string;
+  description: string;
+  created_at: string;
+  last_used_at: string | null;
+  revoked: boolean;
+}
+
+export function listRunnerTokens(): Promise<RunnerToken[]> {
+  return getJSON<RunnerToken[]>("/runner-tokens");
+}
+
+/** The response's `token` field is the raw secret, shown exactly once — the
+ *  server never returns it again on any later list call. */
+export function createRunnerToken(description: string): Promise<RunnerToken> {
+  return postJSON<RunnerToken>("/runner-tokens", { description });
+}
+
+export function revokeRunnerToken(id: number): Promise<void> {
+  return requestVoid("POST", `/runner-tokens/${id}/revoke`);
+}
+
 // --- Config templates (for include:) ---
 
 export function listRepoTemplates(repo: string): Promise<string[]> {

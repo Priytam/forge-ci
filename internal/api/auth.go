@@ -101,6 +101,7 @@ func authExempt(path string) bool {
 	case strings.HasPrefix(path, "/api/v1/runner/"),
 		strings.HasPrefix(path, "/api/v1/webhooks/"),
 		strings.HasPrefix(path, "/api/v1/auth/"),
+		strings.HasPrefix(path, "/api/v1/downloads/"),
 		// OIDC discovery + JWKS must be reachable by AWS/GCP (no session) even
 		// when SSO is enforced, so cloud providers can validate job ID tokens.
 		path == "/.well-known/openid-configuration",
