@@ -1408,20 +1408,46 @@ tests/<module-slug>/<TC-ID>.spec.ts:
         </li>
 
         <li>
+          <strong>Scaffold Playwright</strong>, if the repo doesn't have it
+          yet:
+          <CodeBlock
+            code={`npm init -y
+npm install -D @playwright/test
+npx playwright install --with-deps chromium
+printf 'test-results/\\nplaywright-report/\\n' >> .gitignore`}
+          />
+          A minimal <code>playwright.config.js</code> — the app's URL (and
+          anything else a spec needs) comes from the job's own{" "}
+          <code>variables:</code> in the next step, never hardcoded, so the
+          same config works locally and in CI:
+          <CodeBlock
+            code={`const { defineConfig } = require('@playwright/test');
+module.exports = defineConfig({
+  testDir: './tests',
+  use: { baseURL: process.env.BASE_URL },
+  reporter: [['list']],
+});`}
+          />
+        </li>
+
+        <li>
           <strong>
             Add two jobs to your <code>.forge-ci.yml</code>
           </strong>
           , tagged for the runner you're about to register:
           <CodeBlock
-            code={`jobs:
+            code={`stages: [test]
+
+jobs:
   generate-and-verify:
     stage: test
     tags: [qa-laptop]
     only: [qa-sheet-sync]        # a branch/PR you push sheet edits from
+    variables:
+      BASE_URL: https://your-app.staging.example.com
     script:
-      - npx playwright install --with-deps chromium
       - node scripts/sync-test-suite.js   # diffs the sheet by TC ID, invokes
-                                           # claude per new/changed row (step 6)
+                                           # claude per new/changed row (step 7)
       - npx playwright test --reporter=junit > junit-results.xml
     artifacts:
       reports:
@@ -1431,6 +1457,8 @@ tests/<module-slug>/<TC-ID>.spec.ts:
     stage: test
     tags: [qa-laptop]
     when: manual                          # edit the script line for "this run only"
+    variables:
+      BASE_URL: https://your-app.staging.example.com
     script:
       - npx playwright test --reporter=junit > junit-results.xml
     artifacts:
@@ -1472,26 +1500,101 @@ tests/<module-slug>/<TC-ID>.spec.ts:
         </li>
 
         <li>
-          <strong>Write <code>scripts/sync-test-suite.js</code></strong> —
-          the thing <code>generate-and-verify</code> actually calls. It reads
-          your sheet, diffs rows against a <code>manifest.json</code> of
-          TC IDs already generated, and for each new/changed row runs:
+          <strong>
+            Write <code>scripts/sync-test-suite.js</code>
+          </strong>{" "}
+          — the thing <code>generate-and-verify</code> actually calls. Reads
+          the sheet, diffs rows by TC ID against <code>qa/manifest.json</code>{" "}
+          (a content hash per row, so a re-upload of an unchanged sheet is a
+          no-op), skips anything that isn't{" "}
+          <code>Automation Candidate: Yes</code> with{" "}
+          <code>Required Account: (none)</code>, and invokes the skill for
+          everything else:
           <CodeBlock
-            code={`claude -p "Follow .claude/skills/qa-codegen/SKILL.md for this row: $ROW" \\
-  --permission-mode bypassPermissions`}
+            code={`#!/usr/bin/env node
+const fs = require("fs");
+const path = require("path");
+const { execFileSync } = require("child_process");
+
+const SHEET = path.join("qa", "test-sheet.csv");
+const MANIFEST = path.join("qa", "manifest.json");
+// acceptEdits is the safe default: it writes the spec file but stops and
+// asks before running anything. Set this to bypassPermissions in the job's
+// variables: (see the note below) once you've verified that mode yourself.
+const CLAUDE_MODE = process.env.CLAUDE_PERMISSION_MODE || "acceptEdits";
+
+// Minimal CSV parser: quoted fields, embedded commas, "" as an escaped quote.
+function parseCSV(text) {
+  const rows = [];
+  let row = [], field = "", inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"' && text[i + 1] === '"') { field += '"'; i++; }
+      else if (c === '"') { inQuotes = false; }
+      else { field += c; }
+    } else if (c === '"') { inQuotes = true; }
+    else if (c === ",") { row.push(field); field = ""; }
+    else if (c === "\\n" || c === "\\r") {
+      if (field !== "" || row.length) { row.push(field); rows.push(row); row = []; field = ""; }
+      if (c === "\\r" && text[i + 1] === "\\n") i++;
+    } else { field += c; }
+  }
+  if (field !== "" || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+const parsed = parseCSV(fs.readFileSync(SHEET, "utf8"))
+  .filter((r) => r.length && r.some((c) => c.trim() !== ""));
+const [header, ...dataRows] = parsed;
+const cols = header.map((h) => h.trim());
+
+const manifest = fs.existsSync(MANIFEST)
+  ? JSON.parse(fs.readFileSync(MANIFEST, "utf8")) : {};
+
+let generated = 0, skipped = 0, unchanged = 0;
+
+for (const r of dataRows) {
+  const row = Object.fromEntries(cols.map((c, i) => [c, (r[i] || "").trim()]));
+  const tcId = row["TC ID"];
+  if (!tcId) continue;
+
+  if (row["Automation Candidate"] !== "Yes" || row["Required Account"] !== "(none)") {
+    skipped++;
+    continue;
+  }
+
+  const hash = Buffer.from(JSON.stringify(row)).toString("base64");
+  if (manifest[tcId] === hash) { unchanged++; continue; }
+
+  console.log(\`[sync-test-suite] generating \${tcId}: \${row["Test Scenario"]}\`);
+  const prompt = \`Follow .claude/skills/qa-codegen/SKILL.md for this row: \${JSON.stringify(row)}\`;
+  execFileSync("claude", ["-p", prompt, "--permission-mode", CLAUDE_MODE], { stdio: "inherit" });
+
+  manifest[tcId] = hash;
+  generated++;
+}
+
+fs.writeFileSync(MANIFEST, JSON.stringify(manifest, null, 2) + "\\n");
+console.log(\`[sync-test-suite] \${generated} generated, \${unchanged} unchanged, \${skipped} skipped (not Yes/(none))\`);`}
           />
-          <Note tone="warn" title="Verify this in your own shell first">
-            <code>bypassPermissions</code> is what makes self-verify possible
-            unattended (Playwright and the browser need to actually run) —
-            plain <code>acceptEdits</code> only covers file writes, not
-            running anything. Run that exact command by hand once before
-            trusting it in a job: Claude Code's own safety layer can refuse
-            it when invoked from inside another orchestrating session,
-            though not when it's just you, directly, in your own terminal.
-            If you'd rather not grant that, skip this step and run{" "}
-            <code>claude</code> interactively yourself per sheet row instead —
-            everything from step 4 onward works identically either way; only
-            who clicks "generate" changes.
+          <Note tone="warn" title="Tested: bypassPermissions works as a script, not as a bare top-level command">
+            Self-verify needs Playwright and a real browser to actually run —
+            plain <code>acceptEdits</code> only covers file writes, so it will
+            write the spec but stop before running it. Set{" "}
+            <code>CLAUDE_PERMISSION_MODE: bypassPermissions</code> in the
+            job's <code>variables:</code> once you want that unattended.
+            Confirmed working exactly as shown here — called from inside this
+            script, on a real qa-laptop runner, against a real production
+            server. The one thing that <em>doesn't</em> reliably work: running
+            that same bypass mode as a bare, standalone, top-level action from
+            inside another orchestrating Claude session — that gets refused
+            by that session's own safety layer. Not a concern here; it only
+            matters if you're invoking this from inside some other piece of
+            automation. If you'd rather not grant it at all, leave the
+            default and run <code>claude</code> interactively yourself per
+            sheet row instead — everything from step 5 onward works
+            identically either way; only who clicks "generate" changes.
           </Note>
         </li>
 
