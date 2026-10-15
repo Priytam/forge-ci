@@ -12,9 +12,6 @@ export default function AllPipelines() {
       <div className="page-head">
         <h1>Pipelines</h1>
         <div className="page-head-actions">
-          <Link to="/new" className="btn btn-primary">
-            Run pipeline
-          </Link>
         </div>
       </div>
       <PipelineBrowser />

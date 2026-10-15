@@ -1,4 +1,5 @@
-import { BrowserRouter, Link, Route, Routes } from "react-router-dom";
+import type { ReactNode } from "react";
+import { BrowserRouter, Route, Routes, useLocation } from "react-router-dom";
 import Repos from "./pages/Repos";
 import PipelineList from "./pages/PipelineList";
 import PipelineDetail from "./pages/PipelineDetail";
@@ -20,45 +21,19 @@ import EnvironmentBoard from "./pages/EnvironmentBoard";
 import AdminEnvironments from "./pages/AdminEnvironments";
 import Environments from "./pages/Environments";
 import TestHistory from "./pages/TestHistory";
-import AuthMenu from "./components/AuthMenu";
-import AdminNav from "./components/AdminNav";
+import Shell from "./components/Shell";
+
+/** Sign-in renders bare; every other page sits inside the app shell. */
+function Frame({ children }: { children: ReactNode }) {
+  const { pathname } = useLocation();
+  if (pathname.startsWith("/login")) return <main className="content content-bare">{children}</main>;
+  return <Shell>{children}</Shell>;
+}
 
 export default function App() {
   return (
     <BrowserRouter>
-      <header className="app-header">
-        <div className="app-header-inner">
-          <Link to="/" className="brand">
-            <span className="brand-mark">⚙</span> Forge CI
-          </Link>
-          <nav className="header-nav">
-            <Link to="/environments" className="header-link">
-              Environments
-            </Link>
-            <Link to="/pipelines" className="header-link">
-              Pipelines
-            </Link>
-            <Link to="/jobs" className="header-link">
-              Jobs
-            </Link>
-            <Link to="/runners" className="header-link">
-              Runners
-            </Link>
-            <Link to="/recipes" className="header-link">
-              Recipes
-            </Link>
-            <Link to="/docs" className="header-link">
-              Docs
-            </Link>
-            <AdminNav />
-            <Link to="/new" className="btn header-action">
-              Run pipeline
-            </Link>
-            <AuthMenu />
-          </nav>
-        </div>
-      </header>
-      <main className="content">
+      <Frame>
         <Routes>
           <Route path="/" element={<Repos />} />
           <Route path="/repos/new" element={<AddRepo />} />
@@ -84,7 +59,7 @@ export default function App() {
           <Route path="/jobs/:id" element={<JobLog />} />
           <Route path="/new" element={<NewPipeline />} />
         </Routes>
-      </main>
+      </Frame>
     </BrowserRouter>
   );
 }

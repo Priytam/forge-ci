@@ -25,21 +25,22 @@ export default function AuthMenu() {
         className="auth-trigger"
         onClick={() => setOpen((o) => !o)}
       >
-        {user.email} ▾
+        {user.email} <span className="muted">▾</span>
       </button>
       {open && (
         <div className="auth-dropdown">
-          <div className="auth-dropdown-meta muted">
-            {user.name} · via {user.provider}
+          <div className="auth-dropdown-meta">
+            <div>{user.name || user.email}</div>
+            <div className="muted">
+              {user.email} · via {user.provider}
+            </div>
           </div>
-          <Link to="/tokens" className="header-link" onClick={() => setOpen(false)}>
+          <div className="menu-sep" />
+          <Link to="/tokens" className="menu-item" onClick={() => setOpen(false)}>
             API tokens
           </Link>
-          <button
-            type="button"
-            className="btn auth-signout"
-            onClick={() => void signOut()}
-          >
+          <div className="menu-sep" />
+          <button type="button" className="menu-item" onClick={() => void signOut()}>
             Sign out
           </button>
         </div>

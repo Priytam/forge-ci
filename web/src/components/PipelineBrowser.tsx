@@ -343,7 +343,7 @@ export default function PipelineBrowser({ fixedRepo }: { fixedRepo?: string }) {
           {anyFilter ? "No pipelines match these filters." : "No pipelines yet."}
         </div>
       )}
-      {data && data.items.length > 0 && <PipelineTable pipelines={data.items} />}
+      {data && data.items.length > 0 && <PipelineTable pipelines={data.items} showRepo={!fixedRepo} />}
       {data && total > 0 && (
         <div className="filter-pager">
           <span className="muted">

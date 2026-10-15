@@ -44,9 +44,6 @@ export default function PipelineList() {
           >
             ⚙ Settings
           </Link>
-          <Link to="/new" className="btn btn-primary">
-            Run pipeline
-          </Link>
         </div>
       </div>
 
