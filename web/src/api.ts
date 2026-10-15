@@ -1130,6 +1130,7 @@ export interface Permissions {
   is_admin: boolean;
   /** retry pipelines and play manual jobs on this repo */
   can_run: boolean;
+  /** cancel pipelines and jobs on this repo (same rule as can_run) */
   can_cancel: boolean;
 }
 

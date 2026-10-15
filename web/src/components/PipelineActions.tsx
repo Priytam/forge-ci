@@ -23,8 +23,8 @@ interface PipelineActionsProps {
  * api.retryPipeline); it navigates to that new run rather than refreshing in
  * place, since this page's own id no longer changes.
  *
- * Each button shows only when the viewer may use it (getPermissions): Retry
- * for anyone with a role on the repo, Cancel for admins.
+ * Each button shows only when the viewer may use it (getPermissions): anyone
+ * with a role on the repo, or an admin.
  */
 export default function PipelineActions({
   pipelineId,

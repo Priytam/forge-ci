@@ -1,17 +1,23 @@
-import { useState } from "react";
-import { cancelJob } from "../api";
+import { useEffect, useState } from "react";
+import { cancelJob, getPermissions } from "../api";
 
 interface CancelJobButtonProps {
   jobId: number;
+  repo: string;
   onDone?: () => void;
 }
 
 /** Cancel a single job. Idempotent for terminal jobs (backend no-ops); a
  * running job is signaled to stop via its next heartbeat, so the status may
- * take a moment to settle to 'canceled' after this returns. */
-export default function CancelJobButton({ jobId, onDone }: CancelJobButtonProps) {
+ * take a moment to settle to 'canceled' after this returns. Shown only to
+ * viewers with a role on the repo. */
+export default function CancelJobButton({ jobId, repo, onDone }: CancelJobButtonProps) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [canCancel, setCanCancel] = useState(false);
+  useEffect(() => {
+    if (repo) void getPermissions(repo).then((p) => setCanCancel(p.can_cancel));
+  }, [repo]);
 
   const cancel = async () => {
     setBusy(true);
@@ -25,6 +31,8 @@ export default function CancelJobButton({ jobId, onDone }: CancelJobButtonProps)
       setBusy(false);
     }
   };
+
+  if (!canCancel) return null;
 
   return (
     <div className="pipeline-actions">

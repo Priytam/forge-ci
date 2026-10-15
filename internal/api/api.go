@@ -401,12 +401,22 @@ func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
 // cancelPipeline cancels every non-terminal job in a pipeline. Idempotent: a
 // finished pipeline is a clean no-op returning its current state.
 func (s *Server) cancelPipeline(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
-		return
-	}
 	id, ok := pathID(r)
 	if !ok {
 		writeErr(w, http.StatusBadRequest, "invalid pipeline id")
+		return
+	}
+	repo, err := s.store.PipelineRepo(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "pipeline not found")
+		return
+	}
+	if err != nil {
+		slog.Error("cancel pipeline repo", "err", err)
+		writeErr(w, http.StatusInternalServerError, "failed to load pipeline")
+		return
+	}
+	if !s.requireOperate(w, r, repo) {
 		return
 	}
 	p, jobs, err := s.store.CancelPipeline(r.Context(), id)
@@ -486,12 +496,22 @@ func (s *Server) retryPipeline(w http.ResponseWriter, r *http.Request) {
 // cancelJob cancels a single job by its current state. Idempotent for terminal
 // jobs. A running job is signaled to stop via its next heartbeat.
 func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
-		return
-	}
 	id, ok := pathID(r)
 	if !ok {
 		writeErr(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+	repo, err := s.store.JobRepo(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "job not found")
+		return
+	}
+	if err != nil {
+		slog.Error("cancel job repo", "err", err)
+		writeErr(w, http.StatusInternalServerError, "failed to load job")
+		return
+	}
+	if !s.requireOperate(w, r, repo) {
 		return
 	}
 	job, err := s.store.CancelJob(r.Context(), id)
@@ -505,7 +525,7 @@ func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	slog.Info("job cancel requested", "job", id, "status", job.Status)
-	s.audit(r, "job.cancel", strconv.FormatInt(id, 10), "", "ok", map[string]any{"status": job.Status})
+	s.audit(r, "job.cancel", strconv.FormatInt(id, 10), repo, "ok", map[string]any{"status": job.Status})
 	writeJSON(w, http.StatusOK, map[string]any{"job": job})
 }
 

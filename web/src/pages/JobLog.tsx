@@ -276,7 +276,7 @@ export default function JobLog() {
           <div className="pipeline-head-side">
             <StatusBadge status={job.status} />
             {!isTerminalStatus(job.status) && (
-              <CancelJobButton jobId={job.id} onDone={refreshPipeline} />
+              <CancelJobButton jobId={job.id} repo={repo ?? ""} onDone={refreshPipeline} />
             )}
           </div>
         </div>

@@ -133,8 +133,8 @@ func pid(id int64) string { return strconv.FormatInt(id, 10) }
 // ---- 1. retry / play permissions ----
 
 // TestDevelopersCanRetryAndPlay: a repo member with the developer role may
-// retry a pipeline and play a manual job; a signed-in non-member may not;
-// cancel and settings stay admin-only.
+// retry and cancel a pipeline and play and cancel a job; a signed-in
+// non-member may not; settings stay admin-only.
 func TestDevelopersCanRetryAndPlay(t *testing.T) {
 	h := newEnforcedHarness(t)
 	ctx := context.Background()
@@ -161,8 +161,14 @@ func TestDevelopersCanRetryAndPlay(t *testing.T) {
 	h.expect(h.do(dev, "POST", "/api/v1/jobs/"+pid(ship)+"/play", nil), 200, "developer play")
 	h.expect(h.do(dev, "POST", "/api/v1/pipelines/"+pid(p.ID)+"/retry", nil), 201, "developer retry")
 
+	// Cancel: a member may, an outsider may not.
+	h.expect(h.do(outsider, "POST", "/api/v1/pipelines/"+pid(p.ID)+"/cancel", nil), 403, "outsider cancel")
+	h.expect(h.do(outsider, "POST", "/api/v1/jobs/"+pid(ship)+"/cancel", nil), 403, "outsider cancel job")
+	h.expect(h.do(dev, "POST", "/api/v1/jobs/"+pid(ship)+"/cancel", nil), 200, "developer cancel job")
+	h.expect(h.do(dev, "POST", "/api/v1/pipelines/"+pid(p.ID)+"/cancel", nil), 200, "developer cancel")
+	h.expect(h.do(dev, "POST", "/api/v1/pipelines/999999/cancel", nil), 404, "missing pipeline cancel")
+
 	// Still admin-only.
-	h.expect(h.do(dev, "POST", "/api/v1/pipelines/"+pid(p.ID)+"/cancel", nil), 403, "developer cancel")
 	h.expect(h.do(dev, "POST", "/api/v1/variables",
 		map[string]any{"repo": repo, "key": "K", "value": "v"}), 403, "developer variable")
 	h.expect(h.do(dev, "POST", "/api/v1/members",
@@ -179,14 +185,14 @@ func TestDevelopersCanRetryAndPlay(t *testing.T) {
 	rec := h.do(dev, "GET", "/api/v1/permissions?repo="+repo, nil)
 	h.expect(rec, 200, "permissions")
 	_ = json.Unmarshal(rec.Body.Bytes(), &perms)
-	if !perms["can_run"] || perms["can_cancel"] || perms["is_admin"] {
-		t.Errorf("developer permissions = %v, want can_run only", perms)
+	if !perms["can_run"] || !perms["can_cancel"] || perms["is_admin"] {
+		t.Errorf("developer permissions = %v, want can_run and can_cancel, not admin", perms)
 	}
 	rec = h.do(outsider, "GET", "/api/v1/permissions?repo="+repo, nil)
 	perms = nil
 	_ = json.Unmarshal(rec.Body.Bytes(), &perms)
-	if perms["can_run"] {
-		t.Errorf("outsider permissions = %v, want can_run false", perms)
+	if perms["can_run"] || perms["can_cancel"] {
+		t.Errorf("outsider permissions = %v, want nothing", perms)
 	}
 }
 

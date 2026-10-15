@@ -14,8 +14,8 @@ Membership is per repo, one role per user:
 
 | Action | Who |
 |---|---|
-| Retry a pipeline, play a manual job | Platform admins, plus any member of the repo (`admin`, `owner` or `developer`). On a repo with no members (bootstrap mode) any signed-in user. |
-| Cancel pipelines/jobs, variables and secrets, runners and runner tokens, members, approval rules, SSO, token policy | Platform admins only (`ADMIN_EMAILS`) |
+| Retry or cancel a pipeline, play or cancel a job | Platform admins, plus any member of the repo (`admin`, `owner` or `developer`). On a repo with no members (bootstrap mode) any signed-in user. |
+| Variables and secrets, runners and runner tokens, members, approval rules, SSO, token policy | Platform admins only (`ADMIN_EMAILS`) |
 
 Members are matched to the signed-in email case-insensitively. The UI asks
 `GET /api/v1/permissions?repo=<repo>` (`{is_admin, can_run, can_cancel}`) to

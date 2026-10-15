@@ -149,13 +149,13 @@ func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	return false
 }
 
-// operatorRoles are the repo roles allowed to run work on a repo: retry a
-// pipeline or play a manual job. Every role qualifies — the split between
+// operatorRoles are the repo roles allowed to run work on a repo: retry or
+// cancel a pipeline, cancel a job, or play a manual job. Every role qualifies — the split between
 // roles is about approvals and settings, not about starting pipelines.
 var operatorRoles = map[string]bool{"admin": true, "owner": true, "developer": true}
 
-// canOperate reports whether the caller may retry pipelines and play manual
-// jobs on repo. Platform admins always may (as does everyone in open bootstrap
+// canOperate reports whether the caller may retry and cancel pipelines, and
+// play or cancel jobs, on repo. Platform admins always may (as does everyone in open bootstrap
 // mode). Otherwise the caller must be signed in and either be a member of the
 // repo with an operator role, or the repo must have no members yet — the same
 // bootstrap rule approvals use (docs/rbac-approvals.md). Settings, secrets,
@@ -176,7 +176,7 @@ func (s *Server) canOperate(r *http.Request, repo string) bool {
 	return !hasMembers || operatorRoles[role]
 }
 
-// requireOperate gates retry/play on repo, auditing denials like requireAdmin.
+// requireOperate gates retry/cancel/play on repo, auditing denials like requireAdmin.
 func (s *Server) requireOperate(w http.ResponseWriter, r *http.Request, repo string) bool {
 	if s.canOperate(r, repo) {
 		return true
@@ -190,11 +190,11 @@ func (s *Server) requireOperate(w http.ResponseWriter, r *http.Request, repo str
 // a hint only: every action re-checks on the server.
 func (s *Server) permissions(w http.ResponseWriter, r *http.Request) {
 	repo := r.URL.Query().Get("repo")
-	admin := s.isAdmin(r)
+	canRun := repo != "" && s.canOperate(r, repo)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"is_admin":   admin,
-		"can_run":    repo != "" && s.canOperate(r, repo),
-		"can_cancel": admin,
+		"is_admin":   s.isAdmin(r),
+		"can_run":    canRun,
+		"can_cancel": canRun,
 	})
 }
 
