@@ -570,9 +570,13 @@ tbody tr:last-child td {
 
 /* ---------- Repo cards (landing page) ---------- */
 
+.repo-toolbar {
+  align-items: center;
+}
+
 .repo-search {
-  width: 260px;
-  max-width: 50vw;
+  flex: 1 1 320px;
+  max-width: 420px;
 }
 
 .repo-grid {

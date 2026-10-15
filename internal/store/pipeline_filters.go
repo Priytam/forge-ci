@@ -41,25 +41,6 @@ func (f PipelineFilter) Validate() error {
 	return nil
 }
 
-// pipelineStatusCase derives a pipeline's status from its jobs (aliased j,
-// aggregated per pipeline). It must stay in step with deriveStatus (failed
-// jobs with allow_failure count as success there too). count(j.id) rather
-// than count(*) so it also works over a LEFT JOIN, where a job-less pipeline
-// still yields one all-NULL row.
-const pipelineStatusCase = `CASE
-	WHEN count(j.id) = 0 THEN 'created'
-	WHEN bool_or(j.status = 'failed' AND NOT j.allow_failure) THEN 'failed'
-	WHEN bool_or(j.status = 'canceled') THEN 'canceled'
-	WHEN bool_or(j.status IN ('running','pending')) THEN 'running'
-	WHEN bool_or(j.status = 'blocked') THEN 'blocked'
-	WHEN bool_or(j.status = 'created') THEN 'running'
-	ELSE 'success' END`
-
-// pipelineStatusSQL is pipelineStatusCase as a correlated subquery over the
-// jobs of pipeline p.
-const pipelineStatusSQL = `(SELECT ` + pipelineStatusCase + `
-	FROM jobs j WHERE j.pipeline_id = p.id)`
-
 // where builds the WHERE clause (over pipelines aliased p) and its args.
 func (f PipelineFilter) where() (string, []any) {
 	conds := []string{"TRUE"}
@@ -81,7 +62,7 @@ func (f PipelineFilter) where() (string, []any) {
 		add("EXISTS (SELECT 1 FROM jobs j WHERE j.pipeline_id = p.id AND j.environment = $?)", f.Environment)
 	}
 	if len(f.Statuses) > 0 {
-		add(pipelineStatusSQL+" = ANY($?)", f.Statuses)
+		add("p.status = ANY($?)", f.Statuses)
 	}
 	return strings.Join(conds, " AND "), args
 }

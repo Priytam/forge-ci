@@ -662,3 +662,84 @@ CREATE TABLE IF NOT EXISTS pipeline_views (
 CREATE INDEX IF NOT EXISTS jobs_runner_idx ON jobs (runner_id, pipeline_id) WHERE runner_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS jobs_environment_idx ON jobs (environment, pipeline_id) WHERE environment IS NOT NULL;
 CREATE INDEX IF NOT EXISTS pipelines_ref_idx ON pipelines (ref, id DESC);
+
+-- Stored pipeline status. A pipeline's status is derived from its jobs (see
+-- deriveStatus in store.go; the CASE below must stay in step with it), but
+-- deriving it at read time means scanning every job of every pipeline for
+-- repo counts and status filters. Instead, like most CI servers, the status
+-- is materialized on pipelines and kept current by statement-level triggers
+-- on jobs, so every writer (scheduler, runner API, retries, cancels) updates
+-- it without having to remember to.
+CREATE OR REPLACE FUNCTION forge_pipeline_status(pid BIGINT) RETURNS TEXT
+LANGUAGE sql STABLE AS $$
+    SELECT CASE
+        WHEN count(*) = 0 THEN 'created'
+        WHEN bool_or(j.status = 'failed' AND NOT j.allow_failure) THEN 'failed'
+        WHEN bool_or(j.status = 'canceled') THEN 'canceled'
+        WHEN bool_or(j.status IN ('running','pending')) THEN 'running'
+        WHEN bool_or(j.status = 'blocked') THEN 'blocked'
+        WHEN bool_or(j.status = 'created') THEN 'running'
+        ELSE 'success' END
+    FROM jobs j WHERE j.pipeline_id = pid
+$$;
+
+-- Recompute the status of pids. The rows are locked (in id order) before the
+-- recompute, which runs as a separate statement: under READ COMMITTED it then
+-- takes a fresh snapshot, so when two transactions finish jobs of the same
+-- pipeline concurrently the second one sees the first's job and neither
+-- leaves a stale status behind.
+CREATE OR REPLACE FUNCTION forge_sync_pipeline_status(pids BIGINT[]) RETURNS void
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF cardinality(pids) = 0 THEN
+        RETURN;
+    END IF;
+    PERFORM 1 FROM pipelines WHERE id = ANY(pids) ORDER BY id FOR UPDATE;
+    UPDATE pipelines p SET status = s.status
+    FROM (SELECT id, forge_pipeline_status(id) AS status
+          FROM pipelines WHERE id = ANY(pids)) s
+    WHERE p.id = s.id AND p.status IS DISTINCT FROM s.status;
+END
+$$;
+
+-- Insert/delete: every touched pipeline. Update: only pipelines whose jobs
+-- changed status or allow_failure (heartbeats and log bookkeeping don't count).
+CREATE OR REPLACE FUNCTION forge_jobs_sync_status() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'UPDATE' THEN
+        PERFORM forge_sync_pipeline_status(ARRAY(
+            SELECT DISTINCT n.pipeline_id FROM changed n JOIN old_rows o ON o.id = n.id
+            WHERE n.status IS DISTINCT FROM o.status
+               OR n.allow_failure IS DISTINCT FROM o.allow_failure
+               OR n.pipeline_id IS DISTINCT FROM o.pipeline_id));
+    ELSE
+        PERFORM forge_sync_pipeline_status(ARRAY(SELECT DISTINCT pipeline_id FROM changed));
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS status TEXT;
+
+CREATE OR REPLACE TRIGGER jobs_sync_status_ins AFTER INSERT ON jobs
+    REFERENCING NEW TABLE AS changed
+    FOR EACH STATEMENT EXECUTE FUNCTION forge_jobs_sync_status();
+CREATE OR REPLACE TRIGGER jobs_sync_status_upd AFTER UPDATE ON jobs
+    REFERENCING OLD TABLE AS old_rows NEW TABLE AS changed
+    FOR EACH STATEMENT EXECUTE FUNCTION forge_jobs_sync_status();
+CREATE OR REPLACE TRIGGER jobs_sync_status_del AFTER DELETE ON jobs
+    REFERENCING OLD TABLE AS changed
+    FOR EACH STATEMENT EXECUTE FUNCTION forge_jobs_sync_status();
+
+-- Backfill once (a no-op on later boots), then new pipelines start 'created'
+-- until their jobs are inserted.
+UPDATE pipelines SET status = forge_pipeline_status(id) WHERE status IS NULL;
+ALTER TABLE pipelines ALTER COLUMN status SET DEFAULT 'created';
+ALTER TABLE pipelines ALTER COLUMN status SET NOT NULL;
+
+-- Repo cards count runs per repo and status and find the last run (an
+-- index-only scan); the
+-- pipeline list filters by status across repos.
+CREATE INDEX IF NOT EXISTS pipelines_repo_status_idx ON pipelines (repo, status, id);
+CREATE INDEX IF NOT EXISTS pipelines_status_idx ON pipelines (status, id DESC);

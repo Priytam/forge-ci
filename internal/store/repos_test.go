@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/priytamjeepandey/forge-ci/internal/compiler"
 	"github.com/priytamjeepandey/forge-ci/internal/proto"
@@ -83,9 +84,12 @@ func TestListReposCountsEveryPipeline(t *testing.T) {
 		t.Fatalf("RegisterRepo: %v", err)
 	}
 
-	repos, err := st.ListRepos(ctx)
+	repos, total, err := st.ListRepos(ctx, RepoQuery{})
 	if err != nil {
 		t.Fatalf("ListRepos: %v", err)
+	}
+	if total != 4 {
+		t.Errorf("total = %d, want 4", total)
 	}
 	var names []string
 	byRepo := map[string]proto.RepoSummary{}
@@ -93,7 +97,9 @@ func TestListReposCountsEveryPipeline(t *testing.T) {
 		names = append(names, r.Repo)
 		byRepo[r.Repo] = r
 	}
-	if want := []string{"acme/mid", "acme/busy", "acme/old", "acme/never"}; !reflect.DeepEqual(names, want) {
+	// acme/never was registered after every run, so it is the most recently
+	// active; acme/old's registration doesn't count as activity (it has runs).
+	if want := []string{"acme/never", "acme/mid", "acme/busy", "acme/old"}; !reflect.DeepEqual(names, want) {
 		t.Fatalf("repo order = %v, want %v", names, want)
 	}
 
@@ -117,18 +123,160 @@ func TestListReposCountsEveryPipeline(t *testing.T) {
 	check("acme/mid", 6, 2, 1,
 		[]string{"created", "running", "blocked", "success", "success"}, []string{"topic", "dev", "main"})
 	check("acme/never", 0, 0, 0, []string{}, []string{})
-	if got := len(byRepo["acme/busy"].Refs); got != 7 {
-		t.Errorf("acme/busy refs = %d, want 7", got)
+	if r := byRepo["acme/busy"]; len(r.Refs) != 7 || r.RefCount != 7 {
+		t.Errorf("acme/busy refs = %d (count %d), want 7", len(r.Refs), r.RefCount)
 	}
 
 	mid := byRepo["acme/mid"]
 	if mid.LastPipeline == nil || mid.LastPipeline.ID != lastMid || mid.LastPipeline.Status != "created" {
 		t.Fatalf("acme/mid last pipeline = %+v, want id %d created", mid.LastPipeline, lastMid)
 	}
+	if mid.RefCount != 3 {
+		t.Errorf("acme/mid ref_count = %d, want 3", mid.RefCount)
+	}
 	if !mid.LastActivityAt.Equal(mid.LastPipeline.CreatedAt) {
 		t.Errorf("last activity %v != last pipeline created %v", mid.LastActivityAt, mid.LastPipeline.CreatedAt)
 	}
 	if byRepo["acme/never"].LastPipeline != nil || byRepo["acme/never"].LastActivityAt.IsZero() {
 		t.Errorf("acme/never = %+v, want no pipeline and a registration time", byRepo["acme/never"])
+	}
+}
+
+func TestListReposSearchSortPage(t *testing.T) {
+	st := newDeployTestStore(t)
+	ctx := context.Background()
+	for _, repo := range []string{"acme/web", "Acme/API", "tools/cli", "acme/worker"} {
+		if _, err := st.CreatePipeline(ctx, proto.CreatePipelineRequest{
+			Repo: repo, Ref: "main", SHA: "abc", Config: "x",
+		}, nil, nil, false, false); err != nil {
+			t.Fatalf("CreatePipeline: %v", err)
+		}
+	}
+	names := func(q RepoQuery, wantTotal int) []string {
+		t.Helper()
+		repos, total, err := st.ListRepos(ctx, q)
+		if err != nil {
+			t.Fatalf("ListRepos(%+v): %v", q, err)
+		}
+		if total != wantTotal {
+			t.Errorf("ListRepos(%+v) total = %d, want %d", q, total, wantTotal)
+		}
+		out := []string{}
+		for _, r := range repos {
+			out = append(out, r.Repo)
+		}
+		return out
+	}
+	eq := func(got, want []string) {
+		t.Helper()
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	}
+	eq(names(RepoQuery{}, 4), []string{"acme/worker", "tools/cli", "Acme/API", "acme/web"})
+	eq(names(RepoQuery{Sort: "name"}, 4), []string{"Acme/API", "acme/web", "acme/worker", "tools/cli"})
+	eq(names(RepoQuery{Sort: "name", Limit: 2, Offset: 1}, 4), []string{"acme/web", "acme/worker"})
+	eq(names(RepoQuery{Search: "ACME/", Sort: "name"}, 3), []string{"Acme/API", "acme/web", "acme/worker"})
+	eq(names(RepoQuery{Search: "w", Limit: 1}, 2), []string{"acme/worker"})
+	eq(names(RepoQuery{Search: "%"}, 0), []string{})
+	eq(names(RepoQuery{Search: "acme_"}, 0), []string{})
+	eq(names(RepoQuery{Offset: 10, Limit: 5}, 4), []string{})
+}
+
+// TestStoredPipelineStatusMatchesDerive checks that the jobs trigger keeps
+// pipelines.status equal to deriveStatus for every mix of job statuses.
+func TestStoredPipelineStatusMatchesDerive(t *testing.T) {
+	st := newDeployTestStore(t)
+	ctx := context.Background()
+	jobStatuses := []string{"created", "pending", "blocked", "running", "success", "failed", "canceled"}
+	jobs := []compiler.CompiledJob{
+		{Name: "a", Stage: "s", Script: "true", Env: map[string]string{}},
+		{Name: "b", Stage: "s", Script: "true", Env: map[string]string{}},
+	}
+	p, err := st.CreatePipeline(ctx, proto.CreatePipelineRequest{
+		Repo: "acme/x", Ref: "main", SHA: "abc", Config: "x",
+	}, jobs, nil, false, false)
+	if err != nil {
+		t.Fatalf("CreatePipeline: %v", err)
+	}
+	stored := func() string {
+		t.Helper()
+		var s string
+		if err := st.pool.QueryRow(ctx, `SELECT status FROM pipelines WHERE id=$1`, p.ID).Scan(&s); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	for _, a := range jobStatuses {
+		for _, b := range jobStatuses {
+			for _, allowB := range []bool{false, true} {
+				if _, err := st.pool.Exec(ctx,
+					`UPDATE jobs SET status = CASE name WHEN 'a' THEN $2 ELSE $3 END,
+					                 allow_failure = (name = 'b' AND $4)
+					 WHERE pipeline_id=$1`, p.ID, a, b, allowB); err != nil {
+					t.Fatal(err)
+				}
+				bEff := b
+				if b == "failed" && allowB {
+					bEff = "success"
+				}
+				if got, want := stored(), deriveStatus([]string{a, bEff}); got != want {
+					t.Errorf("jobs %s,%s (allow_failure b=%v): stored %q, derived %q", a, b, allowB, got, want)
+				}
+			}
+		}
+	}
+	if _, err := st.pool.Exec(ctx, `DELETE FROM jobs WHERE pipeline_id=$1`, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := stored(); got != "created" {
+		t.Errorf("after deleting jobs: stored %q, want created", got)
+	}
+}
+
+// TestStoredPipelineStatusConcurrentJobs finishes the last two jobs of a
+// pipeline in overlapping transactions; the pipeline must end up success, not
+// stuck on the status either transaction saw alone.
+func TestStoredPipelineStatusConcurrentJobs(t *testing.T) {
+	st := newDeployTestStore(t)
+	ctx := context.Background()
+	p, err := st.CreatePipeline(ctx, proto.CreatePipelineRequest{
+		Repo: "acme/x", Ref: "main", SHA: "abc", Config: "x",
+	}, []compiler.CompiledJob{
+		{Name: "a", Stage: "s", Script: "true", Env: map[string]string{}},
+		{Name: "b", Stage: "s", Script: "true", Env: map[string]string{}},
+	}, nil, false, false)
+	if err != nil {
+		t.Fatalf("CreatePipeline: %v", err)
+	}
+	if _, err := st.pool.Exec(ctx, `UPDATE jobs SET status='running' WHERE pipeline_id=$1`, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	tx1, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx1.Exec(ctx, `UPDATE jobs SET status='success' WHERE pipeline_id=$1 AND name='a'`, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		// Blocks on the pipeline row tx1 holds, then must see tx1's job.
+		_, err := st.pool.Exec(ctx, `UPDATE jobs SET status='success' WHERE pipeline_id=$1 AND name='b'`, p.ID)
+		done <- err
+	}()
+	time.Sleep(200 * time.Millisecond)
+	if err := tx1.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	if err := st.pool.QueryRow(ctx, `SELECT status FROM pipelines WHERE id=$1`, p.ID).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != "success" {
+		t.Errorf("stored status = %q, want success", got)
 	}
 }

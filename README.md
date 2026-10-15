@@ -279,7 +279,7 @@ Full containerized stack instead: `make up` (dashboard on :3000).
 Public:
 
 - `POST /api/v1/pipelines` `{repo, ref, sha, config}` — compile YAML (for that ref) and enqueue
-- `GET  /api/v1/repos` — per-repo rollup cards (counts, refs, recent statuses, last pipeline)
+- `GET  /api/v1/repos` — per-repo rollup cards (counts, refs, recent statuses, last pipeline). `?q=` searches repo names, `?sort=activity|name`; with `?limit`/`?offset` it pages (`X-Total-Count`, `X-Has-More`), without `?limit` it returns every repo
 - `GET  /api/v1/pipelines[?repo=name][&limit=&offset=]` — newest first; array body plus
   `X-Total-Count` / `X-Has-More` headers. `limit` defaults to 50, capped at 200.
 - `GET  /api/v1/pipelines/{id}` — includes per-stage statuses and jobs

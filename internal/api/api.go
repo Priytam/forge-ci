@@ -197,13 +197,31 @@ func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{"pipeline": p})
 }
 
+// listRepos returns repo summary cards as a JSON array. ?q filters by repo
+// name (case-insensitive substring) and ?sort is "activity" (default) or
+// "name". Without ?limit every match is returned, as before pagination
+// existed; with ?limit / ?offset it pages like listPipelines. X-Total-Count
+// and X-Has-More are always set.
 func (s *Server) listRepos(w http.ResponseWriter, r *http.Request) {
-	repos, err := s.store.ListRepos(r.Context())
+	qs := r.URL.Query()
+	q := store.RepoQuery{Search: strings.TrimSpace(qs.Get("q")), Sort: qs.Get("sort")}
+	switch q.Sort {
+	case "", "activity", "name":
+	default:
+		writeErr(w, http.StatusBadRequest, `sort must be "activity" or "name"`)
+		return
+	}
+	if qs.Has("limit") {
+		q.Limit, q.Offset = pageParams(r)
+	}
+	repos, total, err := s.store.ListRepos(r.Context(), q)
 	if err != nil {
 		slog.Error("list repos", "err", err)
 		writeErr(w, http.StatusInternalServerError, "failed to list repos")
 		return
 	}
+	w.Header().Set("X-Total-Count", strconv.Itoa(total))
+	w.Header().Set("X-Has-More", strconv.FormatBool(q.Offset+len(repos) < total))
 	writeJSON(w, http.StatusOK, repos)
 }
 

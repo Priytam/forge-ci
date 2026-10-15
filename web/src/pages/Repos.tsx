@@ -1,10 +1,11 @@
-import { useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import {
   listRegistry,
-  listRepos,
+  listReposPage,
   relativeTime,
   shortSha,
+  type RepoSort,
   type RepoSummary,
 } from "../api";
 import { usePoll } from "../hooks/usePoll";
@@ -14,8 +15,8 @@ import StageDots from "../components/StageDots";
 import Dashboard from "../components/Dashboard";
 
 const MAX_REF_CHIPS = 3;
-// Past this many cards the page gets a search box.
-const SEARCH_MIN_REPOS = 6;
+// Cards per page: divides evenly into 2, 3 and 4 grid columns.
+const PAGE = 24;
 
 export function ProviderChip({ provider }: { provider: string | null }) {
   if (!provider) return null;
@@ -41,7 +42,7 @@ function RepoCard({
   const { last_pipeline: last } = summary;
   const refs = summary.refs ?? [];
   const shownRefs = refs.slice(0, MAX_REF_CHIPS);
-  const extraRefs = refs.length - shownRefs.length;
+  const extraRefs = (summary.ref_count ?? refs.length) - shownRefs.length;
 
   // Runs that neither passed nor failed: cancelled (superseded), blocked, or
   // still going. Counting them keeps the tally honest.
@@ -142,18 +143,62 @@ function RepoCard({
 }
 
 export default function Repos() {
-  const { data: repos, error, loading } = usePoll(listRepos, 5000);
+  const [params, setParams] = useSearchParams();
+  const q = params.get("q") ?? "";
+  const sort: RepoSort = params.get("sort") === "name" ? "name" : "activity";
+  const page = Math.max(0, Number(params.get("page") ?? 0) || 0);
+
+  // Update the URL (so a search can be bookmarked or shared); any change
+  // other than paging goes back to page 1.
+  const setParam = (key: string, value: string, replace = false) => {
+    const next = new URLSearchParams(params);
+    if (value) next.set(key, value);
+    else next.delete(key);
+    if (key !== "page") next.delete("page");
+    setParams(next, { replace });
+  };
+
+  // The box updates as you type; the URL (and the request) follow a beat later.
+  const [draft, setDraft] = useState(q);
+  useEffect(() => setDraft(q), [q]);
+  useEffect(() => {
+    if (draft.trim() === q) return;
+    const t = window.setTimeout(() => setParam("q", draft.trim(), true), 250);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft]);
+
+  // "/" jumps to the search box, as on most code hosts.
+  const searchRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement;
+      if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (el.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName)) return;
+      e.preventDefault();
+      searchRef.current?.focus();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  const key = `${q}|${sort}|${page}`;
+  const fetcher = useCallback(
+    () => listReposPage(q, sort, page * PAGE, PAGE),
+    // key captures q + sort + page
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [key]
+  );
+  const { data, error, loading, refresh } = usePoll(fetcher, 5000);
+  useEffect(() => refresh(), [key, refresh]);
   const { data: registry } = usePoll(listRegistry, 0, false);
-  const [query, setQuery] = useState("");
 
   const providerOf = (repo: string): string | null =>
     registry?.find((r) => r.repo === repo)?.provider ?? null;
 
-  const showSearch = (repos?.length ?? 0) > SEARCH_MIN_REPOS;
-  const needle = showSearch ? query.trim().toLowerCase() : "";
-  const shown = needle
-    ? (repos ?? []).filter((r) => r.repo.toLowerCase().includes(needle))
-    : repos ?? [];
+  const repos = data?.items;
+  const total = data?.total ?? 0;
+  const searching = q !== "";
 
   return (
     <div>
@@ -162,41 +207,91 @@ export default function Repos() {
       <div className="page-head">
         <h1>Repositories</h1>
         <div className="page-head-actions">
-          {showSearch && (
-            <input
-              type="search"
-              placeholder={`Filter ${repos?.length} repositories…`}
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              className="repo-search"
-              aria-label="Filter repositories"
-            />
-          )}
           <Link to="/repos/new" className="btn btn-primary">
             Add repository
           </Link>
         </div>
       </div>
 
-      {error && <div className="error-banner">Failed to load repos: {error}</div>}
-      {loading && !repos && <div className="muted">Loading repositories…</div>}
+      {(total > 0 || searching) && (
+        <div className="filter-bar repo-toolbar">
+          <input
+            ref={searchRef}
+            type="search"
+            placeholder="Find a repository…  ( / )"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                setDraft("");
+                e.currentTarget.blur();
+              }
+            }}
+            className="repo-search"
+            aria-label="Find a repository"
+          />
+          <select
+            value={sort}
+            onChange={(e) => setParam("sort", e.target.value === "name" ? "name" : "")}
+            aria-label="Sort repositories"
+          >
+            <option value="activity">Last activity</option>
+            <option value="name">Name</option>
+          </select>
+        </div>
+      )}
 
-      {repos && repos.length === 0 && (
+      {error && <div className="error-banner">Failed to load repos: {error}</div>}
+      {loading && !data && <div className="muted">Loading repositories…</div>}
+
+      {repos && repos.length === 0 && !searching && page === 0 && (
         <div className="empty card">
           No repositories yet — <Link to="/repos/new">connect one</Link> to get
           started.
         </div>
       )}
-
-      {repos && repos.length > 0 && shown.length === 0 && (
-        <div className="empty card">No repositories match “{query.trim()}”.</div>
+      {repos && repos.length === 0 && (searching || page > 0) && (
+        <div className="empty card">
+          {searching ? <>No repositories match “{q}”.</> : "Nothing on this page."}{" "}
+          <button
+            type="button"
+            className="btn"
+            onClick={() => setParams(new URLSearchParams())}
+          >
+            Show all
+          </button>
+        </div>
       )}
 
-      {shown.length > 0 && (
+      {repos && repos.length > 0 && (
         <div className="repo-grid">
-          {shown.map((r) => (
+          {repos.map((r) => (
             <RepoCard key={r.repo} summary={r} provider={providerOf(r.repo)} />
           ))}
+        </div>
+      )}
+
+      {data && total > PAGE && (
+        <div className="filter-pager">
+          <span className="muted">
+            {page * PAGE + 1}–{page * PAGE + data.items.length} of {total}
+          </span>
+          <button
+            type="button"
+            className="btn"
+            disabled={page === 0}
+            onClick={() => setParam("page", String(page - 1))}
+          >
+            ← Previous
+          </button>
+          <button
+            type="button"
+            className="btn"
+            disabled={!data.hasMore}
+            onClick={() => setParam("page", String(page + 1))}
+          >
+            Next →
+          </button>
         </div>
       )}
     </div>

@@ -490,3 +490,46 @@ func TestPipelineSavedViews(t *testing.T) {
 		t.Errorf("bob sees %q after delete", got)
 	}
 }
+
+func TestListReposSearchAndPaging(t *testing.T) {
+	h := newEnforcedHarness(t)
+	u := h.login("admin@acme.io")
+	for _, repo := range []string{"acme/web", "acme/api", "tools/cli"} {
+		h.seedPipeline(repo, "main", plainYAML)
+	}
+	names := func(rec *httptest.ResponseRecorder) string {
+		t.Helper()
+		var out []string
+		for _, r := range decodeInto[[]proto.RepoSummary](t, rec) {
+			out = append(out, r.Repo)
+		}
+		return strings.Join(out, ",")
+	}
+
+	// No ?limit: every repo, as before paging existed.
+	rec := h.do(u, "GET", "/api/v1/repos", nil)
+	h.expect(rec, 200, "list repos")
+	if got := names(rec); got != "tools/cli,acme/api,acme/web" {
+		t.Errorf("repos = %s", got)
+	}
+	if rec.Header().Get("X-Total-Count") != "3" || rec.Header().Get("X-Has-More") != "false" {
+		t.Errorf("headers total=%s more=%s, want 3/false",
+			rec.Header().Get("X-Total-Count"), rec.Header().Get("X-Has-More"))
+	}
+
+	rec = h.do(u, "GET", "/api/v1/repos?q=ACME&sort=name&limit=1", nil)
+	h.expect(rec, 200, "search repos")
+	if got := names(rec); got != "acme/api" {
+		t.Errorf("first page = %s, want acme/api", got)
+	}
+	if rec.Header().Get("X-Total-Count") != "2" || rec.Header().Get("X-Has-More") != "true" {
+		t.Errorf("headers total=%s more=%s, want 2/true",
+			rec.Header().Get("X-Total-Count"), rec.Header().Get("X-Has-More"))
+	}
+	rec = h.do(u, "GET", "/api/v1/repos?q=acme&sort=name&limit=1&offset=1", nil)
+	if got := names(rec); got != "acme/web" || rec.Header().Get("X-Has-More") != "false" {
+		t.Errorf("second page = %s (more=%s), want acme/web", got, rec.Header().Get("X-Has-More"))
+	}
+
+	h.expect(h.do(u, "GET", "/api/v1/repos?sort=stars", nil), 400, "bad sort")
+}

@@ -287,8 +287,10 @@ export interface RepoSummary {
   pipeline_count: number;
   success_count: number;
   failed_count: number;
-  /** distinct refs seen, most recent first */
+  /** distinct recent refs, most recent first (may be cut short; see ref_count) */
   refs: string[];
+  /** distinct refs among the repo's recent runs */
+  ref_count?: number;
   /** last <=5 pipeline statuses, newest first */
   recent_statuses: string[];
   last_pipeline: Pipeline | null;
@@ -401,6 +403,37 @@ export function listPipelines(repo?: string): Promise<Pipeline[]> {
 
 export function listRepos(): Promise<RepoSummary[]> {
   return getJSON<RepoSummary[]>("/repos");
+}
+
+export type RepoSort = "activity" | "name";
+
+export interface RepoPage {
+  items: RepoSummary[];
+  total: number;
+  hasMore: boolean;
+}
+
+/** One page of repo cards; search, sort and paging happen on the server. */
+export async function listReposPage(
+  q: string,
+  sort: RepoSort,
+  offset: number,
+  limit: number
+): Promise<RepoPage> {
+  const qs = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  if (q) qs.set("q", q);
+  if (sort !== "activity") qs.set("sort", sort);
+  const res = await fetch(`${BASE}/repos?${qs.toString()}`, {
+    headers: { Accept: "application/json" },
+  });
+  if (!res.ok) {
+    throw await parseError(res);
+  }
+  return {
+    items: (await res.json()) as RepoSummary[],
+    total: Number(res.headers.get("X-Total-Count") ?? 0),
+    hasMore: res.headers.get("X-Has-More") === "true",
+  };
 }
 
 // --- CI/CD settings ---

@@ -447,37 +447,74 @@ func (s *Store) ListPipelinesPage(ctx context.Context, repo string, limit, offse
 	return s.ListPipelinesFiltered(ctx, f, limit, offset)
 }
 
-// repoRefsMax caps the distinct refs returned per repo card; the card shows a
-// few chips and a "+N" for the rest.
-const repoRefsMax = 50
+// RepoQuery selects a page of repo cards. Search matches the repo name
+// (case-insensitive substring). Sort is "activity" (default: most recently
+// active first) or "name". Limit 0 returns every match.
+type RepoQuery struct {
+	Search        string
+	Sort          string
+	Limit, Offset int
+}
 
-// ListRepos returns one summary card per repo, most recently active first,
-// then registered repos that have never run (by name). Counts cover every
-// pipeline the repo has, not a recent window, so the aggregation runs in SQL.
-func (s *Store) ListRepos(ctx context.Context) ([]proto.RepoSummary, error) {
-	// One status per pipeline in a single GROUP BY pass over jobs, then one
-	// row per repo. The last-5 statuses and recent refs walk
-	// pipelines_repo_id_idx (repo, id DESC) per repo.
-	rows, err := s.pool.Query(ctx, `
-		WITH ps AS (
-		    SELECT p.id, p.repo, `+pipelineStatusCase+` AS status
-		    FROM pipelines p LEFT JOIN jobs j ON j.pipeline_id = p.id
-		    GROUP BY p.id
-		), agg AS (
+const (
+	// repoRefWindow is how many of a repo's latest runs its card's refs come
+	// from: the branches being worked on, without scanning all history.
+	repoRefWindow = 500
+	// repoRefsMax caps the refs returned per card; RefCount has the total.
+	repoRefsMax = 10
+)
+
+// likeEscaper escapes LIKE wildcards so a search matches literally.
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
+// ListRepos returns one page of repo cards plus the number of matching repos.
+// Repos are those with runs plus registered repos that have never run (their
+// last activity is the registration time). Counts cover every run and come
+// from the stored pipeline status, so the page stays cheap with long history.
+func (s *Store) ListRepos(ctx context.Context, q RepoQuery) ([]proto.RepoSummary, int, error) {
+	pattern := ""
+	if q.Search != "" {
+		pattern = "%" + likeEscaper.Replace(q.Search) + "%"
+	}
+	const cards = `WITH runs AS (
 		    SELECT repo, count(*) AS n,
 		           count(*) FILTER (WHERE status = 'success') AS ok,
 		           count(*) FILTER (WHERE status = 'failed') AS bad,
 		           max(id) AS last_id
-		    FROM ps GROUP BY repo
-		)
-		SELECT a.repo, a.n, a.ok, a.bad, a.last_id,
-		       ARRAY(SELECT `+pipelineStatusSQL+` FROM pipelines p
-		             WHERE p.repo = a.repo ORDER BY p.id DESC LIMIT 5),
-		       ARRAY(SELECT p.ref FROM pipelines p WHERE p.repo = a.repo
-		             GROUP BY p.ref ORDER BY max(p.id) DESC LIMIT $1)
-		FROM agg a ORDER BY a.last_id DESC`, repoRefsMax)
+		    FROM pipelines WHERE ($1 = '' OR repo ILIKE $1) GROUP BY repo
+		), cards AS (
+		    SELECT r.repo, r.n, r.ok, r.bad, r.last_id, lp.created_at AS active_at
+		    FROM runs r JOIN pipelines lp ON lp.id = r.last_id
+		    UNION ALL
+		    SELECT g.repo, 0, 0, 0, NULL, g.created_at FROM repo_registry g
+		    WHERE ($1 = '' OR g.repo ILIKE $1)
+		      AND NOT EXISTS (SELECT 1 FROM pipelines p WHERE p.repo = g.repo)
+		)`
+	var total int
+	if err := s.pool.QueryRow(ctx, cards+` SELECT count(*) FROM cards`, pattern).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	order := "c.active_at DESC, c.repo"
+	if q.Sort == "name" {
+		order = "lower(c.repo), c.repo"
+	}
+	var limit any // NULL: no limit
+	if q.Limit > 0 {
+		limit = q.Limit
+	}
+	// Per card on the page: the last 5 statuses and the recent refs, both
+	// walking pipelines_repo_id_idx (repo, id DESC).
+	rows, err := s.pool.Query(ctx, cards+`
+		SELECT c.repo, c.n, c.ok, c.bad, COALESCE(c.last_id, 0), c.active_at,
+		       ARRAY(SELECT p.status FROM pipelines p
+		             WHERE p.repo = c.repo ORDER BY p.id DESC LIMIT 5),
+		       ARRAY(SELECT w.ref FROM (SELECT p.id, p.ref FROM pipelines p
+		                                WHERE p.repo = c.repo ORDER BY p.id DESC LIMIT $4) w
+		             GROUP BY w.ref ORDER BY max(w.id) DESC)
+		FROM cards c ORDER BY `+order+` LIMIT $2 OFFSET $3`,
+		pattern, limit, q.Offset, repoRefWindow)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	out := []proto.RepoSummary{}
 	lastIDs := []int64{}
@@ -485,59 +522,41 @@ func (s *Store) ListRepos(ctx context.Context) ([]proto.RepoSummary, error) {
 		var r proto.RepoSummary
 		var lastID int64
 		if err := rows.Scan(&r.Repo, &r.PipelineCount, &r.SuccessCount, &r.FailedCount,
-			&lastID, &r.RecentStatuses, &r.Refs); err != nil {
+			&lastID, &r.LastActivityAt, &r.RecentStatuses, &r.Refs); err != nil {
 			rows.Close()
-			return nil, err
+			return nil, 0, err
+		}
+		r.RefCount = len(r.Refs)
+		if len(r.Refs) > repoRefsMax {
+			r.Refs = r.Refs[:repoRefsMax]
 		}
 		out = append(out, r)
 		lastIDs = append(lastIDs, lastID)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
-	// The last pipeline of each repo, with its stages, for the card header.
-	if len(lastIDs) > 0 {
-		rows, err := s.pool.Query(ctx, `SELECT `+pipelineWithStagesCols+`
-			FROM pipelines p LEFT JOIN jobs j ON j.pipeline_id = p.id
-			WHERE p.id = ANY($1) GROUP BY p.id`, lastIDs)
-		if err != nil {
-			return nil, err
-		}
-		last, err := scanPipelines(rows)
-		if err != nil {
-			return nil, err
-		}
-		byID := make(map[int64]*proto.Pipeline, len(last))
-		for i := range last {
-			byID[last[i].ID] = &last[i]
-		}
-		for i, id := range lastIDs {
-			if p := byID[id]; p != nil {
-				out[i].LastPipeline = p
-				out[i].LastActivityAt = p.CreatedAt
-			}
-		}
-	}
-
-	// Registered repos with no pipelines yet still get a card.
-	rows, err = s.pool.Query(ctx,
-		`SELECT r.repo, r.created_at FROM repo_registry r
-		 WHERE NOT EXISTS (SELECT 1 FROM pipelines p WHERE p.repo = r.repo)
-		 ORDER BY r.repo`)
+	// The last pipeline of each card, with its stages, for the card header.
+	rows, err = s.pool.Query(ctx, `SELECT `+pipelineWithStagesCols+`
+		FROM pipelines p LEFT JOIN jobs j ON j.pipeline_id = p.id
+		WHERE p.id = ANY($1) GROUP BY p.id`, lastIDs)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		r := proto.RepoSummary{Refs: []string{}, RecentStatuses: []string{}}
-		if err := rows.Scan(&r.Repo, &r.LastActivityAt); err != nil {
-			return nil, err
-		}
-		out = append(out, r)
+	last, err := scanPipelines(rows)
+	if err != nil {
+		return nil, 0, err
 	}
-	return out, rows.Err()
+	byID := make(map[int64]*proto.Pipeline, len(last))
+	for i := range last {
+		byID[last[i].ID] = &last[i]
+	}
+	for i, id := range lastIDs {
+		out[i].LastPipeline = byID[id]
+	}
+	return out, total, nil
 }
 
 func (s *Store) GetPipeline(ctx context.Context, id int64) (*proto.Pipeline, []proto.Job, error) {

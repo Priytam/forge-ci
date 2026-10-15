@@ -50,7 +50,8 @@ type RepoSummary struct {
 	PipelineCount  int       `json:"pipeline_count"`
 	SuccessCount   int       `json:"success_count"`
 	FailedCount    int       `json:"failed_count"`
-	Refs           []string  `json:"refs"`            // distinct refs, most recent first
+	Refs           []string  `json:"refs"`            // distinct recent refs, most recent first
+	RefCount       int       `json:"ref_count"`       // distinct refs among recent runs (Refs may be cut short)
 	RecentStatuses []string  `json:"recent_statuses"` // last pipelines' statuses, newest first
 	LastPipeline   *Pipeline `json:"last_pipeline"`   // includes stages
 	LastActivityAt time.Time `json:"last_activity_at"`
