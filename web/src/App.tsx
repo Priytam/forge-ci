@@ -17,6 +17,7 @@ import AllPipelines from "./pages/AllPipelines";
 import ApiTokens from "./pages/ApiTokens";
 import Jobs from "./pages/Jobs";
 import EnvironmentBoard from "./pages/EnvironmentBoard";
+import AdminEnvironments from "./pages/AdminEnvironments";
 import Environments from "./pages/Environments";
 import TestHistory from "./pages/TestHistory";
 import AuthMenu from "./components/AuthMenu";
@@ -72,6 +73,7 @@ export default function App() {
           <Route path="/recipes/:slug" element={<Recipes />} />
           <Route path="/login" element={<Login />} />
           <Route path="/admin/sso" element={<AdminSso />} />
+          <Route path="/admin/environments" element={<AdminEnvironments />} />
           <Route path="/admin/audit" element={<AdminAudit />} />
           <Route path="/admin/runner-tokens" element={<AdminRunnerTokens />} />
           <Route path="/pipelines" element={<AllPipelines />} />

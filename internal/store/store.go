@@ -248,6 +248,13 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 	if err != nil {
 		return nil, err
 	}
+	// Environment policy: canonical names (aliases → registered name) and
+	// branch rules, enforced here because every trigger (API, webhook,
+	// schedule, retry) creates pipelines through this function.
+	envPolicy, err := s.GetEnvPolicy(ctx)
+	if err != nil {
+		return nil, err
+	}
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -308,23 +315,29 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 		if j.Image != "" {
 			image = &j.Image
 		}
-		if j.Environment != "" {
-			environment = &j.Environment
+		canonicalEnv, denied := envPolicy.CheckJob(j.Environment, req.Ref)
+		if canonicalEnv != "" {
+			environment = &canonicalEnv
 		}
 		// Manual jobs start gated in the 'blocked' state (with the manual flag so
 		// the scheduler and approval endpoint distinguish them from an
 		// environment-approval block); a play releases them back to 'created'.
 		status := "created"
-		var blockedAt any
+		var blockedAt, finishedAt any
 		if j.Manual {
 			status = "blocked"
 			blockedAt = time.Now()
 		}
+		// A job the environment policy forbids never runs: it fails at once,
+		// with the reason shown on the job.
+		if denied != "" {
+			status, blockedAt, finishedAt = "failed", nil, time.Now()
+		}
 		var id int64
 		err = tx.QueryRow(ctx,
-			`INSERT INTO jobs (pipeline_id, name, stage, stage_idx, image, script, env, environment, tags, artifact_paths, artifact_expire_seconds, report_junit, cache_paths, cache_key, cache_key_files, cache_policy, services, network, timeout_seconds, max_attempts, status, manual, allow_failure, blocked_at)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24) RETURNING id`,
-			p.ID, j.Name, j.Stage, j.StageIdx, image, j.Script, env, environment, tags, artifacts, j.ArtifactExpireSeconds, reportJUnit, cachePaths, j.CacheKey, cacheKeyFiles, j.CachePolicy, services, j.Network, timeoutSec, j.Retry+1, status, j.Manual, j.AllowFailure, blockedAt).Scan(&id)
+			`INSERT INTO jobs (pipeline_id, name, stage, stage_idx, image, script, env, environment, tags, artifact_paths, artifact_expire_seconds, report_junit, cache_paths, cache_key, cache_key_files, cache_policy, services, network, timeout_seconds, max_attempts, status, manual, allow_failure, blocked_at, finished_at, status_reason)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26) RETURNING id`,
+			p.ID, j.Name, j.Stage, j.StageIdx, image, j.Script, env, environment, tags, artifacts, j.ArtifactExpireSeconds, reportJUnit, cachePaths, j.CacheKey, cacheKeyFiles, j.CachePolicy, services, j.Network, timeoutSec, j.Retry+1, status, j.Manual, j.AllowFailure, blockedAt, finishedAt, denied).Scan(&id)
 		if err != nil {
 			return nil, err
 		}
@@ -578,7 +591,7 @@ func (s *Store) GetPipeline(ctx context.Context, id int64) (*proto.Pipeline, []p
 		`SELECT j.id, j.pipeline_id, j.name, j.stage, j.stage_idx, j.image, j.environment,
 		        j.status,
 		        CASE WHEN j.status='failed' AND j.allow_failure THEN 'success' ELSE j.status END,
-		        j.started_at, j.finished_at, j.exit_code, j.manual, j.allow_failure,
+		        j.started_at, j.finished_at, j.exit_code, j.manual, j.allow_failure, j.status_reason,
 		        COALESCE(array_agg(n.needs_job_id) FILTER (WHERE n.needs_job_id IS NOT NULL), '{}')
 		 FROM jobs j LEFT JOIN job_needs n ON n.job_id = j.id
 		 WHERE j.pipeline_id = $1
@@ -598,7 +611,7 @@ func (s *Store) GetPipeline(ctx context.Context, id int64) (*proto.Pipeline, []p
 		var effective string
 		if err := rows.Scan(&j.ID, &j.PipelineID, &j.Name, &j.Stage, &j.StageIdx, &j.Image,
 			&j.Environment, &j.Status, &effective, &j.StartedAt, &j.FinishedAt, &j.ExitCode,
-			&j.Manual, &j.AllowFailure, &j.Needs); err != nil {
+			&j.Manual, &j.AllowFailure, &j.StatusReason, &j.Needs); err != nil {
 			return nil, nil, err
 		}
 		jobs = append(jobs, j)
@@ -660,12 +673,13 @@ func (s *Store) GetJob(ctx context.Context, id int64) (*proto.Job, error) {
 	err := s.pool.QueryRow(ctx,
 		`SELECT j.id, j.pipeline_id, j.name, j.stage, j.stage_idx, j.image, j.environment,
 		        j.status, j.started_at, j.finished_at, j.exit_code, j.manual, j.allow_failure,
+		        j.status_reason,
 		        COALESCE(array_agg(n.needs_job_id) FILTER (WHERE n.needs_job_id IS NOT NULL), '{}')
 		 FROM jobs j LEFT JOIN job_needs n ON n.job_id = j.id
 		 WHERE j.id = $1 GROUP BY j.id`, id).
 		Scan(&j.ID, &j.PipelineID, &j.Name, &j.Stage, &j.StageIdx, &j.Image,
 			&j.Environment, &j.Status, &j.StartedAt, &j.FinishedAt, &j.ExitCode,
-			&j.Manual, &j.AllowFailure, &j.Needs)
+			&j.Manual, &j.AllowFailure, &j.StatusReason, &j.Needs)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}

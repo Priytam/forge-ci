@@ -282,6 +282,13 @@ export default function JobLog() {
         </div>
       )}
 
+      {job?.status_reason && (
+        <div className="error-banner">
+          This job did not run: {job.status_reason}. An admin sets which branches
+          may deploy where under Admin ▾ → Environments &amp; branches.
+        </div>
+      )}
+
       {job && (job.status === "blocked" || (job.approvals?.length ?? 0) > 0) && (
         <div className="card blocked-card glow glow-orange">
           {job.manual ? (
@@ -379,7 +386,7 @@ export default function JobLog() {
         {streaming && <span className="log-live">● live</span>}
       </div>
       <pre ref={termRef} className="terminal" onScroll={onTermScroll}>
-        {logs || "Waiting for logs…"}
+        {logs || (job?.status_reason ? "No log — this job never ran." : "Waiting for logs…")}
       </pre>
     </div>
   );

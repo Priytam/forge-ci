@@ -176,3 +176,47 @@ See `internal/store/migrations.sql`:
 - **Environment tabs** on the Pipelines, Jobs and Environments pages, and a
   **List & filter** view inside a pipeline (`?group=list`) for pipelines with
   many jobs.
+
+## Environments & branches (admin, per server)
+
+**Admin ▾ → Environments & branches** (`GET`/`PUT /api/v1/environment-registry`)
+defines this server's real environments. Each company running Forge sets up its
+own; nothing is shared between servers.
+
+| Field | Meaning |
+|---|---|
+| name | The real name, used everywhere in the UI (`production`) |
+| order | Column/tab order (promotion path: dev → staging → production) |
+| tier | `dev`, `staging`, `prod` or `other` — colour and meaning |
+| aliases | Other names pipelines may write for it (`prod`, `prd`) |
+| branches allowed | Glob patterns (`main`, `release/*`; `*` matches anything including `/`). Empty = any branch |
+| unlisted names | `allow` (use as written) or `deny` (job fails — catches typos like `prdo`) |
+
+How it is applied:
+
+- **New pipelines** (API, webhook, schedule, retry): each job's `environment:`
+  is mapped to the real name. If the pipeline's branch is not allowed for that
+  environment, the job is created as **failed without running**, with the
+  reason on the job page, the job lists and the board ("refused"). Dependents
+  then don't run either. Pipeline files cannot override this.
+- **Saving** renames aliases already stored in jobs, deployments, approval
+  rules, freezes and scoped variables to the real name, in one transaction. If a
+  repo has rows under both an alias and the real name (e.g. approval rules for
+  `prod` and `production`), the save is refused with the repo named; remove one
+  and save again.
+- Admin forms (approval rules, freezes, variable scopes) accept aliases and
+  store the real name.
+- **No environments listed = no policy**: names are used as written and any
+  branch may deploy anywhere — exactly the behaviour before this feature.
+
+### First-time setup checklist (each company)
+
+1. Admin ▾ → Environments & branches → *Start from dev / staging / production*.
+2. Adjust names to what your teams call them; put every spelling in use
+   under aliases (check the tabs on the Pipelines page for stray names).
+3. Set allowed branches — typically `production` and `staging`:
+   `main, release/*`; `dev`: empty (any branch).
+4. Save. Fix any conflict it reports, then save again.
+5. Once pipelines use registered names, switch *unlisted environments* to
+   **Refuse** to catch typos.
+6. Add approval rules for production (Repo → Settings) if not already set.

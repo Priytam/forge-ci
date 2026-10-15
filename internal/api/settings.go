@@ -105,6 +105,7 @@ func (s *Server) createVariable(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
+	req.EnvironmentScope = s.canonicalEnv(r, req.EnvironmentScope)
 	if err := validateVariable(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -144,6 +145,7 @@ func (s *Server) updateVariable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Repo, req.Key = "-", "PLACEHOLDER" // repo/key are immutable on update
+	req.EnvironmentScope = s.canonicalEnv(r, req.EnvironmentScope)
 	if err := validateVariable(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -655,6 +657,7 @@ func (s *Server) upsertProtectedEnv(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
+	pe.Name = s.canonicalEnv(r, pe.Name)
 	if pe.Name == "" {
 		writeErr(w, http.StatusBadRequest, "name is required")
 		return

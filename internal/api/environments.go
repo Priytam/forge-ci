@@ -249,6 +249,7 @@ func (s *Server) createFreeze(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
+	f.Environment = s.canonicalEnv(r, f.Environment)
 	if f.Environment == "" {
 		writeErr(w, http.StatusBadRequest, "environment is required")
 		return

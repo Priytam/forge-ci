@@ -46,6 +46,9 @@ export default function AdminNav() {
       </button>
       {open && (
         <div className="admin-dropdown" role="menu">
+          <Link to="/admin/environments" role="menuitem" onClick={() => setOpen(false)}>
+            Environments &amp; branches
+          </Link>
           <Link to="/admin/sso" role="menuitem" onClick={() => setOpen(false)}>
             SSO configuration
           </Link>

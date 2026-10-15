@@ -375,6 +375,7 @@ export default function PipelineDetail() {
                   allowedFail ? "failed (allowed to fail)" : job.status,
                   isTerminalStatus(job.status) && dur ? dur : null,
                   job.environment,
+                  job.status_reason,
                 ]
                   .filter(Boolean)
                   .join(" · ");

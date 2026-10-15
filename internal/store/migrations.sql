@@ -743,3 +743,23 @@ ALTER TABLE pipelines ALTER COLUMN status SET NOT NULL;
 -- pipeline list filters by status across repos.
 CREATE INDEX IF NOT EXISTS pipelines_repo_status_idx ON pipelines (repo, status, id);
 CREATE INDEX IF NOT EXISTS pipelines_status_idx ON pipelines (status, id DESC);
+
+-- Environment registry (admin-managed, per server). Each row is one real
+-- environment: its canonical name, display order, tier (colour/meaning),
+-- aliases that mean the same environment (e.g. prd, prod → production), and
+-- the branches allowed to deploy to it (glob patterns, '*' matches anything;
+-- empty = any branch). An empty registry means "no policy": names are used as
+-- pipelines write them and any branch may deploy anywhere, as before.
+CREATE TABLE IF NOT EXISTS environment_registry (
+    name         TEXT    PRIMARY KEY,
+    position     INT     NOT NULL DEFAULT 0,
+    tier         TEXT    NOT NULL DEFAULT 'other'
+        CHECK (tier IN ('dev','staging','prod','other')),
+    aliases      TEXT[]  NOT NULL DEFAULT '{}',
+    allowed_refs TEXT[]  NOT NULL DEFAULT '{}',
+    description  TEXT    NOT NULL DEFAULT ''
+);
+
+-- Why a job ended without running (e.g. its branch may not deploy to its
+-- environment). Shown on the job and pipeline pages.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS status_reason TEXT NOT NULL DEFAULT '';

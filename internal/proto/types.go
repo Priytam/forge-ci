@@ -75,6 +75,9 @@ type Job struct {
 	// when the job's failure does not fail dependents or the pipeline.
 	Manual       bool `json:"manual"`
 	AllowFailure bool `json:"allow_failure"`
+	// StatusReason says why a job ended without running — e.g. its branch may
+	// not deploy to its environment. Empty otherwise.
+	StatusReason string `json:"status_reason,omitempty"`
 
 	// Approval gate, populated only for a job that targets a protected
 	// environment. Approvals is the append-only vote record (one per approver,

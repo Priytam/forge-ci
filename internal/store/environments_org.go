@@ -20,10 +20,28 @@ var envRank = map[string]int{
 }
 
 // SortEnvironments sorts names in promotion order (see envRank), in place.
-func SortEnvironments(names []string) {
+func SortEnvironments(names []string) { SortEnvironmentsBy(names, nil) }
+
+// SortEnvironmentsBy sorts names in place: first the admin-registered order
+// (registered, by position), then well-known names in promotion order, then
+// the rest alphabetically.
+func SortEnvironmentsBy(names, registered []string) {
+	pos := map[string]int{}
+	for i, n := range registered {
+		pos[strings.ToLower(n)] = i
+	}
+	rank := func(n string) (int, bool) {
+		if p, ok := pos[strings.ToLower(n)]; ok {
+			return p, true
+		}
+		if r, ok := envRank[strings.ToLower(n)]; ok {
+			return len(registered) + r, true
+		}
+		return 0, false
+	}
 	sort.SliceStable(names, func(i, j int) bool {
-		ri, iok := envRank[strings.ToLower(names[i])]
-		rj, jok := envRank[strings.ToLower(names[j])]
+		ri, iok := rank(names[i])
+		rj, jok := rank(names[j])
 		switch {
 		case iok && jok && ri != rj:
 			return ri < rj
@@ -32,6 +50,20 @@ func SortEnvironments(names []string) {
 		}
 		return names[i] < names[j]
 	})
+}
+
+// sortEnvs orders names using this server's registry.
+func (s *Store) sortEnvs(ctx context.Context, names []string) error {
+	p, err := s.GetEnvPolicy(ctx)
+	if err != nil {
+		return err
+	}
+	reg := make([]string, len(p.Environments))
+	for i, e := range p.Environments {
+		reg[i] = e.Name
+	}
+	SortEnvironmentsBy(names, reg)
+	return nil
 }
 
 // recentEnvJobsWindow bounds the scan for environments and repos that have
@@ -49,6 +81,7 @@ const attemptLookback = 30 * 24 * time.Hour
 func (s *Store) OrgEnvironments(ctx context.Context) ([]string, error) {
 	rows, err := s.pool.Query(ctx, fmt.Sprintf(
 		`SELECT DISTINCT environment FROM deployments
+		 UNION SELECT name FROM environment_registry
 		 UNION SELECT name FROM protected_environments
 		 UNION SELECT environment FROM (
 		     SELECT environment FROM jobs WHERE environment IS NOT NULL
@@ -68,8 +101,10 @@ func (s *Store) OrgEnvironments(ctx context.Context) ([]string, error) {
 			out = append(out, e)
 		}
 	}
-	SortEnvironments(out)
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, s.sortEnvs(ctx, out)
 }
 
 // EnvAttempt is the latest job that targeted an environment, whatever its
@@ -79,6 +114,7 @@ type EnvAttempt struct {
 	JobName    string    `json:"job_name"`
 	PipelineID int64     `json:"pipeline_id"`
 	Status     string    `json:"status"`
+	Reason     string    `json:"status_reason,omitempty"`
 	Manual     bool      `json:"manual"`
 	Ref        string    `json:"ref"`
 	SHA        string    `json:"sha"`
@@ -119,7 +155,7 @@ func (s *Store) EnvMatrix(ctx context.Context, f EnvMatrixFilter, limit, offset 
 	const attemptsCTE = `attempts AS (
 	    SELECT DISTINCT ON (p.repo, j.environment)
 	           p.repo, j.environment, j.id AS job_id, j.name, p.id AS pipeline_id,
-	           j.status, j.manual, p.ref, p.sha, p.created_at
+	           j.status, j.status_reason, j.manual, p.ref, p.sha, p.created_at
 	    FROM pipelines p JOIN jobs j ON j.pipeline_id = p.id
 	    WHERE p.created_at > $1 AND j.environment IS NOT NULL AND j.environment <> ''
 	    ORDER BY p.repo, j.environment, j.id DESC)`
@@ -216,7 +252,7 @@ func (s *Store) EnvMatrix(ctx context.Context, f EnvMatrixFilter, limit, offset 
 
 	// Latest attempt per repo × env (same CTE, limited to this page's repos).
 	arows, err := s.pool.Query(ctx, `WITH `+attemptsCTE+`
-		SELECT repo, environment, job_id, name, pipeline_id, status, manual, ref, sha, created_at
+		SELECT repo, environment, job_id, name, pipeline_id, status, status_reason, manual, ref, sha, created_at
 		FROM attempts WHERE repo = ANY($2)`, since, repos)
 	if err != nil {
 		return nil, 0, err
@@ -225,7 +261,7 @@ func (s *Store) EnvMatrix(ctx context.Context, f EnvMatrixFilter, limit, offset 
 		var repo, env string
 		var a EnvAttempt
 		if err := arows.Scan(&repo, &env, &a.JobID, &a.JobName, &a.PipelineID, &a.Status,
-			&a.Manual, &a.Ref, &a.SHA, &a.CreatedAt); err != nil {
+			&a.Reason, &a.Manual, &a.Ref, &a.SHA, &a.CreatedAt); err != nil {
 			arows.Close()
 			return nil, 0, err
 		}
@@ -311,6 +347,7 @@ type JobRow struct {
 	CreatedAt    time.Time  `json:"created_at"`
 	StartedAt    *time.Time `json:"started_at"`
 	FinishedAt   *time.Time `json:"finished_at"`
+	StatusReason string     `json:"status_reason,omitempty"`
 }
 
 // ListJobsFiltered returns one page of jobs across all pipelines, newest
@@ -350,7 +387,7 @@ func (s *Store) ListJobsFiltered(ctx context.Context, f JobFilter, limit, offset
 	rows, err := s.pool.Query(ctx,
 		`SELECT j.id, j.pipeline_id, p.repo, p.ref, p.sha, j.name, j.stage, j.environment,
 		        j.status, j.manual, j.allow_failure, j.runner_id, p.created_at,
-		        j.started_at, j.finished_at`+from+where+
+		        j.started_at, j.finished_at, j.status_reason`+from+where+
 			fmt.Sprintf(` ORDER BY j.id DESC LIMIT $%d OFFSET $%d`, n+1, n+2),
 		append(args, limit, offset)...)
 	if err != nil {
@@ -362,7 +399,7 @@ func (s *Store) ListJobsFiltered(ctx context.Context, f JobFilter, limit, offset
 		var r JobRow
 		if err := rows.Scan(&r.ID, &r.PipelineID, &r.Repo, &r.Ref, &r.SHA, &r.Name, &r.Stage,
 			&r.Environment, &r.Status, &r.Manual, &r.AllowFailure, &r.RunnerID, &r.CreatedAt,
-			&r.StartedAt, &r.FinishedAt); err != nil {
+			&r.StartedAt, &r.FinishedAt, &r.StatusReason); err != nil {
 			return nil, 0, err
 		}
 		out = append(out, r)

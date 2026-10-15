@@ -219,6 +219,7 @@ export default function Jobs() {
                   <td className="mono muted">{j.runner_id ?? ""}</td>
                   <td>
                     <StatusBadge status={j.manual && j.status === "blocked" ? "manual" : j.status} />
+                    {j.status_reason && <div className="status-reason">{j.status_reason}</div>}
                   </td>
                   <td className="muted">{duration(j.started_at, j.finished_at)}</td>
                   <td className="muted">{relativeTime(j.created_at)}</td>

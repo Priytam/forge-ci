@@ -109,6 +109,8 @@ export interface Job {
   approvals?: JobApproval[];
   /** votes the environment's rule requires; absent when the job has no gate */
   required_approvals?: number;
+  /** why the job ended without running, e.g. a branch rule refused it */
+  status_reason?: string;
 }
 
 /** One recorded vote on an approval-gated job. */
@@ -1349,6 +1351,8 @@ export function deletePipelineView(id: number): Promise<void> {
 export interface EnvAttempt {
   job_id: number;
   job_name: string;
+  /** set when the environment policy refused the job */
+  status_reason?: string;
   pipeline_id: number;
   status: string;
   manual: boolean;
@@ -1440,6 +1444,7 @@ export interface JobRow {
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+  status_reason?: string;
 }
 
 export interface JobFilter extends PipelineFilter {
@@ -1458,4 +1463,42 @@ export async function listJobsPage(
   qs.set("offset", String(offset));
   const { body, total, hasMore } = await getPage<JobRow[]>(`/jobs?${qs.toString()}`);
   return { items: body, total, hasMore };
+}
+
+// --- Environment registry (admin-managed, per server) ---
+
+export type EnvTier = "dev" | "staging" | "prod" | "other";
+
+export interface RegisteredEnv {
+  name: string;
+  tier: EnvTier;
+  aliases: string[];
+  /** branch globs allowed to deploy here; empty = any branch */
+  allowed_refs: string[];
+  description: string;
+}
+
+export interface EnvPolicy {
+  environments: RegisteredEnv[];
+  /** what happens to a job whose environment isn't registered */
+  unknown: "allow" | "deny";
+}
+
+let envPolicyCache: Promise<EnvPolicy> | null = null;
+
+/** This server's environment list. Cached per page load; empty on error. */
+export function getEnvRegistry(force = false): Promise<EnvPolicy> {
+  if (!envPolicyCache || force) {
+    envPolicyCache = getJSON<EnvPolicy>("/environment-registry").catch(() => ({
+      environments: [],
+      unknown: "allow" as const,
+    }));
+  }
+  return envPolicyCache;
+}
+
+export async function putEnvRegistry(p: EnvPolicy): Promise<EnvPolicy> {
+  const saved = await putJSON<EnvPolicy>("/environment-registry", p);
+  envPolicyCache = Promise.resolve(saved);
+  return saved;
 }

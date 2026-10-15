@@ -7,7 +7,7 @@ import {
   type EnvCell,
 } from "../api";
 import { usePoll } from "../hooks/usePoll";
-import EnvTabs, { envKind } from "../components/EnvTabs";
+import EnvTabs, { branchesLabel, envKind, findEnv, useEnvRegistry } from "../components/EnvTabs";
 
 const PAGE = 50;
 
@@ -42,9 +42,9 @@ function Cell({ repo, env, cell }: { repo: string; env: string; cell?: EnvCell }
         <Link
           to={`/jobs/${pending.job_id}?pipeline=${pending.pipeline_id}`}
           className={`badge badge-${pending.status === "blocked" ? "blocked" : pending.status}`}
-          title={`${pending.job_name} on ${pending.ref} @ ${shortSha(pending.sha)} — ${relativeTime(pending.created_at)}`}
+          title={`${pending.job_name} on ${pending.ref} @ ${shortSha(pending.sha)} — ${relativeTime(pending.created_at)}${pending.status_reason ? `\n${pending.status_reason}` : ""}`}
         >
-          {label}
+          {pending.status_reason ? "refused" : label}
         </Link>
       )}
       {cell.frozen && (
@@ -98,6 +98,7 @@ export default function EnvironmentBoard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search]);
 
+  const policy = useEnvRegistry();
   const envs = data?.environments ?? [];
   // With an environment picked, show just that column.
   const columns = env ? envs.filter((e) => e === env) : envs;
@@ -153,11 +154,15 @@ export default function EnvironmentBoard() {
             <thead>
               <tr>
                 <th>Repo</th>
-                {columns.map((e) => (
-                  <th key={e} className={`env-col env-col-${envKind(e)}`}>
-                    {e}
-                  </th>
-                ))}
+                {columns.map((e) => {
+                  const reg = findEnv(policy, e);
+                  return (
+                    <th key={e} className={`env-col env-col-${envKind(e, policy)}`}>
+                      {e}
+                      {reg && <div className="env-col-rule">{branchesLabel(reg)}</div>}
+                    </th>
+                  );
+                })}
               </tr>
             </thead>
             <tbody>

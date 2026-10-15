@@ -118,6 +118,7 @@ export default function JobListView({ jobs, pipelineId }: { jobs: Job[]; pipelin
                   <td>{j.environment && <span className="env-tag">{j.environment}</span>}</td>
                   <td>
                     <StatusBadge status={j.manual && j.status === "blocked" ? "manual" : j.status} />
+                    {j.status_reason && <div className="status-reason">{j.status_reason}</div>}
                   </td>
                   <td className="muted">{duration(j.started_at, j.finished_at) ?? ""}</td>
                 </tr>
