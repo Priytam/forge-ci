@@ -41,17 +41,23 @@ func (f PipelineFilter) Validate() error {
 	return nil
 }
 
-// pipelineStatusSQL derives a pipeline's status from its jobs in SQL. It must
-// stay in step with deriveStatus (failed jobs with allow_failure count as
-// success there too).
-const pipelineStatusSQL = `(SELECT CASE
-	WHEN count(*) = 0 THEN 'created'
+// pipelineStatusCase derives a pipeline's status from its jobs (aliased j,
+// aggregated per pipeline). It must stay in step with deriveStatus (failed
+// jobs with allow_failure count as success there too). count(j.id) rather
+// than count(*) so it also works over a LEFT JOIN, where a job-less pipeline
+// still yields one all-NULL row.
+const pipelineStatusCase = `CASE
+	WHEN count(j.id) = 0 THEN 'created'
 	WHEN bool_or(j.status = 'failed' AND NOT j.allow_failure) THEN 'failed'
 	WHEN bool_or(j.status = 'canceled') THEN 'canceled'
 	WHEN bool_or(j.status IN ('running','pending')) THEN 'running'
 	WHEN bool_or(j.status = 'blocked') THEN 'blocked'
 	WHEN bool_or(j.status = 'created') THEN 'running'
-	ELSE 'success' END
+	ELSE 'success' END`
+
+// pipelineStatusSQL is pipelineStatusCase as a correlated subquery over the
+// jobs of pipeline p.
+const pipelineStatusSQL = `(SELECT ` + pipelineStatusCase + `
 	FROM jobs j WHERE j.pipeline_id = p.id)`
 
 // where builds the WHERE clause (over pipelines aliased p) and its args.
@@ -95,30 +101,41 @@ func (s *Store) ListPipelinesFiltered(ctx context.Context, f PipelineFilter, lim
 		`WITH page AS (
 		     SELECT p.id FROM pipelines p WHERE %s
 		     ORDER BY p.id DESC LIMIT $%d OFFSET $%d)
-		 SELECT p.id, p.repo, p.ref, p.sha, p.config_version, p.source, p.triggered_by,
-		        p.commit_author, p.commit_message, p.created_at,
-		        COALESCE(json_agg(json_build_object(
-		            'stage', j.stage, 'idx', j.stage_idx, 'status', CASE WHEN j.status='failed' AND j.allow_failure THEN 'success' ELSE j.status END
-		        ) ORDER BY j.stage_idx) FILTER (WHERE j.id IS NOT NULL), '[]')
+		 SELECT %s
 		 FROM page JOIN pipelines p ON p.id = page.id
 		 LEFT JOIN jobs j ON j.pipeline_id = p.id
-		 GROUP BY p.id ORDER BY p.id DESC`, where, n+1, n+2), args...)
+		 GROUP BY p.id ORDER BY p.id DESC`, where, n+1, n+2, pipelineWithStagesCols), args...)
 	if err != nil {
 		return nil, 0, err
 	}
-	defer rows.Close()
+	out, err := scanPipelines(rows)
+	return out, total, err
+}
 
+// pipelineWithStagesCols selects a pipeline (aliased p) plus its jobs
+// (aliased j, LEFT JOINed) folded into JSON for scanPipelines; the query must
+// GROUP BY p.id.
+const pipelineWithStagesCols = `p.id, p.repo, p.ref, p.sha, p.config_version, p.source, p.triggered_by,
+	p.commit_author, p.commit_message, p.created_at,
+	COALESCE(json_agg(json_build_object(
+	    'stage', j.stage, 'idx', j.stage_idx, 'status', CASE WHEN j.status='failed' AND j.allow_failure THEN 'success' ELSE j.status END
+	) ORDER BY j.stage_idx) FILTER (WHERE j.id IS NOT NULL), '[]')`
+
+// scanPipelines reads rows selected with pipelineWithStagesCols, deriving
+// each pipeline's overall and per-stage status.
+func scanPipelines(rows pgx.Rows) ([]proto.Pipeline, error) {
+	defer rows.Close()
 	out := []proto.Pipeline{}
 	for rows.Next() {
 		var p proto.Pipeline
 		var raw []byte
 		if err := rows.Scan(&p.ID, &p.Repo, &p.Ref, &p.SHA, &p.ConfigVersion, &p.Source,
 			&p.TriggeredBy, &p.CommitAuthor, &p.CommitMessage, &p.CreatedAt, &raw); err != nil {
-			return nil, 0, err
+			return nil, err
 		}
 		var sjs []stageJob
 		if err := json.Unmarshal(raw, &sjs); err != nil {
-			return nil, 0, err
+			return nil, err
 		}
 		statuses := make([]string, len(sjs))
 		for i, sj := range sjs {
@@ -128,7 +145,7 @@ func (s *Store) ListPipelinesFiltered(ctx context.Context, f PipelineFilter, lim
 		p.Stages = deriveStages(sjs)
 		out = append(out, p)
 	}
-	return out, total, rows.Err()
+	return out, rows.Err()
 }
 
 // PipelineFacets are the values the filter dropdowns offer.

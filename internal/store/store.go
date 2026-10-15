@@ -426,40 +426,14 @@ type stageJob struct {
 // its derived overall status and per-stage statuses.
 func (s *Store) ListPipelines(ctx context.Context, repo string) ([]proto.Pipeline, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT p.id, p.repo, p.ref, p.sha, p.config_version, p.source, p.triggered_by,
-		        p.commit_author, p.commit_message, p.created_at,
-		        COALESCE(json_agg(json_build_object(
-		            'stage', j.stage, 'idx', j.stage_idx, 'status', CASE WHEN j.status='failed' AND j.allow_failure THEN 'success' ELSE j.status END
-		        ) ORDER BY j.stage_idx) FILTER (WHERE j.id IS NOT NULL), '[]')
+		`SELECT `+pipelineWithStagesCols+`
 		 FROM pipelines p LEFT JOIN jobs j ON j.pipeline_id = p.id
 		 WHERE ($1 = '' OR p.repo = $1)
 		 GROUP BY p.id ORDER BY p.id DESC LIMIT 200`, repo)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	out := []proto.Pipeline{}
-	for rows.Next() {
-		var p proto.Pipeline
-		var raw []byte
-		if err := rows.Scan(&p.ID, &p.Repo, &p.Ref, &p.SHA, &p.ConfigVersion, &p.Source,
-			&p.TriggeredBy, &p.CommitAuthor, &p.CommitMessage, &p.CreatedAt, &raw); err != nil {
-			return nil, err
-		}
-		var sjs []stageJob
-		if err := json.Unmarshal(raw, &sjs); err != nil {
-			return nil, err
-		}
-		statuses := make([]string, len(sjs))
-		for i, sj := range sjs {
-			statuses[i] = sj.Status
-		}
-		p.Status = deriveStatus(statuses)
-		p.Stages = deriveStages(sjs)
-		out = append(out, p)
-	}
-	return out, rows.Err()
+	return scanPipelines(rows)
 }
 
 // ListPipelinesPage returns one page of pipelines (optionally filtered by repo),
@@ -473,66 +447,97 @@ func (s *Store) ListPipelinesPage(ctx context.Context, repo string, limit, offse
 	return s.ListPipelinesFiltered(ctx, f, limit, offset)
 }
 
-// ListRepos aggregates pipelines into one summary card per repo, most
-// recently active first.
+// repoRefsMax caps the distinct refs returned per repo card; the card shows a
+// few chips and a "+N" for the rest.
+const repoRefsMax = 50
+
+// ListRepos returns one summary card per repo, most recently active first,
+// then registered repos that have never run (by name). Counts cover every
+// pipeline the repo has, not a recent window, so the aggregation runs in SQL.
 func (s *Store) ListRepos(ctx context.Context) ([]proto.RepoSummary, error) {
-	pipelines, err := s.ListPipelines(ctx, "")
+	// One status per pipeline in a single GROUP BY pass over jobs, then one
+	// row per repo. The last-5 statuses and recent refs walk
+	// pipelines_repo_id_idx (repo, id DESC) per repo.
+	rows, err := s.pool.Query(ctx, `
+		WITH ps AS (
+		    SELECT p.id, p.repo, `+pipelineStatusCase+` AS status
+		    FROM pipelines p LEFT JOIN jobs j ON j.pipeline_id = p.id
+		    GROUP BY p.id
+		), agg AS (
+		    SELECT repo, count(*) AS n,
+		           count(*) FILTER (WHERE status = 'success') AS ok,
+		           count(*) FILTER (WHERE status = 'failed') AS bad,
+		           max(id) AS last_id
+		    FROM ps GROUP BY repo
+		)
+		SELECT a.repo, a.n, a.ok, a.bad, a.last_id,
+		       ARRAY(SELECT `+pipelineStatusSQL+` FROM pipelines p
+		             WHERE p.repo = a.repo ORDER BY p.id DESC LIMIT 5),
+		       ARRAY(SELECT p.ref FROM pipelines p WHERE p.repo = a.repo
+		             GROUP BY p.ref ORDER BY max(p.id) DESC LIMIT $1)
+		FROM agg a ORDER BY a.last_id DESC`, repoRefsMax)
 	if err != nil {
 		return nil, err
 	}
-	const recentStatusMax = 5
-	byRepo := map[string]*proto.RepoSummary{}
-	order := []string{}
-	for i := range pipelines {
-		p := pipelines[i]
-		r, ok := byRepo[p.Repo]
-		if !ok {
-			r = &proto.RepoSummary{Repo: p.Repo, LastPipeline: &pipelines[i], LastActivityAt: p.CreatedAt}
-			byRepo[p.Repo] = r
-			order = append(order, p.Repo)
+	out := []proto.RepoSummary{}
+	lastIDs := []int64{}
+	for rows.Next() {
+		var r proto.RepoSummary
+		var lastID int64
+		if err := rows.Scan(&r.Repo, &r.PipelineCount, &r.SuccessCount, &r.FailedCount,
+			&lastID, &r.RecentStatuses, &r.Refs); err != nil {
+			rows.Close()
+			return nil, err
 		}
-		r.PipelineCount++
-		switch p.Status {
-		case "success":
-			r.SuccessCount++
-		case "failed":
-			r.FailedCount++
+		out = append(out, r)
+		lastIDs = append(lastIDs, lastID)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// The last pipeline of each repo, with its stages, for the card header.
+	if len(lastIDs) > 0 {
+		rows, err := s.pool.Query(ctx, `SELECT `+pipelineWithStagesCols+`
+			FROM pipelines p LEFT JOIN jobs j ON j.pipeline_id = p.id
+			WHERE p.id = ANY($1) GROUP BY p.id`, lastIDs)
+		if err != nil {
+			return nil, err
 		}
-		if len(r.RecentStatuses) < recentStatusMax {
-			r.RecentStatuses = append(r.RecentStatuses, p.Status)
+		last, err := scanPipelines(rows)
+		if err != nil {
+			return nil, err
 		}
-		seen := false
-		for _, ref := range r.Refs {
-			if ref == p.Ref {
-				seen = true
-				break
+		byID := make(map[int64]*proto.Pipeline, len(last))
+		for i := range last {
+			byID[last[i].ID] = &last[i]
+		}
+		for i, id := range lastIDs {
+			if p := byID[id]; p != nil {
+				out[i].LastPipeline = p
+				out[i].LastActivityAt = p.CreatedAt
 			}
 		}
-		if !seen {
-			r.Refs = append(r.Refs, p.Ref)
-		}
 	}
-	// pipelines are newest-first, so insertion order == last-activity order.
-	out := make([]proto.RepoSummary, 0, len(order))
-	for _, name := range order {
-		out = append(out, *byRepo[name])
-	}
+
 	// Registered repos with no pipelines yet still get a card.
-	registered, err := s.ListRegisteredRepos(ctx)
+	rows, err = s.pool.Query(ctx,
+		`SELECT r.repo, r.created_at FROM repo_registry r
+		 WHERE NOT EXISTS (SELECT 1 FROM pipelines p WHERE p.repo = r.repo)
+		 ORDER BY r.repo`)
 	if err != nil {
 		return nil, err
 	}
-	for _, r := range registered {
-		if _, seen := byRepo[r.Repo]; !seen {
-			out = append(out, proto.RepoSummary{
-				Repo:           r.Repo,
-				Refs:           []string{},
-				RecentStatuses: []string{},
-				LastActivityAt: r.CreatedAt,
-			})
+	defer rows.Close()
+	for rows.Next() {
+		r := proto.RepoSummary{Refs: []string{}, RecentStatuses: []string{}}
+		if err := rows.Scan(&r.Repo, &r.LastActivityAt); err != nil {
+			return nil, err
 		}
+		out = append(out, r)
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 func (s *Store) GetPipeline(ctx context.Context, id int64) (*proto.Pipeline, []proto.Job, error) {

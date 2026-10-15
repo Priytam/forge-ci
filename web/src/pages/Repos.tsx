@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
   listRegistry,
@@ -13,6 +14,8 @@ import StageDots from "../components/StageDots";
 import Dashboard from "../components/Dashboard";
 
 const MAX_REF_CHIPS = 3;
+// Past this many cards the page gets a search box.
+const SEARCH_MIN_REPOS = 6;
 
 export function ProviderChip({ provider }: { provider: string | null }) {
   if (!provider) return null;
@@ -141,9 +144,16 @@ function RepoCard({
 export default function Repos() {
   const { data: repos, error, loading } = usePoll(listRepos, 5000);
   const { data: registry } = usePoll(listRegistry, 0, false);
+  const [query, setQuery] = useState("");
 
   const providerOf = (repo: string): string | null =>
     registry?.find((r) => r.repo === repo)?.provider ?? null;
+
+  const showSearch = (repos?.length ?? 0) > SEARCH_MIN_REPOS;
+  const needle = showSearch ? query.trim().toLowerCase() : "";
+  const shown = needle
+    ? (repos ?? []).filter((r) => r.repo.toLowerCase().includes(needle))
+    : repos ?? [];
 
   return (
     <div>
@@ -152,6 +162,16 @@ export default function Repos() {
       <div className="page-head">
         <h1>Repositories</h1>
         <div className="page-head-actions">
+          {showSearch && (
+            <input
+              type="search"
+              placeholder={`Filter ${repos?.length} repositories…`}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              className="repo-search"
+              aria-label="Filter repositories"
+            />
+          )}
           <Link to="/repos/new" className="btn btn-primary">
             Add repository
           </Link>
@@ -168,9 +188,13 @@ export default function Repos() {
         </div>
       )}
 
-      {repos && repos.length > 0 && (
+      {repos && repos.length > 0 && shown.length === 0 && (
+        <div className="empty card">No repositories match “{query.trim()}”.</div>
+      )}
+
+      {shown.length > 0 && (
         <div className="repo-grid">
-          {repos.map((r) => (
+          {shown.map((r) => (
             <RepoCard key={r.repo} summary={r} provider={providerOf(r.repo)} />
           ))}
         </div>
