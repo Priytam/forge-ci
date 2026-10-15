@@ -16,7 +16,9 @@ RUN CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -o /out/downloads/forge-run
     CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o /out/downloads/forge-runner-windows-amd64.exe  ./cmd/runner
 
 FROM alpine:3
-RUN adduser -D forge
+# git: the server runs `git ls-remote` to resolve refs for connected repos
+# (internal/store/registry.go, internal/api/webhooks.go).
+RUN apk add --no-cache git ca-certificates && adduser -D forge
 COPY --from=build /out/forge-server /usr/local/bin/forge-server
 COPY --from=build /out/downloads /usr/local/share/forge-downloads
 COPY deploy/downloads/install-runner.sh deploy/downloads/install-runner.ps1 deploy/downloads/qa-test-template.csv /usr/local/share/forge-downloads/
