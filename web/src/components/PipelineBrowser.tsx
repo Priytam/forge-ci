@@ -17,6 +17,7 @@ import {
 } from "../api";
 import { usePoll } from "../hooks/usePoll";
 import PipelineTable from "./PipelineTable";
+import EnvTabs from "./EnvTabs";
 
 const PAGE = 50;
 
@@ -229,43 +230,12 @@ export default function PipelineBrowser({ fixedRepo }: { fixedRepo?: string }) {
 
   return (
     <div>
-      {!fixedRepo && (
-        <div className="filter-bar">
-          <label className="field">
-            <span>Saved view</span>
-            <select value={viewId || ""} onChange={(e) => openView(Number(e.target.value))}>
-              <option value="">— none —</option>
-              {views.map((v) => (
-                <option key={v.id} value={v.id}>
-                  {v.name}
-                  {v.shared ? " (shared)" : ""}
-                  {!mine(v) ? ` — ${v.owner || "anonymous"}` : ""}
-                </option>
-              ))}
-            </select>
-          </label>
-          <button type="button" className="btn" onClick={() => void saveAsNew()}>
-            Save as view…
-          </button>
-          {current && mine(current) && (
-            <>
-              {dirty && (
-                <button type="button" className="btn btn-primary" onClick={() => void updateCurrent()}>
-                  Update “{current.name}”
-                </button>
-              )}
-              <button type="button" className="btn" onClick={() => void toggleShare()}>
-                {current.shared ? "Make private" : "Share with org"}
-              </button>
-              <button type="button" className="btn" onClick={() => void removeCurrent()}>
-                Delete view
-              </button>
-            </>
-          )}
-          {viewError && <span className="approval-error">{viewError}</span>}
-        </div>
-      )}
-
+      <EnvTabs
+        envs={facets?.environments ?? []}
+        value={urlFilter.environment ?? ""}
+        onChange={(environment) => patch({ environment })}
+      />
+      <div className="card filter-panel">
       <div className="filter-bar">
         {!fixedRepo && (
           <RepoPicker
@@ -304,21 +274,6 @@ export default function PipelineBrowser({ fixedRepo }: { fixedRepo?: string }) {
             </option>
           ))}
         </select>
-        <select
-          value={urlFilter.environment ?? ""}
-          onChange={(e) => patch({ environment: e.target.value })}
-          aria-label="Environment"
-        >
-          <option value="">All environments</option>
-          {urlFilter.environment && !facets?.environments.includes(urlFilter.environment) && (
-            <option value={urlFilter.environment}>{urlFilter.environment}</option>
-          )}
-          {facets?.environments.map((r) => (
-            <option key={r} value={r}>
-              {r}
-            </option>
-          ))}
-        </select>
         <div className="segmented" role="group" aria-label="Status">
           {PIPELINE_STATUSES.map((st) => (
             <button
@@ -342,6 +297,43 @@ export default function PipelineBrowser({ fixedRepo }: { fixedRepo?: string }) {
             Clear filters
           </button>
         )}
+      </div>
+      {!fixedRepo && (
+        <div className="filter-bar filter-views">
+          <label className="field">
+            <span>Saved view</span>
+            <select value={viewId || ""} onChange={(e) => openView(Number(e.target.value))}>
+              <option value="">— none —</option>
+              {views.map((v) => (
+                <option key={v.id} value={v.id}>
+                  {v.name}
+                  {v.shared ? " (shared)" : ""}
+                  {!mine(v) ? ` — ${v.owner || "anonymous"}` : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button type="button" className="btn" onClick={() => void saveAsNew()}>
+            Save as view…
+          </button>
+          {current && mine(current) && (
+            <>
+              {dirty && (
+                <button type="button" className="btn btn-primary" onClick={() => void updateCurrent()}>
+                  Update “{current.name}”
+                </button>
+              )}
+              <button type="button" className="btn" onClick={() => void toggleShare()}>
+                {current.shared ? "Make private" : "Share with org"}
+              </button>
+              <button type="button" className="btn" onClick={() => void removeCurrent()}>
+                Delete view
+              </button>
+            </>
+          )}
+          {viewError && <span className="approval-error">{viewError}</span>}
+        </div>
+      )}
       </div>
 
       {error && <div className="error-banner">Failed to load pipelines: {error}</div>}

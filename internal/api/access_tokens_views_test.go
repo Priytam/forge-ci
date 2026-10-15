@@ -427,7 +427,7 @@ func TestPipelineListFilters(t *testing.T) {
 	rec = h.do(u, "GET", "/api/v1/pipeline-facets", nil)
 	h.expect(rec, 200, "facets")
 	f := decodeInto[store.PipelineFacets](t, rec)
-	if strings.Join(f.Environments, ",") != "production,staging" ||
+	if strings.Join(f.Environments, ",") != "staging,production" ||
 		strings.Join(f.Runners, ",") != "runner-1,runner-2" || len(f.Repos) != 3 {
 		t.Errorf("facets = %+v", f)
 	}

@@ -92,6 +92,7 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 	srv.registerRunnerTokenRoutes()
 	srv.registerAPITokenRoutes()
 	srv.registerPipelineViewRoutes()
+	srv.registerOrgViewRoutes()
 	srv.registerAuditRoutes()
 	srv.registerOIDCRoutes()
 	srv.registerTestHistoryRoutes()

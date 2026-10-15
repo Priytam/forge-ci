@@ -15,6 +15,8 @@ import AdminAudit from "./pages/AdminAudit";
 import AdminRunnerTokens from "./pages/AdminRunnerTokens";
 import AllPipelines from "./pages/AllPipelines";
 import ApiTokens from "./pages/ApiTokens";
+import Jobs from "./pages/Jobs";
+import EnvironmentBoard from "./pages/EnvironmentBoard";
 import Environments from "./pages/Environments";
 import TestHistory from "./pages/TestHistory";
 import AuthMenu from "./components/AuthMenu";
@@ -29,8 +31,14 @@ export default function App() {
             <span className="brand-mark">⚙</span> Forge CI
           </Link>
           <nav className="header-nav">
+            <Link to="/environments" className="header-link">
+              Environments
+            </Link>
             <Link to="/pipelines" className="header-link">
               Pipelines
+            </Link>
+            <Link to="/jobs" className="header-link">
+              Jobs
             </Link>
             <Link to="/runners" className="header-link">
               Runners
@@ -67,6 +75,8 @@ export default function App() {
           <Route path="/admin/audit" element={<AdminAudit />} />
           <Route path="/admin/runner-tokens" element={<AdminRunnerTokens />} />
           <Route path="/pipelines" element={<AllPipelines />} />
+          <Route path="/jobs" element={<Jobs />} />
+          <Route path="/environments" element={<EnvironmentBoard />} />
           <Route path="/tokens" element={<ApiTokens />} />
           <Route path="/pipelines/:id" element={<PipelineDetail />} />
           <Route path="/jobs/:id" element={<JobLog />} />

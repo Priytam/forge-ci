@@ -183,6 +183,7 @@ func (s *Store) ListPipelineFacets(ctx context.Context, repos []string) (*Pipeli
 		ORDER BY 1`, repos); err != nil {
 		return nil, err
 	}
+	SortEnvironments(f.Environments)
 	return f, nil
 }
 

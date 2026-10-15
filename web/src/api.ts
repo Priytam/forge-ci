@@ -1343,3 +1343,119 @@ export function updatePipelineView(
 export function deletePipelineView(id: number): Promise<void> {
   return requestVoid("DELETE", `/pipeline-views/${id}`);
 }
+
+// --- Org-wide environment board and job list ---
+
+export interface EnvAttempt {
+  job_id: number;
+  job_name: string;
+  pipeline_id: number;
+  status: string;
+  manual: boolean;
+  ref: string;
+  sha: string;
+  created_at: string;
+}
+
+export interface EnvCell {
+  current: {
+    id: number;
+    sha: string;
+    ref: string;
+    pipeline_id: number;
+    job_id: number;
+    deployed_by: string;
+    deployed_at: string;
+  } | null;
+  latest: EnvAttempt | null;
+  frozen: boolean;
+}
+
+export interface EnvBoardRow {
+  repo: string;
+  cells: Record<string, EnvCell>;
+}
+
+export interface EnvBoardPage {
+  environments: string[];
+  rows: EnvBoardRow[];
+  total: number;
+  hasMore: boolean;
+}
+
+async function getPage<T>(path: string): Promise<{ body: T; total: number; hasMore: boolean }> {
+  const res = await fetch(`${BASE}${path}`, { headers: { Accept: "application/json" } });
+  if (!res.ok) {
+    throw await parseError(res);
+  }
+  return {
+    body: (await res.json()) as T,
+    total: Number(res.headers.get("X-Total-Count") ?? 0),
+    hasMore: res.headers.get("X-Has-More") === "true",
+  };
+}
+
+/** One page of the repo × environment board (repos sorted by name). */
+export async function getEnvironmentBoard(
+  opts: { q?: string; env?: string; attention?: boolean },
+  offset: number,
+  limit = 50
+): Promise<EnvBoardPage> {
+  const qs = new URLSearchParams();
+  if (opts.q) qs.set("q", opts.q);
+  if (opts.env) qs.set("env", opts.env);
+  if (opts.attention) qs.set("attention", "1");
+  qs.set("limit", String(limit));
+  qs.set("offset", String(offset));
+  const { body, total, hasMore } = await getPage<{
+    environments: string[];
+    rows: EnvBoardRow[];
+  }>(`/environment-board?${qs.toString()}`);
+  return { ...body, total, hasMore };
+}
+
+export const JOB_STATUSES = [
+  "running",
+  "pending",
+  "blocked",
+  "failed",
+  "success",
+  "canceled",
+  "created",
+] as const;
+
+export interface JobRow {
+  id: number;
+  pipeline_id: number;
+  repo: string;
+  ref: string;
+  sha: string;
+  name: string;
+  stage: string;
+  environment: string | null;
+  status: string;
+  manual: boolean;
+  allow_failure: boolean;
+  runner_id: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface JobFilter extends PipelineFilter {
+  name?: string;
+}
+
+/** One page of jobs across all pipelines, filtered on the server. */
+export async function listJobsPage(
+  f: JobFilter,
+  offset: number,
+  limit = 50
+): Promise<{ items: JobRow[]; total: number; hasMore: boolean }> {
+  const qs = filterToParams(f);
+  if (f.name) qs.set("name", f.name);
+  qs.set("limit", String(limit));
+  qs.set("offset", String(offset));
+  const { body, total, hasMore } = await getPage<JobRow[]>(`/jobs?${qs.toString()}`);
+  return { items: body, total, hasMore };
+}

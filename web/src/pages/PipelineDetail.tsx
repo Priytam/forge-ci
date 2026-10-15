@@ -26,6 +26,7 @@ import Avatar, { displayName } from "../components/Avatar";
 import ApprovalGate from "../components/ApprovalGate";
 import PlayButton from "../components/PlayButton";
 import PipelineActions from "../components/PipelineActions";
+import JobListView from "../components/JobListView";
 
 interface Stage {
   name: string;
@@ -111,7 +112,7 @@ function groupByDepth(jobs: Job[]): Stage[] {
   return columns;
 }
 
-type GroupMode = "stage" | "deps";
+type GroupMode = "stage" | "deps" | "list";
 
 /**
  * authorDiffers reports whether the commit author is a DIFFERENT person from
@@ -136,14 +137,15 @@ export default function PipelineDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const mode: GroupMode = searchParams.get("group") === "deps" ? "deps" : "stage";
+  const groupParam = searchParams.get("group");
+  const mode: GroupMode = groupParam === "deps" || groupParam === "list" ? groupParam : "stage";
 
   const setMode = (next: GroupMode) => {
     const params = new URLSearchParams(searchParams);
-    if (next === "deps") {
-      params.set("group", "deps");
-    } else {
+    if (next === "stage") {
       params.delete("group");
+    } else {
+      params.set("group", next);
     }
     setSearchParams(params, { replace: true });
   };
@@ -325,9 +327,19 @@ export default function PipelineDetail() {
           >
             Job dependencies
           </button>
+          <button
+            type="button"
+            className={mode === "list" ? "seg-btn seg-active" : "seg-btn"}
+            onClick={() => setMode("list")}
+          >
+            List &amp; filter
+          </button>
         </div>
       </div>
 
+      {mode === "list" && <JobListView jobs={data.jobs} pipelineId={pipeline.id} />}
+
+      {mode !== "list" && (
       <div
         className={mode === "deps" ? "board board-deps" : "board"}
         ref={boardRef}
@@ -423,6 +435,7 @@ export default function PipelineDetail() {
           ))}
         </div>
       </div>
+      )}
     </div>
   );
 }

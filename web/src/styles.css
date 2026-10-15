@@ -2903,3 +2903,85 @@ select:focus {
   gap: 8px;
   margin-top: 12px;
 }
+
+/* ---- environment tabs, filter panel, org environment board ---- */
+.env-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.env-tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-muted);
+  padding: 8px 14px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  margin-bottom: -1px;
+}
+.env-tab:hover {
+  color: var(--text);
+}
+.env-tab-active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+.env-tab-dev.env-tab-active {
+  border-bottom-color: var(--blue);
+}
+.env-tab-staging.env-tab-active {
+  border-bottom-color: var(--yellow);
+}
+.env-tab-prod.env-tab-active {
+  border-bottom-color: var(--red);
+}
+.filter-panel {
+  padding: 12px;
+  margin-bottom: 14px;
+}
+.filter-panel .filter-bar {
+  margin-bottom: 0;
+}
+.filter-panel .filter-views {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.filter-search {
+  width: 220px;
+}
+.env-board th.env-col {
+  min-width: 150px;
+}
+.env-col-dev {
+  box-shadow: inset 0 -2px 0 var(--blue);
+}
+.env-col-staging {
+  box-shadow: inset 0 -2px 0 var(--yellow);
+}
+.env-col-prod {
+  box-shadow: inset 0 -2px 0 var(--red);
+}
+.env-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+.env-cell-current {
+  color: var(--text);
+  text-decoration: none;
+}
+.env-cell-when {
+  font-size: 12px;
+}
+.env-cell-failed .env-cell-current {
+  opacity: 0.8;
+}
+.job-list-view td {
+  vertical-align: top;
+}

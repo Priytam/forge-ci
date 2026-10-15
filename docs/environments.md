@@ -159,3 +159,20 @@ See `internal/store/migrations.sql`:
   `(repo, environment, id DESC)`.
 - `deploy_freezes (id, repo, environment, starts_at, ends_at, reason,
   created_at)`.
+
+## Org-wide views (many repos × dev / staging / prod)
+
+- **Environments** (`/environments`, `GET /api/v1/environment-board`): one
+  row per repo, one column per environment in promotion order (dev → staging
+  → prod; unknown names after, alphabetically). Each cell shows the live
+  deployment and, when the newest attempt differs, a badge: running, approval,
+  manual, failed or canceled; plus `frozen` during a deploy freeze. Filters:
+  `?q` (repo name), `?env` (only that column and repos active in it),
+  `?attention=1` (latest attempt failed, waiting or canceled — in `env` when
+  set). 50 repos per page; latest attempts look back 30 days.
+- **Jobs** (`/jobs`, `GET /api/v1/jobs`): every job across pipelines, newest
+  first, filtered on the server by `repo`, `ref`, `status`, `runner`,
+  `environment` and `name` (contains). Quick presets: Active, Waiting, Failed.
+- **Environment tabs** on the Pipelines, Jobs and Environments pages, and a
+  **List & filter** view inside a pipeline (`?group=list`) for pipelines with
+  many jobs.
