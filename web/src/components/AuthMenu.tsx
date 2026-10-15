@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { getMe, logout, type AuthUser } from "../api";
 
 /** Header widget: signed-in identity with a Sign out menu. */
@@ -31,6 +32,9 @@ export default function AuthMenu() {
           <div className="auth-dropdown-meta muted">
             {user.name} · via {user.provider}
           </div>
+          <Link to="/tokens" className="header-link" onClick={() => setOpen(false)}>
+            API tokens
+          </Link>
           <button
             type="button"
             className="btn auth-signout"

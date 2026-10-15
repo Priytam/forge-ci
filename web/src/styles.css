@@ -2847,3 +2847,50 @@ select:focus {
   box-shadow: inset 0 0 0 1px rgba(188, 140, 255, 0.25);
   text-transform: lowercase;
 }
+
+/* ---- pipeline list filters ---- */
+.filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.filter-bar .field {
+  flex: 0 1 240px;
+}
+.filter-bar select {
+  width: auto;
+  max-width: 220px;
+}
+.filter-picker {
+  position: relative;
+}
+.filter-popover {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  left: 0;
+  width: 280px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.filter-popover-list {
+  max-height: 260px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.filter-pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}

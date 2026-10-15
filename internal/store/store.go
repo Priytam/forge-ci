@@ -466,46 +466,11 @@ func (s *Store) ListPipelines(ctx context.Context, repo string) ([]proto.Pipelin
 // newest first, plus the total count for the filter so the UI can paginate.
 // limit/offset are assumed already clamped by the caller.
 func (s *Store) ListPipelinesPage(ctx context.Context, repo string, limit, offset int) ([]proto.Pipeline, int, error) {
-	var total int
-	if err := s.pool.QueryRow(ctx,
-		`SELECT count(*) FROM pipelines WHERE ($1 = '' OR repo = $1)`, repo).Scan(&total); err != nil {
-		return nil, 0, err
+	var f PipelineFilter
+	if repo != "" {
+		f.Repos = []string{repo}
 	}
-	rows, err := s.pool.Query(ctx,
-		`SELECT p.id, p.repo, p.ref, p.sha, p.config_version, p.source, p.triggered_by,
-		        p.commit_author, p.commit_message, p.created_at,
-		        COALESCE(json_agg(json_build_object(
-		            'stage', j.stage, 'idx', j.stage_idx, 'status', CASE WHEN j.status='failed' AND j.allow_failure THEN 'success' ELSE j.status END
-		        ) ORDER BY j.stage_idx) FILTER (WHERE j.id IS NOT NULL), '[]')
-		 FROM pipelines p LEFT JOIN jobs j ON j.pipeline_id = p.id
-		 WHERE ($1 = '' OR p.repo = $1)
-		 GROUP BY p.id ORDER BY p.id DESC LIMIT $2 OFFSET $3`, repo, limit, offset)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer rows.Close()
-
-	out := []proto.Pipeline{}
-	for rows.Next() {
-		var p proto.Pipeline
-		var raw []byte
-		if err := rows.Scan(&p.ID, &p.Repo, &p.Ref, &p.SHA, &p.ConfigVersion, &p.Source,
-			&p.TriggeredBy, &p.CommitAuthor, &p.CommitMessage, &p.CreatedAt, &raw); err != nil {
-			return nil, 0, err
-		}
-		var sjs []stageJob
-		if err := json.Unmarshal(raw, &sjs); err != nil {
-			return nil, 0, err
-		}
-		statuses := make([]string, len(sjs))
-		for i, sj := range sjs {
-			statuses[i] = sj.Status
-		}
-		p.Status = deriveStatus(statuses)
-		p.Stages = deriveStages(sjs)
-		out = append(out, p)
-	}
-	return out, total, rows.Err()
+	return s.ListPipelinesFiltered(ctx, f, limit, offset)
 }
 
 // ListRepos aggregates pipelines into one summary card per repo, most

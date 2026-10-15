@@ -285,7 +285,7 @@ export default function JobLog() {
       {job && (job.status === "blocked" || (job.approvals?.length ?? 0) > 0) && (
         <div className="card blocked-card glow glow-orange">
           {job.manual ? (
-            <PlayButton jobId={job.id} onDone={refreshPipeline} />
+            <PlayButton jobId={job.id} repo={repo ?? ""} onDone={refreshPipeline} />
           ) : (
             <ApprovalGate
               jobId={job.id}

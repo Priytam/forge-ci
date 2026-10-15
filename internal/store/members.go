@@ -308,3 +308,38 @@ func (s *Store) UpsertProtectedEnv(ctx context.Context, pe proto.ProtectedEnviro
 		pe.ApproverRoles, pe.AllowSelfApproval).Scan(&pe.ID)
 	return &pe, err
 }
+
+// RepoAccess returns the caller's role on repo ("" when not a member) and
+// whether the repo has any members at all. Usernames are matched
+// case-insensitively because SSO identities are emails, and members are
+// usually added by hand.
+func (s *Store) RepoAccess(ctx context.Context, repo, username string) (role string, hasMembers bool, err error) {
+	err = s.pool.QueryRow(ctx,
+		`SELECT COALESCE((SELECT role FROM repo_members
+		                  WHERE repo=$1 AND lower(username)=lower($2) LIMIT 1), ''),
+		        EXISTS (SELECT 1 FROM repo_members WHERE repo=$1)`,
+		repo, username).Scan(&role, &hasMembers)
+	return role, hasMembers, err
+}
+
+// JobRepo returns the repo of the pipeline a job belongs to.
+func (s *Store) JobRepo(ctx context.Context, jobID int64) (string, error) {
+	var repo string
+	err := s.pool.QueryRow(ctx,
+		`SELECT p.repo FROM jobs j JOIN pipelines p ON p.id = j.pipeline_id WHERE j.id=$1`,
+		jobID).Scan(&repo)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return repo, err
+}
+
+// PipelineRepo returns the repo a pipeline ran for.
+func (s *Store) PipelineRepo(ctx context.Context, pipelineID int64) (string, error) {
+	var repo string
+	err := s.pool.QueryRow(ctx, `SELECT repo FROM pipelines WHERE id=$1`, pipelineID).Scan(&repo)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return repo, err
+}

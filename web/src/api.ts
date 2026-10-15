@@ -853,7 +853,7 @@ export interface AuthUser {
   email: string;
   name: string;
   provider: string;
-  expires_at: string;
+  expires_at: string | null;
   /** true in open mode (everyone) and for admin sessions when SSO is enforced */
   is_admin?: boolean;
 }
@@ -1122,4 +1122,190 @@ export function testDuration(seconds: number): string {
   const min = Math.floor(seconds / 60);
   const sec = Math.round(seconds % 60);
   return `${min}m ${sec}s`;
+}
+
+// --- Permissions (UI hint; the server re-checks every action) ---
+
+export interface Permissions {
+  is_admin: boolean;
+  /** retry pipelines and play manual jobs on this repo */
+  can_run: boolean;
+  can_cancel: boolean;
+}
+
+const permCache = new Map<string, Promise<Permissions>>();
+
+/** What the viewer may do on repo. Cached per page load; on error it falls back
+ * to showing nothing rather than buttons that will 403. */
+export function getPermissions(repo: string): Promise<Permissions> {
+  let p = permCache.get(repo);
+  if (!p) {
+    p = getJSON<Permissions>(`/permissions?repo=${encodeURIComponent(repo)}`).catch(
+      () => ({ is_admin: false, can_run: false, can_cancel: false })
+    );
+    permCache.set(repo, p);
+  }
+  return p;
+}
+
+// --- Personal API tokens ---
+
+/** A personal API token. token is only set in the create response. */
+export interface ApiToken {
+  id: number;
+  token?: string;
+  token_suffix: string;
+  owner: string;
+  owner_name: string;
+  description: string;
+  created_at: string;
+  /** null = never expires */
+  expires_at: string | null;
+  last_used_at: string | null;
+  revoked: boolean;
+  status: "active" | "expired" | "revoked" | "disabled";
+}
+
+export interface TokenPolicy {
+  allow_no_expiry: boolean;
+  /** 0 = no cap */
+  max_lifetime_days: number;
+}
+
+export function listApiTokens(all = false): Promise<ApiToken[]> {
+  return getJSON<ApiToken[]>(`/api-tokens${all ? "?all=1" : ""}`);
+}
+
+export function createApiToken(body: {
+  description: string;
+  expires_in_days?: number;
+  no_expiry?: boolean;
+}): Promise<ApiToken> {
+  return postJSON<ApiToken>("/api-tokens", body);
+}
+
+export function revokeApiToken(id: number): Promise<void> {
+  return requestVoid("POST", `/api-tokens/${id}/revoke`);
+}
+
+export function getTokenPolicy(): Promise<TokenPolicy> {
+  return getJSON<TokenPolicy>("/api-token-policy");
+}
+
+export function putTokenPolicy(p: TokenPolicy): Promise<TokenPolicy> {
+  return putJSON<TokenPolicy>("/api-token-policy", p);
+}
+
+// --- Pipeline list filters and saved views ---
+
+export const PIPELINE_STATUSES = [
+  "running",
+  "blocked",
+  "success",
+  "failed",
+  "canceled",
+  "created",
+] as const;
+
+export interface PipelineFilter {
+  repos?: string[];
+  ref?: string;
+  statuses?: string[];
+  runner?: string;
+  environment?: string;
+}
+
+export interface PipelinePage {
+  items: Pipeline[];
+  total: number;
+  hasMore: boolean;
+}
+
+/** Query string for a filter, in the same shape the list page keeps in its URL. */
+export function filterToParams(f: PipelineFilter): URLSearchParams {
+  const qs = new URLSearchParams();
+  for (const r of f.repos ?? []) qs.append("repo", r);
+  if (f.ref) qs.set("ref", f.ref);
+  for (const s of f.statuses ?? []) qs.append("status", s);
+  if (f.runner) qs.set("runner", f.runner);
+  if (f.environment) qs.set("environment", f.environment);
+  return qs;
+}
+
+export function paramsToFilter(qs: URLSearchParams): PipelineFilter {
+  return {
+    repos: qs.getAll("repo").filter(Boolean),
+    ref: qs.get("ref") ?? "",
+    statuses: qs.getAll("status").filter(Boolean),
+    runner: qs.get("runner") ?? "",
+    environment: qs.get("environment") ?? "",
+  };
+}
+
+/** One page of pipelines matching f; filtering happens on the server. */
+export async function listPipelinesPage(
+  f: PipelineFilter,
+  offset: number,
+  limit = 50
+): Promise<PipelinePage> {
+  const qs = filterToParams(f);
+  qs.set("limit", String(limit));
+  qs.set("offset", String(offset));
+  const res = await fetch(`${BASE}/pipelines?${qs.toString()}`, {
+    headers: { Accept: "application/json" },
+  });
+  if (!res.ok) {
+    throw await parseError(res);
+  }
+  return {
+    items: (await res.json()) as Pipeline[],
+    total: Number(res.headers.get("X-Total-Count") ?? 0),
+    hasMore: res.headers.get("X-Has-More") === "true",
+  };
+}
+
+export interface PipelineFacets {
+  repos: string[];
+  refs: string[];
+  runners: string[];
+  environments: string[];
+}
+
+export function getPipelineFacets(repos: string[]): Promise<PipelineFacets> {
+  const qs = new URLSearchParams();
+  for (const r of repos) qs.append("repo", r);
+  return getJSON<PipelineFacets>(`/pipeline-facets?${qs.toString()}`);
+}
+
+export interface PipelineView {
+  id: number;
+  owner: string;
+  name: string;
+  filters: PipelineFilter;
+  shared: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export function listPipelineViews(): Promise<PipelineView[]> {
+  return getJSON<PipelineView[]>("/pipeline-views");
+}
+
+export function createPipelineView(body: {
+  name: string;
+  filters: PipelineFilter;
+  shared: boolean;
+}): Promise<PipelineView> {
+  return postJSON<PipelineView>("/pipeline-views", body);
+}
+
+export function updatePipelineView(
+  id: number,
+  body: { name: string; filters: PipelineFilter; shared: boolean }
+): Promise<PipelineView> {
+  return putJSON<PipelineView>(`/pipeline-views/${id}`, body);
+}
+
+export function deletePipelineView(id: number): Promise<void> {
+  return requestVoid("DELETE", `/pipeline-views/${id}`);
 }

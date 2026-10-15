@@ -299,6 +299,7 @@ export default function PipelineDetail() {
           <StatusBadge status={pipeline.status} />
           <PipelineActions
             pipelineId={pipeline.id}
+            repo={pipeline.repo}
             status={pipeline.status}
             onDone={refresh}
           />
@@ -402,7 +403,7 @@ export default function PipelineDetail() {
                     {(showPlay || showApproval) && (
                       <div className="card job-approval-panel glow glow-orange">
                         {showPlay && (
-                          <PlayButton jobId={job.id} onDone={refresh} />
+                          <PlayButton jobId={job.id} repo={pipeline.repo} onDone={refresh} />
                         )}
                         {showApproval && (
                           <ApprovalGate

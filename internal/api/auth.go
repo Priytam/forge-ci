@@ -135,15 +135,17 @@ func (s *Server) ssoEnforced(ctx context.Context) bool {
 	return enabled
 }
 
-// currentSession returns the logged-in session, if any.
+// currentSession returns the logged-in session, if any: the SSO cookie
+// session, or else a pseudo-session for the owner of a personal API token
+// (Authorization: Bearer fci_…), which acts on that user's behalf.
 func (s *Server) currentSession(r *http.Request) *store.Session {
 	c, err := r.Cookie(sessionCookie)
 	if err != nil || c.Value == "" {
-		return nil
+		return s.tokenSession(r)
 	}
 	sess, err := s.store.GetSession(r.Context(), c.Value)
 	if err != nil {
-		return nil
+		return s.tokenSession(r)
 	}
 	return sess
 }
@@ -285,12 +287,17 @@ func (s *Server) authMe(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "not signed in")
 		return
 	}
+	// A non-expiring API token has no expiry; report null, not year 1.
+	var expires any = sess.Expires
+	if sess.Expires.IsZero() {
+		expires = nil
+	}
 	// is_admin lets the UI hide admin-only navigation.
 	writeJSON(w, http.StatusOK, map[string]any{
 		"email":      sess.Email,
 		"name":       sess.Name,
 		"provider":   sess.Provider,
-		"expires_at": sess.Expires,
+		"expires_at": expires,
 		"is_admin":   s.isAdmin(r),
 	})
 }

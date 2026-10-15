@@ -1,28 +1,13 @@
-import { useCallback } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
-import {
-  decodeRepoParam,
-  listPipelines,
-  listRegistry,
-  relativeTime,
-  shortSha,
-  sourceLabel,
-  commitSubject,
-} from "../api";
+import { Link, useParams } from "react-router-dom";
+import { decodeRepoParam, listRegistry } from "../api";
 import { usePoll } from "../hooks/usePoll";
-import StatusBadge from "../components/StatusBadge";
-import StageDots from "../components/StageDots";
-import ConfigChip from "../components/ConfigChip";
-import Avatar from "../components/Avatar";
+import PipelineBrowser from "../components/PipelineBrowser";
 import { ProviderChip } from "./Repos";
 
 export default function PipelineList() {
-  const navigate = useNavigate();
   const params = useParams<{ repo: string }>();
   const repo = decodeRepoParam(params.repo ?? "");
 
-  const fetchPipelines = useCallback(() => listPipelines(repo), [repo]);
-  const { data: pipelines, error, loading } = usePoll(fetchPipelines, 2000);
   const { data: registry } = usePoll(listRegistry, 0, false);
   const provider = registry?.find((r) => r.repo === repo)?.provider ?? null;
 
@@ -65,70 +50,7 @@ export default function PipelineList() {
         </div>
       </div>
 
-      {error && <div className="error-banner">Failed to load pipelines: {error}</div>}
-      {loading && !pipelines && <div className="muted">Loading pipelines…</div>}
-
-      {pipelines && pipelines.length === 0 && (
-        <div className="empty card">
-          No pipelines for this repo yet. <Link to="/new">Create one</Link> to get
-          started.
-        </div>
-      )}
-
-      {pipelines && pipelines.length > 0 && (
-        <div className="card table-card">
-          <table>
-            <thead>
-              <tr>
-                <th>ID</th>
-                <th>Repo</th>
-                <th>Ref</th>
-                <th>Commit</th>
-                <th>Stages</th>
-                <th>Status</th>
-                <th>Created</th>
-              </tr>
-            </thead>
-            <tbody>
-              {pipelines.map((p) => (
-                <tr
-                  key={p.id}
-                  className="row-link"
-                  onClick={() => navigate(`/pipelines/${p.id}`)}
-                >
-                  <td className="mono">#{p.id}</td>
-                  <td>{p.repo}</td>
-                  <td>{p.ref}</td>
-                  <td>
-                    {/* The subject line identifies a run; a column of shas does
-                        not. It leads, with the sha kept for reference. */}
-                    {commitSubject(p.commit_message) && (
-                      <div className="row-subject" title={p.commit_message}>
-                        {commitSubject(p.commit_message)}
-                      </div>
-                    )}
-                    <div className="row-sha">
-                      <Avatar identity={p.triggered_by ?? ""} size={18} />
-                      <span className="mono">{shortSha(p.sha)}</span>{" "}
-                      <ConfigChip version={p.config_version ?? null} />
-                      {sourceLabel(p.source) && (
-                        <span className="source-chip">{sourceLabel(p.source)}</span>
-                      )}
-                    </div>
-                  </td>
-                  <td>
-                    <StageDots stages={p.stages ?? []} />
-                  </td>
-                  <td>
-                    <StatusBadge status={p.status} />
-                  </td>
-                  <td className="muted">{relativeTime(p.created_at)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+      <PipelineBrowser fixedRepo={repo} />
     </div>
   );
 }

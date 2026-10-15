@@ -32,11 +32,12 @@ const (
 )
 
 type Server struct {
-	store *store.Store
-	blobs blob.Store
-	logs  *logstore.Service // high-volume log tier (redis live buffer + blob archive, or postgres)
-	mux   *http.ServeMux
-	sso   ssoCache
+	store  *store.Store
+	blobs  blob.Store
+	logs   *logstore.Service // high-volume log tier (redis live buffer + blob archive, or postgres)
+	mux    *http.ServeMux
+	sso    ssoCache
+	policy policyCache // personal API token policy (api_tokens.go)
 
 	runnerAuth       string // RUNNER_AUTH: "on" | "off"
 	maxJobLogBytes   int64  // MAX_JOB_LOG_BYTES
@@ -71,6 +72,7 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 	m.HandleFunc("POST /api/v1/jobs/{id}/approvals", srv.approve)
 	m.HandleFunc("POST /api/v1/jobs/{id}/cancel", srv.cancelJob)
 	m.HandleFunc("POST /api/v1/jobs/{id}/play", srv.playJob)
+	m.HandleFunc("GET /api/v1/permissions", srv.permissions)
 	m.HandleFunc("GET /api/v1/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -88,6 +90,8 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 	srv.registerWebhookRoutes()
 	srv.registerAuthRoutes()
 	srv.registerRunnerTokenRoutes()
+	srv.registerAPITokenRoutes()
+	srv.registerPipelineViewRoutes()
 	srv.registerAuditRoutes()
 	srv.registerOIDCRoutes()
 	srv.registerTestHistoryRoutes()
@@ -218,9 +222,18 @@ func (s *Server) dashboardStats(w http.ResponseWriter, r *http.Request) {
 // The total count and whether more pages exist are returned in the
 // X-Total-Count and X-Has-More response headers so the array body stays
 // compatible with existing clients.
+//
+// Filters (all optional, combined with AND, applied in SQL): ?repo (repeatable
+// or comma-separated), ?ref, ?status (repeatable or comma-separated),
+// ?runner, ?environment.
 func (s *Server) listPipelines(w http.ResponseWriter, r *http.Request) {
 	limit, offset := pageParams(r)
-	ps, total, err := s.store.ListPipelinesPage(r.Context(), r.URL.Query().Get("repo"), limit, offset)
+	f := pipelineFilterFromQuery(r)
+	if err := f.Validate(); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	ps, total, err := s.store.ListPipelinesFiltered(r.Context(), f, limit, offset)
 	if err != nil {
 		slog.Error("list pipelines", "err", err)
 		writeErr(w, http.StatusInternalServerError, "failed to list pipelines")
@@ -417,9 +430,6 @@ func (s *Server) cancelPipeline(w http.ResponseWriter, r *http.Request) {
 // is a fresh pipeline rather than resurrected job rows; the audit trail links
 // it back to the pipeline it retried.
 func (s *Server) retryPipeline(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
-		return
-	}
 	id, ok := pathID(r)
 	if !ok {
 		writeErr(w, http.StatusBadRequest, "invalid pipeline id")
@@ -433,6 +443,9 @@ func (s *Server) retryPipeline(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		slog.Error("retry source", "err", err)
 		writeErr(w, http.StatusInternalServerError, "failed to load pipeline")
+		return
+	}
+	if !s.requireOperate(w, r, src.Repo) {
 		return
 	}
 
@@ -500,12 +513,22 @@ func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) {
 // to 'created' so the scheduler runs it once its needs are met (and blocks it
 // for environment approval if it targets a protected environment).
 func (s *Server) playJob(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
-		return
-	}
 	id, ok := pathID(r)
 	if !ok {
 		writeErr(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+	repo, err := s.store.JobRepo(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "job not found")
+		return
+	}
+	if err != nil {
+		slog.Error("play job repo", "err", err)
+		writeErr(w, http.StatusInternalServerError, "failed to load job")
+		return
+	}
+	if !s.requireOperate(w, r, repo) {
 		return
 	}
 	job, err := s.store.StartManualJob(r.Context(), id)
@@ -523,7 +546,7 @@ func (s *Server) playJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	slog.Info("manual job played", "job", id)
-	s.audit(r, "job.play", strconv.FormatInt(id, 10), "", "ok", nil)
+	s.audit(r, "job.play", strconv.FormatInt(id, 10), repo, "ok", nil)
 	writeJSON(w, http.StatusOK, map[string]any{"job": job})
 }
 

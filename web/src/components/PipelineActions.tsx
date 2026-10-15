@@ -1,9 +1,16 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { cancelPipeline, isTerminalStatus, retryPipeline } from "../api";
+import {
+  cancelPipeline,
+  getPermissions,
+  isTerminalStatus,
+  retryPipeline,
+  type Permissions,
+} from "../api";
 
 interface PipelineActionsProps {
   pipelineId: number;
+  repo: string;
   status: string;
   onDone?: () => void;
 }
@@ -15,13 +22,21 @@ interface PipelineActionsProps {
  * creates a NEW pipeline that replays this one's exact config_yaml (see
  * api.retryPipeline); it navigates to that new run rather than refreshing in
  * place, since this page's own id no longer changes.
+ *
+ * Each button shows only when the viewer may use it (getPermissions): Retry
+ * for anyone with a role on the repo, Cancel for admins.
  */
 export default function PipelineActions({
   pipelineId,
+  repo,
   status,
   onDone,
 }: PipelineActionsProps) {
   const navigate = useNavigate();
+  const [perms, setPerms] = useState<Permissions | null>(null);
+  useEffect(() => {
+    void getPermissions(repo).then(setPerms);
+  }, [repo]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -57,7 +72,7 @@ export default function PipelineActions({
 
   return (
     <div className="pipeline-actions">
-      {!terminal && (
+      {!terminal && perms?.can_cancel && (
         <button
           type="button"
           className="btn btn-reject"
@@ -68,7 +83,7 @@ export default function PipelineActions({
           ✕ Cancel
         </button>
       )}
-      {terminal && (
+      {terminal && perms?.can_run && (
         <button
           type="button"
           className="btn"

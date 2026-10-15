@@ -149,6 +149,55 @@ func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	return false
 }
 
+// operatorRoles are the repo roles allowed to run work on a repo: retry a
+// pipeline or play a manual job. Every role qualifies — the split between
+// roles is about approvals and settings, not about starting pipelines.
+var operatorRoles = map[string]bool{"admin": true, "owner": true, "developer": true}
+
+// canOperate reports whether the caller may retry pipelines and play manual
+// jobs on repo. Platform admins always may (as does everyone in open bootstrap
+// mode). Otherwise the caller must be signed in and either be a member of the
+// repo with an operator role, or the repo must have no members yet — the same
+// bootstrap rule approvals use (docs/rbac-approvals.md). Settings, secrets,
+// runners and members stay behind requireAdmin.
+func (s *Server) canOperate(r *http.Request, repo string) bool {
+	if s.isAdmin(r) {
+		return true
+	}
+	sess := s.currentSession(r)
+	if sess == nil {
+		return false
+	}
+	role, hasMembers, err := s.store.RepoAccess(r.Context(), repo, sess.Email)
+	if err != nil {
+		slog.Error("repo access lookup", "repo", repo, "err", err)
+		return false
+	}
+	return !hasMembers || operatorRoles[role]
+}
+
+// requireOperate gates retry/play on repo, auditing denials like requireAdmin.
+func (s *Server) requireOperate(w http.ResponseWriter, r *http.Request, repo string) bool {
+	if s.canOperate(r, repo) {
+		return true
+	}
+	s.audit(r, "operate.denied", r.Method+" "+r.URL.Path, repo, "denied", nil)
+	writeErr(w, http.StatusForbidden, "you need a role on "+repo+" to do this")
+	return false
+}
+
+// permissions tells the UI which actions to show the caller on a repo. It is
+// a hint only: every action re-checks on the server.
+func (s *Server) permissions(w http.ResponseWriter, r *http.Request) {
+	repo := r.URL.Query().Get("repo")
+	admin := s.isAdmin(r)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"is_admin":   admin,
+		"can_run":    repo != "" && s.canOperate(r, repo),
+		"can_cancel": admin,
+	})
+}
+
 // sessionActor returns the authenticated identity (session email) or "" when
 // there is no session. Callers use it to overwrite a client-asserted
 // actor/author/approver with the trusted identity WHEN SSO is enforced, while

@@ -10,6 +10,20 @@ Membership is per repo, one role per user:
 | `owner` | Senior reviewer; typically an allowed production approver |
 | `developer` | Runs pipelines; cannot approve protected deployments by default |
 
+### Who can run what
+
+| Action | Who |
+|---|---|
+| Retry a pipeline, play a manual job | Platform admins, plus any member of the repo (`admin`, `owner` or `developer`). On a repo with no members (bootstrap mode) any signed-in user. |
+| Cancel pipelines/jobs, variables and secrets, runners and runner tokens, members, approval rules, SSO, token policy | Platform admins only (`ADMIN_EMAILS`) |
+
+Members are matched to the signed-in email case-insensitively. The UI asks
+`GET /api/v1/permissions?repo=<repo>` (`{is_admin, can_run, can_cancel}`) to
+decide which buttons to show; the server re-checks every action, and denied
+attempts are audited as `operate.denied`. The checks live in Go
+(`internal/api/security.go`: `canOperate`, `requireAdmin`), so they ship with
+the server image — there is no separate policy file to keep in sync.
+
 Add members (admin action):
 
 ```sh

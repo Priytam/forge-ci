@@ -55,6 +55,9 @@ export default function AdminNav() {
           <Link to="/admin/runner-tokens" role="menuitem" onClick={() => setOpen(false)}>
             Runner tokens
           </Link>
+          <Link to="/tokens#policy" role="menuitem" onClick={() => setOpen(false)}>
+            API token policy
+          </Link>
         </div>
       )}
     </div>

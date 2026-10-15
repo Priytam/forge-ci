@@ -613,3 +613,52 @@ CREATE TABLE IF NOT EXISTS deploy_freezes (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS deploy_freezes_lookup_idx ON deploy_freezes (environment, repo);
+
+-- Personal API tokens. A token acts on behalf of the user who created it: a
+-- request with `Authorization: Bearer fci_…` is treated exactly like that
+-- user's SSO session (same identity, same admin/repo rights). Only a SHA-256
+-- hash of the token is stored; the raw value is shown once at creation.
+-- expires_at NULL means the token never expires (allowed only while the
+-- api_token_policy setting permits it — the policy is re-checked on every use,
+-- so turning it off disables existing non-expiring tokens immediately).
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id           BIGSERIAL   PRIMARY KEY,
+    token_hash   TEXT        NOT NULL UNIQUE,
+    token_suffix TEXT        NOT NULL,
+    owner        TEXT        NOT NULL,
+    owner_name   TEXT        NOT NULL DEFAULT '',
+    description  TEXT        NOT NULL DEFAULT '',
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at   TIMESTAMPTZ,
+    last_used_at TIMESTAMPTZ,
+    revoked      BOOLEAN     NOT NULL DEFAULT FALSE
+);
+CREATE INDEX IF NOT EXISTS api_tokens_owner_idx ON api_tokens (lower(owner));
+
+-- Platform-wide settings edited from the admin UI, one JSON value per key
+-- (e.g. 'api_token_policy'). A missing key means "use the built-in default".
+CREATE TABLE IF NOT EXISTS platform_settings (
+    key        TEXT        PRIMARY KEY,
+    value      JSONB       NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Saved pipeline-list views: a named set of filters (repos, ref, status,
+-- runner, environment) a user can return to. owner is the session email (''
+-- in open bootstrap mode); shared views are visible to everyone in the org.
+CREATE TABLE IF NOT EXISTS pipeline_views (
+    id         BIGSERIAL   PRIMARY KEY,
+    owner      TEXT        NOT NULL DEFAULT '',
+    name       TEXT        NOT NULL,
+    filters    JSONB       NOT NULL DEFAULT '{}',
+    shared     BOOLEAN     NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (owner, name)
+);
+
+-- Server-side pipeline-list filters by runner and environment look jobs up by
+-- these columns (see Store.ListPipelinesFiltered).
+CREATE INDEX IF NOT EXISTS jobs_runner_idx ON jobs (runner_id, pipeline_id) WHERE runner_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS jobs_environment_idx ON jobs (environment, pipeline_id) WHERE environment IS NOT NULL;
+CREATE INDEX IF NOT EXISTS pipelines_ref_idx ON pipelines (ref, id DESC);
