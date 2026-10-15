@@ -18,7 +18,15 @@ RUN CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -o /out/downloads/forge-run
 FROM alpine:3
 # git: the server runs `git ls-remote` to resolve refs for connected repos
 # (internal/store/registry.go, internal/api/webhooks.go).
-RUN apk add --no-cache git ca-certificates && adduser -D forge
+# git-remote-codecommit: CodeCommit repos are resolved via codecommit:: URLs,
+# which git hands to this helper. It lives in its own venv (Alpine's pip
+# refuses system-wide installs, PEP 668) and is linked onto PATH so the
+# non-root forge user finds it.
+RUN apk add --no-cache git ca-certificates python3 \
+ && python3 -m venv /opt/codecommit-venv \
+ && /opt/codecommit-venv/bin/pip install --no-cache-dir git-remote-codecommit==1.17 \
+ && ln -s /opt/codecommit-venv/bin/git-remote-codecommit /usr/local/bin/git-remote-codecommit \
+ && adduser -D forge
 COPY --from=build /out/forge-server /usr/local/bin/forge-server
 COPY --from=build /out/downloads /usr/local/share/forge-downloads
 COPY deploy/downloads/install-runner.sh deploy/downloads/install-runner.ps1 deploy/downloads/qa-test-template.csv /usr/local/share/forge-downloads/
