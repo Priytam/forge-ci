@@ -85,3 +85,28 @@ Enforced transitions (all server-side, all audited in `job_approvals`):
 
 A default global rule ships out of the box: environment `production`,
 1 approval, roles `admin,owner`.
+
+## Approver groups: "N approvals, at least M from group X"
+
+Admins define named groups of people under **Admin ▾ → Approver groups**
+(`GET /api/v1/approver-groups`, `PUT`/`DELETE /api/v1/approver-groups/{name}`
+with `{"description", "members": ["harish@acme.io", ...]}`).
+
+An approval rule can then require part of its approvals from a group:
+
+```sh
+curl -X POST $FORGE/api/v1/protected-environments -d '{
+  "repo": "acme/ecom", "name": "production",
+  "required_approvals": 2, "approver_roles": ["owner"],
+  "required_group": "release-managers", "required_group_approvals": 1
+}'
+```
+
+- The job is released only when it has `required_approvals` approvals **and**
+  at least `required_group_approvals` of them are from group members.
+- Group members may vote on that environment even without a repo role.
+- Self-approval and one-vote-per-person rules still apply; members are matched
+  case-insensitively by email.
+- A group named by a rule can't be deleted (409) until the rule changes.
+- Approval notifications include the group's members and say "at least M from
+  <group>".

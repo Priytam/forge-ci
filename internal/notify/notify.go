@@ -51,6 +51,9 @@ func ApprovalMessage(n store.ApprovalNotice, frontend string) Message {
 	if len(n.ApproverRoles) > 0 {
 		need += " from " + strings.Join(n.ApproverRoles, "/")
 	}
+	if n.RequiredGroup != "" && n.RequiredGroupApprovals > 0 {
+		need += fmt.Sprintf(", at least %d from %s", n.RequiredGroupApprovals, n.RequiredGroup)
+	}
 	b.WriteString(need + ".\n")
 	if len(n.Approvers) > 0 {
 		fmt.Fprintf(&b, "Can approve: %s.\n", strings.Join(n.Approvers, ", "))

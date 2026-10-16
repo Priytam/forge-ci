@@ -40,6 +40,8 @@ import {
   upsertProtectedEnvironment,
   type Schedule,
   type Variable,
+  listApproverGroups,
+  type ApproverGroup,
 } from "../api";
 import LintPanel from "../components/LintPanel";
 import { usePoll } from "../hooks/usePoll";
@@ -566,6 +568,14 @@ function MembersSection({ repo }: { repo: string }) {
     "owner",
   ]);
   const [allowSelf, setAllowSelf] = useState(false);
+  const [ruleGroup, setRuleGroup] = useState("");
+  const [ruleGroupMin, setRuleGroupMin] = useState(1);
+  const [groups, setGroups] = useState<ApproverGroup[]>([]);
+  useEffect(() => {
+    void listApproverGroups()
+      .then(setGroups)
+      .catch(() => setGroups([]));
+  }, []);
   const [ruleError, setRuleError] = useState<string | null>(null);
   const [ruleSaved, setRuleSaved] = useState(false);
 
@@ -586,6 +596,8 @@ function MembersSection({ repo }: { repo: string }) {
         approval_timeout_hours: timeoutHours,
         approver_roles: approverRoles,
         allow_self_approval: allowSelf,
+        required_group: ruleGroup,
+        required_group_approvals: ruleGroup ? ruleGroupMin : 0,
       });
       setRuleSaved(true);
       refreshEnvs();
@@ -674,6 +686,7 @@ function MembersSection({ repo }: { repo: string }) {
                 <th>Timeout (h)</th>
                 <th>Approver roles</th>
                 <th>Self-approval</th>
+                <th>From group</th>
               </tr>
             </thead>
             <tbody>
@@ -698,6 +711,15 @@ function MembersSection({ repo }: { repo: string }) {
                   </td>
                   <td>
                     <BoolMark on={env.allow_self_approval} />
+                  </td>
+                  <td>
+                    {env.required_group ? (
+                      <span>
+                        ≥{env.required_group_approvals} from <span className="mono">{env.required_group}</span>
+                      </span>
+                    ) : (
+                      <span className="muted">—</span>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -728,6 +750,28 @@ function MembersSection({ repo }: { repo: string }) {
               value={requiredApprovals}
               onChange={(e) => setRequiredApprovals(Number(e.target.value))}
             />
+          </label>
+          <label className="field">
+            <span>…at least this many from group</span>
+            <span className="inline-pair">
+              <input
+                type="number"
+                min={1}
+                max={requiredApprovals}
+                value={ruleGroupMin}
+                disabled={!ruleGroup}
+                onChange={(e) => setRuleGroupMin(Number(e.target.value))}
+                style={{ width: 64 }}
+              />
+              <select value={ruleGroup} onChange={(e) => setRuleGroup(e.target.value)}>
+                <option value="">(no group requirement)</option>
+                {groups.map((g) => (
+                  <option key={g.name} value={g.name}>
+                    {g.name} ({g.members.length})
+                  </option>
+                ))}
+              </select>
+            </span>
           </label>
           <label className="field">
             <span>Approval timeout (hours)</span>

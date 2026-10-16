@@ -119,6 +119,9 @@ type ApprovalNotice struct {
 	CommitMessage     string
 	RequiredApprovals int
 	ApproverRoles     []string
+	// RequiredGroup / RequiredGroupApprovals: "at least M from group X".
+	RequiredGroup          string
+	RequiredGroupApprovals int
 	// Approvers are the people who may approve (emails when SSO is used).
 	Approvers []string
 }
@@ -179,6 +182,7 @@ func (s *Store) fillApprovers(ctx context.Context, n *ApprovalNotice, admins []s
 	n.RequiredApprovals = 1
 	if rule != nil {
 		n.RequiredApprovals, n.ApproverRoles, selfOK = rule.RequiredApprovals, rule.ApproverRoles, rule.AllowSelfApproval
+		n.RequiredGroup, n.RequiredGroupApprovals = rule.RequiredGroup, rule.RequiredGroupApprovals
 	}
 	hasMembers, err := s.repoHasMembers(ctx, n.Repo)
 	if err != nil {
@@ -208,6 +212,13 @@ func (s *Store) fillApprovers(ctx context.Context, n *ApprovalNotice, admins []s
 		if err := rows.Err(); err != nil {
 			return err
 		}
+	}
+	group, err := s.groupMembers(ctx, s.pool, n.RequiredGroup)
+	if err != nil {
+		return err
+	}
+	for m := range group {
+		set[m] = true
 	}
 	if !selfOK {
 		delete(set, strings.ToLower(n.TriggeredBy))

@@ -134,6 +134,9 @@ func (s *Server) isAdmin(r *http.Request) bool {
 	if sess == nil {
 		return false
 	}
+	if sess.Provider == serviceAccountProvider {
+		return sess.ServiceAdmin
+	}
 	return adminEmails()[strings.ToLower(sess.Email)]
 }
 

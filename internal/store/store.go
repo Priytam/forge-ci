@@ -743,25 +743,27 @@ func (s *Store) attachApprovals(ctx context.Context, repo string, jobs []proto.J
 	}
 
 	// One rule lookup per distinct environment, not per job.
-	required := map[string]int{}
+	rules := map[string]*proto.ProtectedEnvironment{}
 	for i := range jobs {
 		if jobs[i].Environment == nil || *jobs[i].Environment == "" {
 			continue
 		}
 		env := *jobs[i].Environment
-		if _, seen := required[env]; !seen {
-			rule, rerr := s.resolveProtectedEnv(ctx, repo, env)
+		rule, seen := rules[env]
+		if !seen {
+			r, rerr := s.resolveProtectedEnv(ctx, repo, env)
 			if rerr != nil {
 				return rerr
 			}
-			if rule != nil {
-				required[env] = rule.RequiredApprovals
-			} else {
-				required[env] = 0 // unprotected environment: no gate
-			}
+			rule = r // nil: unprotected environment, no gate
+			rules[env] = rule
 		}
 		jobs[i].Approvals = votes[jobs[i].ID]
-		jobs[i].RequiredApprovals = required[env]
+		if rule != nil {
+			jobs[i].RequiredApprovals = rule.RequiredApprovals
+			jobs[i].RequiredGroup = rule.RequiredGroup
+			jobs[i].RequiredGroupApprovals = rule.RequiredGroupApprovals
+		}
 	}
 	return nil
 }
@@ -1076,7 +1078,13 @@ func (s *Store) Approve(ctx context.Context, jobID int64, req proto.ApprovalRequ
 	if err != nil {
 		return nil, err
 	}
-	if hasMembers {
+	// Members of the rule's required group may vote on this environment even
+	// without the repo role (that is what naming them on the rule means).
+	group, err := s.groupMembers(ctx, tx, rule.RequiredGroup)
+	if err != nil {
+		return nil, err
+	}
+	if hasMembers && !group[strings.ToLower(req.Approver)] {
 		role, err := s.memberRole(ctx, repo, req.Approver)
 		if err != nil {
 			return nil, err
@@ -1112,14 +1120,29 @@ func (s *Store) Approve(ctx context.Context, jobID int64, req proto.ApprovalRequ
 			return nil, err
 		}
 	} else {
-		var approved int
-		err = tx.QueryRow(ctx,
-			`SELECT count(*) FROM job_approvals WHERE job_id=$1 AND verdict='approved'`,
-			jobID).Scan(&approved)
+		var approved, fromGroup int
+		vrows, err := tx.Query(ctx,
+			`SELECT approver FROM job_approvals WHERE job_id=$1 AND verdict='approved'`, jobID)
 		if err != nil {
 			return nil, err
 		}
-		if approved >= rule.RequiredApprovals {
+		for vrows.Next() {
+			var who string
+			if err := vrows.Scan(&who); err != nil {
+				vrows.Close()
+				return nil, err
+			}
+			approved++
+			if group[strings.ToLower(who)] {
+				fromGroup++
+			}
+		}
+		vrows.Close()
+		if err := vrows.Err(); err != nil {
+			return nil, err
+		}
+		groupOK := rule.RequiredGroup == "" || fromGroup >= rule.RequiredGroupApprovals
+		if approved >= rule.RequiredApprovals && groupOK {
 			if _, err := tx.Exec(ctx,
 				`UPDATE jobs SET status='pending', blocked_at=NULL WHERE id=$1`, jobID); err != nil {
 				return nil, err

@@ -55,6 +55,9 @@ func (s *Server) registerSettingsRoutes() {
 	m.HandleFunc("DELETE /api/v1/members/{id}", s.removeMember)
 	m.HandleFunc("GET /api/v1/protected-environments", s.listProtectedEnvs)
 	m.HandleFunc("POST /api/v1/protected-environments", s.upsertProtectedEnv)
+	m.HandleFunc("GET /api/v1/approver-groups", s.listApproverGroups)
+	m.HandleFunc("PUT /api/v1/approver-groups/{name}", s.putApproverGroup)
+	m.HandleFunc("DELETE /api/v1/approver-groups/{name}", s.deleteApproverGroup)
 }
 
 // ---- variables ----
@@ -668,6 +671,25 @@ func (s *Server) upsertProtectedEnv(w http.ResponseWriter, r *http.Request) {
 	if pe.ApprovalTimeoutHours < 1 {
 		pe.ApprovalTimeoutHours = 24
 	}
+	pe.RequiredGroup = strings.ToLower(strings.TrimSpace(pe.RequiredGroup))
+	if pe.RequiredGroup == "" {
+		pe.RequiredGroupApprovals = 0
+	} else {
+		if _, err := s.store.GetApproverGroup(r.Context(), pe.RequiredGroup); errors.Is(err, store.ErrNotFound) {
+			writeErr(w, http.StatusBadRequest, "approver group "+pe.RequiredGroup+" does not exist")
+			return
+		} else if err != nil {
+			writeErr(w, http.StatusInternalServerError, "failed to load approver group")
+			return
+		}
+		if pe.RequiredGroupApprovals < 1 {
+			pe.RequiredGroupApprovals = 1
+		}
+		if pe.RequiredGroupApprovals > pe.RequiredApprovals {
+			writeErr(w, http.StatusBadRequest, "required_group_approvals cannot exceed required_approvals")
+			return
+		}
+	}
 	out, err := s.store.UpsertProtectedEnv(r.Context(), pe)
 	if err != nil {
 		slog.Error("upsert protected env", "err", err)
@@ -679,6 +701,63 @@ func (s *Server) upsertProtectedEnv(w http.ResponseWriter, r *http.Request) {
 		"required_approvals":  out.RequiredApprovals,
 		"approver_roles":      out.ApproverRoles,
 		"allow_self_approval": out.AllowSelfApproval,
+		"required_group":      out.RequiredGroup,
+		"group_approvals":     out.RequiredGroupApprovals,
 	})
 	writeJSON(w, http.StatusOK, out)
+}
+
+// ---- approver groups (admin) ----
+
+func (s *Server) listApproverGroups(w http.ResponseWriter, r *http.Request) {
+	groups, err := s.store.ListApproverGroups(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to list approver groups")
+		return
+	}
+	writeJSON(w, http.StatusOK, groups)
+}
+
+func (s *Server) putApproverGroup(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	var g store.ApproverGroup
+	if err := json.NewDecoder(r.Body).Decode(&g); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	g.Name = r.PathValue("name")
+	if err := store.NormalizeGroup(&g); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	out, err := s.store.UpsertApproverGroup(r.Context(), g)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to save approver group")
+		return
+	}
+	s.audit(r, "approver-group.upsert", out.Name, "", "ok", map[string]any{"members": out.Members})
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) deleteApproverGroup(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	name := r.PathValue("name")
+	err := s.store.DeleteApproverGroup(r.Context(), name)
+	switch {
+	case errors.Is(err, store.ErrGroupInUse):
+		writeErr(w, http.StatusConflict, err.Error())
+		return
+	case errors.Is(err, store.ErrNotFound):
+		writeErr(w, http.StatusNotFound, "approver group not found")
+		return
+	case err != nil:
+		writeErr(w, http.StatusInternalServerError, "failed to delete approver group")
+		return
+	}
+	s.audit(r, "approver-group.delete", name, "", "ok", nil)
+	w.WriteHeader(http.StatusNoContent)
 }

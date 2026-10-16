@@ -109,6 +109,9 @@ export interface Job {
   approvals?: JobApproval[];
   /** votes the environment's rule requires; absent when the job has no gate */
   required_approvals?: number;
+  /** the gate also needs required_group_approvals votes from this group */
+  required_group?: string;
+  required_group_approvals?: number;
   /** why the job ended without running, e.g. a branch rule refused it */
   status_reason?: string;
   /** the job this one re-runs, when it came from "Retry job" */
@@ -225,6 +228,9 @@ export interface ProtectedEnvironment {
   approval_timeout_hours: number;
   approver_roles: string[];
   allow_self_approval: boolean;
+  /** of the required approvals, at least required_group_approvals from this group */
+  required_group?: string;
+  required_group_approvals?: number;
 }
 
 export interface RepoConfig {
@@ -539,6 +545,8 @@ export interface ProtectedEnvironmentInput {
   approval_timeout_hours: number;
   approver_roles: string[];
   allow_self_approval: boolean;
+  required_group?: string;
+  required_group_approvals?: number;
 }
 
 export function upsertProtectedEnvironment(
@@ -1568,4 +1576,75 @@ export function testNotify(): Promise<{ sent: boolean; email_to: string }> {
  * succeed) inside the same pipeline. Returns the new job's id. */
 export function retryJob(jobId: number | string): Promise<{ pipeline_id: number; job_id: number; retried: number }> {
   return postJSON<{ pipeline_id: number; job_id: number; retried: number }>(`/jobs/${jobId}/retry`, {});
+}
+
+// --- Approver groups (admin) ---
+
+export interface ApproverGroup {
+  name: string;
+  description: string;
+  members: string[];
+  updated_at: string;
+}
+
+export function listApproverGroups(): Promise<ApproverGroup[]> {
+  return getJSON<ApproverGroup[]>("/approver-groups");
+}
+
+export function putApproverGroup(name: string, g: { description: string; members: string[] }): Promise<ApproverGroup> {
+  return putJSON<ApproverGroup>(`/approver-groups/${encodeURIComponent(name)}`, g);
+}
+
+export function deleteApproverGroup(name: string): Promise<void> {
+  return requestVoid("DELETE", `/approver-groups/${encodeURIComponent(name)}`);
+}
+
+// --- Service accounts (admin) ---
+
+export interface ServiceAccount {
+  id: number;
+  name: string;
+  identity: string;
+  description: string;
+  is_admin: boolean;
+  disabled: boolean;
+  created_by: string;
+  created_at: string;
+  active_tokens: number;
+}
+
+export function listServiceAccounts(): Promise<ServiceAccount[]> {
+  return getJSON<ServiceAccount[]>("/service-accounts");
+}
+
+export function createServiceAccount(b: { name: string; description: string; is_admin: boolean }): Promise<ServiceAccount> {
+  return postJSON<ServiceAccount>("/service-accounts", b);
+}
+
+export async function updateServiceAccount(
+  id: number,
+  b: { description?: string; is_admin?: boolean; disabled?: boolean }
+): Promise<ServiceAccount> {
+  const res = await fetch(`${BASE}/service-accounts/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(b),
+  });
+  if (!res.ok) throw await parseError(res);
+  return (await res.json()) as ServiceAccount;
+}
+
+export function deleteServiceAccount(id: number): Promise<void> {
+  return requestVoid("DELETE", `/service-accounts/${id}`);
+}
+
+export function listServiceTokens(id: number): Promise<ApiToken[]> {
+  return getJSON<ApiToken[]>(`/service-accounts/${id}/tokens`);
+}
+
+export function createServiceToken(
+  id: number,
+  b: { description: string; expires_in_days?: number; no_expiry?: boolean }
+): Promise<ApiToken> {
+  return postJSON<ApiToken>(`/service-accounts/${id}/tokens`, b);
 }

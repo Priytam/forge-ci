@@ -33,6 +33,10 @@ type APIToken struct {
 	Revoked     bool       `json:"revoked"`
 	// Status is derived: active | expired | revoked | disabled (by policy).
 	Status string `json:"status"`
+	// ServiceAccountID is set for a service account's token; nil for personal.
+	ServiceAccountID *int64 `json:"service_account_id,omitempty"`
+	// ServiceAdmin is the service account's admin flag (lookup only).
+	ServiceAdmin bool `json:"-"`
 }
 
 // TokenPolicy is the admin-controlled rule for personal API tokens.
@@ -86,6 +90,10 @@ func (s *Store) SetTokenPolicy(ctx context.Context, p TokenPolicy) error {
 // CreateAPIToken mints a token for owner. expiresAt nil = never expires; the
 // caller has already checked that against the policy.
 func (s *Store) CreateAPIToken(ctx context.Context, owner, ownerName, description string, expiresAt *time.Time) (*APIToken, error) {
+	return s.createAPIToken(ctx, owner, ownerName, description, expiresAt, nil)
+}
+
+func (s *Store) createAPIToken(ctx context.Context, owner, ownerName, description string, expiresAt *time.Time, serviceAccountID *int64) (*APIToken, error) {
 	buf := make([]byte, 24)
 	if _, err := rand.Read(buf); err != nil {
 		return nil, err
@@ -94,11 +102,12 @@ func (s *Store) CreateAPIToken(ctx context.Context, owner, ownerName, descriptio
 	t := APIToken{
 		Token: raw, TokenSuffix: raw[len(raw)-4:], Owner: owner, OwnerName: ownerName,
 		Description: description, ExpiresAt: expiresAt, Status: "active",
+		ServiceAccountID: serviceAccountID,
 	}
 	err := s.pool.QueryRow(ctx,
-		`INSERT INTO api_tokens (token_hash, token_suffix, owner, owner_name, description, expires_at)
-		 VALUES ($1,$2,$3,$4,$5,$6) RETURNING id, created_at`,
-		hashAPIToken(raw), t.TokenSuffix, owner, ownerName, description, expiresAt).
+		`INSERT INTO api_tokens (token_hash, token_suffix, owner, owner_name, description, expires_at, service_account_id)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, created_at`,
+		hashAPIToken(raw), t.TokenSuffix, owner, ownerName, description, expiresAt, serviceAccountID).
 		Scan(&t.ID, &t.CreatedAt)
 	if err != nil {
 		return nil, err
@@ -112,7 +121,7 @@ func (s *Store) CreateAPIToken(ctx context.Context, owner, ownerName, descriptio
 func (s *Store) ListAPITokens(ctx context.Context, owner string, policy TokenPolicy) ([]APIToken, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, token_suffix, owner, owner_name, description, created_at,
-		        expires_at, last_used_at, revoked
+		        expires_at, last_used_at, revoked, service_account_id
 		 FROM api_tokens WHERE ($1 = '' OR lower(owner) = lower($1))
 		 ORDER BY id DESC`, owner)
 	if err != nil {
@@ -124,7 +133,7 @@ func (s *Store) ListAPITokens(ctx context.Context, owner string, policy TokenPol
 	for rows.Next() {
 		var t APIToken
 		if err := rows.Scan(&t.ID, &t.TokenSuffix, &t.Owner, &t.OwnerName, &t.Description,
-			&t.CreatedAt, &t.ExpiresAt, &t.LastUsedAt, &t.Revoked); err != nil {
+			&t.CreatedAt, &t.ExpiresAt, &t.LastUsedAt, &t.Revoked, &t.ServiceAccountID); err != nil {
 			return nil, err
 		}
 		t.Status = tokenStatus(t, policy, now)
@@ -157,14 +166,16 @@ func (s *Store) LookupAPIToken(ctx context.Context, raw string, policy TokenPoli
 	}
 	var t APIToken
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, owner, owner_name, created_at, expires_at
-		 FROM api_tokens
-		 WHERE token_hash=$1 AND NOT revoked
-		   AND (expires_at IS NULL OR expires_at > now())
-		   AND ($2 OR expires_at IS NOT NULL)
-		   AND ($3 = 0 OR created_at + make_interval(days => $3) > now())`,
+		`SELECT t.id, t.owner, t.owner_name, t.created_at, t.expires_at, t.service_account_id,
+		        COALESCE(sa.is_admin, FALSE)
+		 FROM api_tokens t LEFT JOIN service_accounts sa ON sa.id = t.service_account_id
+		 WHERE t.token_hash=$1 AND NOT t.revoked
+		   AND (t.service_account_id IS NULL OR NOT sa.disabled)
+		   AND (t.expires_at IS NULL OR t.expires_at > now())
+		   AND ($2 OR t.expires_at IS NOT NULL)
+		   AND ($3 = 0 OR t.created_at + make_interval(days => $3) > now())`,
 		hashAPIToken(raw), policy.AllowNoExpiry, policy.MaxLifetimeDays).
-		Scan(&t.ID, &t.Owner, &t.OwnerName, &t.CreatedAt, &t.ExpiresAt)
+		Scan(&t.ID, &t.Owner, &t.OwnerName, &t.CreatedAt, &t.ExpiresAt, &t.ServiceAccountID, &t.ServiceAdmin)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}

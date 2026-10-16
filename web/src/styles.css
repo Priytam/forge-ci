@@ -4050,3 +4050,34 @@ textarea.yaml-input,
 .card.settings-form > .btn {
   align-self: flex-start;
 }
+
+/* Service accounts */
+.sa-card {
+  margin-bottom: 10px;
+}
+.sa-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.sa-identity {
+  font-weight: 600;
+  margin-right: 6px;
+}
+.sa-tokens {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.inline-pair {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+.approval-group-note {
+  font-size: var(--fs-sm);
+  margin: 4px 0;
+}

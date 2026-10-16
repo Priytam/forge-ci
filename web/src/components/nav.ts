@@ -45,6 +45,8 @@ export const NAV: NavSection[] = [
     items: [
       { to: "/admin/environments", label: "Environments & branches", icon: "sliders", keywords: "registry aliases branch rules" },
       { to: "/admin/notifications", label: "Notifications", icon: "bell", keywords: "slack email approval alert" },
+      { to: "/admin/approver-groups", label: "Approver groups", icon: "shield", keywords: "release managers approval group" },
+      { to: "/admin/service-accounts", label: "Service accounts", icon: "key", keywords: "robot bot automation token" },
       { to: "/admin/runner-tokens", label: "Runner tokens", icon: "key", keywords: "register runner" },
       { to: "/admin/sso", label: "SSO", icon: "lock", keywords: "login google microsoft github" },
       { to: "/admin/audit", label: "Audit log", icon: "audit", keywords: "history who" },
@@ -66,6 +68,8 @@ const ADMIN_TITLES: Record<string, string> = {
   "runner-tokens": "Runner tokens",
   environments: "Environments & branches",
   notifications: "Notifications",
+  "approver-groups": "Approver groups",
+  "service-accounts": "Service accounts",
 };
 
 export interface Crumb {

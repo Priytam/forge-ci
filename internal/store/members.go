@@ -253,12 +253,12 @@ func (s *Store) resolveProtectedEnv(ctx context.Context, repo, name string) (*pr
 	var pe proto.ProtectedEnvironment
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, repo, name, required_approvals, approval_timeout_hours,
-		        approver_roles, allow_self_approval
+		        approver_roles, allow_self_approval, required_group, required_group_approvals
 		 FROM protected_environments
 		 WHERE name=$2 AND repo IN ('', $1)
 		 ORDER BY repo DESC LIMIT 1`, repo, name).
 		Scan(&pe.ID, &pe.Repo, &pe.Name, &pe.RequiredApprovals, &pe.ApprovalTimeoutHours,
-			&pe.ApproverRoles, &pe.AllowSelfApproval)
+			&pe.ApproverRoles, &pe.AllowSelfApproval, &pe.RequiredGroup, &pe.RequiredGroupApprovals)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -271,7 +271,7 @@ func (s *Store) resolveProtectedEnv(ctx context.Context, repo, name string) (*pr
 func (s *Store) ListProtectedEnvs(ctx context.Context, repo string) ([]proto.ProtectedEnvironment, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, repo, name, required_approvals, approval_timeout_hours,
-		        approver_roles, allow_self_approval
+		        approver_roles, allow_self_approval, required_group, required_group_approvals
 		 FROM protected_environments WHERE repo IN ('', $1) ORDER BY repo, name`, repo)
 	if err != nil {
 		return nil, err
@@ -281,7 +281,8 @@ func (s *Store) ListProtectedEnvs(ctx context.Context, repo string) ([]proto.Pro
 	for rows.Next() {
 		var pe proto.ProtectedEnvironment
 		if err := rows.Scan(&pe.ID, &pe.Repo, &pe.Name, &pe.RequiredApprovals,
-			&pe.ApprovalTimeoutHours, &pe.ApproverRoles, &pe.AllowSelfApproval); err != nil {
+			&pe.ApprovalTimeoutHours, &pe.ApproverRoles, &pe.AllowSelfApproval,
+			&pe.RequiredGroup, &pe.RequiredGroupApprovals); err != nil {
 			return nil, err
 		}
 		out = append(out, pe)
@@ -296,16 +297,19 @@ func (s *Store) UpsertProtectedEnv(ctx context.Context, pe proto.ProtectedEnviro
 	}
 	err := s.pool.QueryRow(ctx,
 		`INSERT INTO protected_environments
-		     (repo, name, required_approvals, approval_timeout_hours, approver_roles, allow_self_approval)
-		 VALUES ($1,$2,$3,$4,$5,$6)
+		     (repo, name, required_approvals, approval_timeout_hours, approver_roles, allow_self_approval,
+		      required_group, required_group_approvals)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
 		 ON CONFLICT (repo, name) DO UPDATE SET
 		     required_approvals = EXCLUDED.required_approvals,
 		     approval_timeout_hours = EXCLUDED.approval_timeout_hours,
 		     approver_roles = EXCLUDED.approver_roles,
-		     allow_self_approval = EXCLUDED.allow_self_approval
+		     allow_self_approval = EXCLUDED.allow_self_approval,
+		     required_group = EXCLUDED.required_group,
+		     required_group_approvals = EXCLUDED.required_group_approvals
 		 RETURNING id`,
 		pe.Repo, pe.Name, pe.RequiredApprovals, pe.ApprovalTimeoutHours,
-		pe.ApproverRoles, pe.AllowSelfApproval).Scan(&pe.ID)
+		pe.ApproverRoles, pe.AllowSelfApproval, pe.RequiredGroup, pe.RequiredGroupApprovals).Scan(&pe.ID)
 	return &pe, err
 }
 

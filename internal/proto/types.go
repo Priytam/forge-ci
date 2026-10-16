@@ -90,6 +90,10 @@ type Job struct {
 	// job with no gate.
 	Approvals         []JobApproval `json:"approvals,omitempty"`
 	RequiredApprovals int           `json:"required_approvals,omitempty"`
+	// RequiredGroup / RequiredGroupApprovals: the gate also needs this many
+	// approvals from members of this approver group.
+	RequiredGroup          string `json:"required_group,omitempty"`
+	RequiredGroupApprovals int    `json:"required_group_approvals,omitempty"`
 }
 
 // JobApproval is one recorded vote on an approval-gated job. Votes are
@@ -463,6 +467,10 @@ type ProtectedEnvironment struct {
 	ApprovalTimeoutHours int      `json:"approval_timeout_hours"`
 	ApproverRoles        []string `json:"approver_roles"`
 	AllowSelfApproval    bool     `json:"allow_self_approval"`
+	// RequiredGroup / RequiredGroupApprovals: of the RequiredApprovals, at
+	// least this many must come from members of this approver group.
+	RequiredGroup          string `json:"required_group"`
+	RequiredGroupApprovals int    `json:"required_group_approvals"`
 }
 
 // OIDCTokenResponse is a freshly minted per-job OIDC token (runner protocol).

@@ -800,3 +800,31 @@ LANGUAGE sql STABLE AS $$
         ELSE 'success' END
     FROM jobs j WHERE j.pipeline_id = pid AND NOT j.superseded
 $$;
+
+-- Approver groups: named lists of people (emails), admin-managed. An approval
+-- rule can require "N approvals, at least M from group X"; members of X may
+-- vote on that environment even without the repo role.
+CREATE TABLE IF NOT EXISTS approver_groups (
+    name        TEXT        PRIMARY KEY,
+    description TEXT        NOT NULL DEFAULT '',
+    members     TEXT[]      NOT NULL DEFAULT '{}',
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+ALTER TABLE protected_environments ADD COLUMN IF NOT EXISTS required_group TEXT NOT NULL DEFAULT '';
+ALTER TABLE protected_environments ADD COLUMN IF NOT EXISTS required_group_approvals INT NOT NULL DEFAULT 0;
+
+-- Service accounts: non-human identities for automation, owned by the org and
+-- managed by admins. Identity string is 'svc:<name>' — add it as a repo
+-- member to grant repo access. Their API tokens live in api_tokens with
+-- service_account_id set; a disabled account's tokens stop working at once.
+CREATE TABLE IF NOT EXISTS service_accounts (
+    id          BIGSERIAL   PRIMARY KEY,
+    name        TEXT        NOT NULL UNIQUE,
+    description TEXT        NOT NULL DEFAULT '',
+    is_admin    BOOLEAN     NOT NULL DEFAULT FALSE,
+    disabled    BOOLEAN     NOT NULL DEFAULT FALSE,
+    created_by  TEXT        NOT NULL DEFAULT '',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+ALTER TABLE api_tokens ADD COLUMN IF NOT EXISTS service_account_id BIGINT
+    REFERENCES service_accounts(id) ON DELETE CASCADE;

@@ -107,6 +107,8 @@ type Session struct {
 	Name     string    `json:"name"`
 	Provider string    `json:"provider"`
 	Expires  time.Time `json:"expires_at"`
+	// ServiceAdmin: a service account granted platform-admin rights.
+	ServiceAdmin bool `json:"-"`
 }
 
 func (s *Store) CreateSession(ctx context.Context, email, name, provider string, ttl time.Duration) (*Session, error) {

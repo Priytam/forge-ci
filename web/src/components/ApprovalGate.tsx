@@ -8,6 +8,9 @@ interface ApprovalGateProps {
   approvals?: JobApproval[];
   /** votes the environment's rule requires */
   required?: number;
+  /** of those, at least requiredGroupApprovals from this approver group */
+  requiredGroup?: string;
+  requiredGroupApprovals?: number;
   /** the job has already finished (rejected gates land here) */
   status?: string;
   onDone?: () => void;
@@ -27,6 +30,8 @@ export default function ApprovalGate({
   jobId,
   approvals = [],
   required = 0,
+  requiredGroup,
+  requiredGroupApprovals = 0,
   status,
   onDone,
 }: ApprovalGateProps) {
@@ -82,7 +87,9 @@ export default function ApprovalGate({
     );
   }
 
-  const settled = approved.length >= need;
+  // With a group requirement the count alone isn't enough: the server keeps
+  // the job blocked until enough of the votes come from the group.
+  const settled = approved.length >= need && status !== "blocked";
 
   return (
     <div className="approval" onClick={(e) => e.stopPropagation()}>
@@ -106,6 +113,12 @@ export default function ApprovalGate({
           </span>
         </span>
       </div>
+
+      {requiredGroup && requiredGroupApprovals > 0 && (
+        <div className="approval-group-note muted">
+          At least {requiredGroupApprovals} of these must come from <strong>{requiredGroup}</strong>.
+        </div>
+      )}
 
       {approvals.length > 0 && (
         <div className="approval-votes">
