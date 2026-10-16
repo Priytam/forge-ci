@@ -76,7 +76,11 @@ Legend: ✅ shipped · 🟡 partial · ❌ not yet (roadmap).
 | Pipeline graph: stage & job-dependency grouping, pill cards, curved edges | ✅ | ✅ | |
 | Live log viewer | ✅ | ✅ | |
 | Settings → CI/CD sections (variables, runners, artifacts, members) | ✅ | ✅ | |
-| Environments/deployments board | ✅ | ✅ | board + history + drift + rollback + freezes — API shipped ([docs/environments.md](environments.md)); web view is a later pass |
+| Environments/deployments board | ✅ | ✅ | board + history + drift + rollback + freezes, deploy URL/version/digest per deployment ([docs/environments.md](environments.md)) |
+| Promote a build between environments | 🟡 (manual pattern) | ✅ | one click/API call redeploys the source deployment's exact commit, artifacts and digest; only the target's deploy jobs run; gates apply ([environments.md](environments.md#promotion--ship-the-build-you-tested)) |
+| Prevent outdated deployments | ✅ | ✅ | per environment `cancel_superseded` |
+| `artifacts:reports:dotenv` | ✅ | ✅ | variables flow to needing jobs; `DEPLOY_*` fill the deployment record |
+| Test coverage (regex + Cobertura) | ✅ | ✅ | per job, pipeline mean, repo trend on the Tests page |
 
 ## ArgoCD-inspired direction (CD depth)
 

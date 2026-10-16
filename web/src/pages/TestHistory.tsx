@@ -9,6 +9,7 @@ import {
 } from "../api";
 import { usePoll } from "../hooks/usePoll";
 import { StatusIcon } from "../components/StageDots";
+import CoverageTrend from "../components/CoverageTrend";
 
 /** Test-case status -> the pipeline/job status vocabulary StatusIcon and the
  *  .badge-* classes already speak, so both are reused as-is rather than
@@ -112,6 +113,8 @@ export default function TestHistory() {
       <div className="page-head">
         <h1>Tests</h1>
       </div>
+
+      <CoverageTrend repo={repo} />
 
       {error && (
         <div className="error-banner">Failed to load test history: {error}</div>

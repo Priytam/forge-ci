@@ -34,6 +34,10 @@ type Pipeline struct {
 	// the pull-request title for a PR run.
 	CommitMessage string    `json:"commit_message,omitempty"`
 	CreatedAt     time.Time `json:"created_at"`
+	// Coverage is the mean of the pipeline's job coverage values (nil = none
+	// reported). PromotedFrom is the deployment a promotion pipeline redeploys.
+	Coverage     *float64 `json:"coverage,omitempty"`
+	PromotedFrom *int64   `json:"promoted_from,omitempty"`
 }
 
 // StageStatus is the derived status of one stage, for the mini per-stage
@@ -82,6 +86,8 @@ type Job struct {
 	RetryOf *int64 `json:"retry_of,omitempty"`
 	// ResourceGroup: at most one job per (repo, group) runs at a time.
 	ResourceGroup string `json:"resource_group,omitempty"`
+	// Coverage is the job's coverage percentage, when it reports one.
+	Coverage *float64 `json:"coverage,omitempty"`
 
 	// Approval gate, populated only for a job that targets a protected
 	// environment. Approvals is the append-only vote record (one per approver,
@@ -125,6 +131,11 @@ type RunnerJob struct {
 	// ReportJUnitPaths are workspace globs of JUnit XML the runner collects after
 	// a successful job and POSTs to the report endpoint for server-side parsing.
 	ReportJUnitPaths []string `json:"report_junit_paths,omitempty"`
+	// ReportDotenvPath is a KEY=VALUE file the runner reads after a successful
+	// job and posts to /runner/jobs/{id}/dotenv; CoverageReportPath is a
+	// Cobertura file posted to /runner/jobs/{id}/coverage. Both workspace-relative.
+	ReportDotenvPath   string `json:"report_dotenv_path,omitempty"`
+	CoverageReportPath string `json:"coverage_report_path,omitempty"`
 
 	// Cache directives (GitLab-style). The runner restores the cache before the
 	// script and saves it after, keyed by repo+key and shared across pipelines.
@@ -355,6 +366,12 @@ type ApprovalRequest struct {
 }
 
 type CreatePipelineRequest struct {
+	// PromotedFrom is the deployment a promotion pipeline redeploys (0 = not a
+	// promotion). ExternalNeeds wires needs on jobs that aren't in this
+	// pipeline to jobs of another one (the build a promotion reuses).
+	PromotedFrom  int64            `json:"-"`
+	ExternalNeeds map[string]int64 `json:"-"`
+
 	Repo        string `json:"repo"`
 	Ref         string `json:"ref"`
 	SHA         string `json:"sha"`
@@ -418,6 +435,14 @@ type Deployment struct {
 	DeployedBy  string    `json:"deployed_by"`
 	DeployedAt  time.Time `json:"deployed_at"`
 	Status      string    `json:"status"`
+	// URL is where this deployment is reachable, Version what was deployed
+	// (the job's DEPLOY_VERSION, else the short sha), Digest the immutable
+	// build identity (an image digest, artifact checksum...) when the job
+	// reports one. PromotedFrom is the deployment this one was promoted from.
+	URL          string `json:"url,omitempty"`
+	Version      string `json:"version,omitempty"`
+	Digest       string `json:"digest,omitempty"`
+	PromotedFrom *int64 `json:"promoted_from,omitempty"`
 }
 
 // Drift indicator values for an environment card.

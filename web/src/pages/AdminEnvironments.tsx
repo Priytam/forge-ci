@@ -16,6 +16,7 @@ interface Row {
   aliases: string;
   allowed_refs: string;
   description: string;
+  cancel_superseded: boolean;
 }
 
 const split = (s: string) =>
@@ -30,18 +31,20 @@ const toRow = (e: RegisteredEnv): Row => ({
   aliases: e.aliases.join(", "),
   allowed_refs: e.allowed_refs.join(", "),
   description: e.description,
+  cancel_superseded: !!e.cancel_superseded,
 });
 
 /** A sensible starting point for a server with no registry yet. */
 const STARTER: Row[] = [
-  { name: "dev", tier: "dev", aliases: "development", allowed_refs: "", description: "" },
-  { name: "staging", tier: "staging", aliases: "stage, stg", allowed_refs: "main, release/*", description: "" },
+  { name: "dev", tier: "dev", aliases: "development", allowed_refs: "", description: "", cancel_superseded: false },
+  { name: "staging", tier: "staging", aliases: "stage, stg", allowed_refs: "main, release/*", description: "", cancel_superseded: false },
   {
     name: "production",
     tier: "prod",
     aliases: "prod, prd",
     allowed_refs: "main, release/*",
     description: "",
+    cancel_superseded: true,
   },
 ];
 
@@ -91,6 +94,7 @@ export default function AdminEnvironments() {
           aliases: split(r.aliases),
           allowed_refs: split(r.allowed_refs),
           description: r.description.trim(),
+          cancel_superseded: r.cancel_superseded,
         })),
       });
       setRows(saved.environments.map(toRow));
@@ -146,6 +150,7 @@ export default function AdminEnvironments() {
                 <th>Aliases</th>
                 <th>Branches allowed to deploy</th>
                 <th>Description</th>
+                <th title="Cancel a deploy that is still waiting once a newer pipeline has deployed here">Cancel superseded</th>
                 <th></th>
               </tr>
             </thead>
@@ -190,6 +195,15 @@ export default function AdminEnvironments() {
                   <td>
                     <input value={r.description} onChange={(e) => update(i, { description: e.target.value })} />
                   </td>
+                  <td style={{ textAlign: "center" }}>
+                    <input
+                      type="checkbox"
+                      checked={r.cancel_superseded}
+                      onChange={(e) => update(i, { cancel_superseded: e.target.checked })}
+                      aria-label={`Cancel superseded deploys to ${r.name || "this environment"}`}
+                      title="Cancel a deploy that is still waiting once a newer pipeline has deployed here"
+                    />
+                  </td>
                   <td>
                     <button type="button" className="btn btn-icon" onClick={() => setRows(rows.filter((_, j) => j !== i))}>
                       Remove
@@ -206,7 +220,7 @@ export default function AdminEnvironments() {
         <button
           type="button"
           className="btn"
-          onClick={() => setRows([...rows, { name: "", tier: "other", aliases: "", allowed_refs: "", description: "" }])}
+          onClick={() => setRows([...rows, { name: "", tier: "other", aliases: "", allowed_refs: "", description: "", cancel_superseded: false }])}
         >
           + Add environment
         </button>

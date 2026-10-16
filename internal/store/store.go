@@ -279,7 +279,12 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 		source = "api"
 	}
 
+	var promotedFrom *int64
+	if req.PromotedFrom > 0 {
+		promotedFrom = &req.PromotedFrom
+	}
 	var p proto.Pipeline
+	p.PromotedFrom = promotedFrom
 	p.Repo, p.Ref, p.SHA = req.Repo, req.Ref, req.SHA
 	p.Status = "created"
 	p.ConfigVersion = configVersion
@@ -289,10 +294,10 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 	p.CommitAuthor = req.CommitAuthor
 	p.CommitMessage = capCommitMessage(req.CommitMessage)
 	err = tx.QueryRow(ctx,
-		`INSERT INTO pipelines (repo, ref, sha, config_yaml, triggered_by, config_version, fail_fast, config_source, source, mr_iid, mr_base_sha, commit_author, commit_message)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id, created_at`,
+		`INSERT INTO pipelines (repo, ref, sha, config_yaml, triggered_by, config_version, fail_fast, config_source, source, mr_iid, mr_base_sha, commit_author, commit_message, promoted_from)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id, created_at`,
 		req.Repo, req.Ref, req.SHA, req.Config, req.TriggeredBy, configVersion, failFast, configSource, source,
-		req.MRIID, req.MRBaseSHA, req.CommitAuthor, capCommitMessage(req.CommitMessage)).Scan(&p.ID, &p.CreatedAt)
+		req.MRIID, req.MRBaseSHA, req.CommitAuthor, capCommitMessage(req.CommitMessage), promotedFrom).Scan(&p.ID, &p.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -342,9 +347,11 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 		}
 		var id int64
 		err = tx.QueryRow(ctx,
-			`INSERT INTO jobs (pipeline_id, name, stage, stage_idx, image, script, env, environment, tags, artifact_paths, artifact_expire_seconds, report_junit, cache_paths, cache_key, cache_key_files, cache_policy, services, network, timeout_seconds, max_attempts, status, manual, allow_failure, blocked_at, finished_at, status_reason, resource_group, affinity_key)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28) RETURNING id`,
-			p.ID, j.Name, j.Stage, j.StageIdx, image, j.Script, env, environment, tags, artifacts, j.ArtifactExpireSeconds, reportJUnit, cachePaths, j.CacheKey, cacheKeyFiles, j.CachePolicy, services, j.Network, timeoutSec, j.Retry+1, status, j.Manual, j.AllowFailure, blockedAt, finishedAt, denied, resourceGroup, affinityKey).Scan(&id)
+			`INSERT INTO jobs (pipeline_id, name, stage, stage_idx, image, script, env, environment, tags, artifact_paths, artifact_expire_seconds, report_junit, cache_paths, cache_key, cache_key_files, cache_policy, services, network, timeout_seconds, max_attempts, status, manual, allow_failure, blocked_at, finished_at, status_reason, resource_group, affinity_key,
+			                   environment_url, report_dotenv, coverage_regex, coverage_report)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32) RETURNING id`,
+			p.ID, j.Name, j.Stage, j.StageIdx, image, j.Script, env, environment, tags, artifacts, j.ArtifactExpireSeconds, reportJUnit, cachePaths, j.CacheKey, cacheKeyFiles, j.CachePolicy, services, j.Network, timeoutSec, j.Retry+1, status, j.Manual, j.AllowFailure, blockedAt, finishedAt, denied, resourceGroup, affinityKey,
+			j.EnvironmentURL, j.ReportDotenv, j.CoverageRegex, j.CoverageReportPath).Scan(&id)
 		if err != nil {
 			return nil, err
 		}
@@ -352,9 +359,16 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 	}
 	for _, j := range jobs {
 		for _, dep := range j.Needs {
+			target, ok := ids[dep]
+			if !ok {
+				target, ok = req.ExternalNeeds[dep] // a promotion reusing another pipeline's build
+			}
+			if !ok {
+				return nil, fmt.Errorf("job %q needs %q, which is not in this pipeline", j.Name, dep)
+			}
 			if _, err := tx.Exec(ctx,
 				`INSERT INTO job_needs (job_id, needs_job_id) VALUES ($1,$2)`,
-				ids[j.Name], ids[dep]); err != nil {
+				ids[j.Name], target); err != nil {
 				return nil, err
 			}
 		}
@@ -583,10 +597,12 @@ func (s *Store) GetPipeline(ctx context.Context, id int64) (*proto.Pipeline, []p
 	var p proto.Pipeline
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, repo, ref, sha, config_version, config_source, source,
-		        triggered_by, commit_author, commit_message, created_at
+		        triggered_by, commit_author, commit_message, created_at, promoted_from,
+		        (SELECT round(avg(coverage)::numeric, 2)::float8 FROM jobs
+		          WHERE pipeline_id = pipelines.id AND coverage IS NOT NULL AND NOT superseded)
 		 FROM pipelines WHERE id=$1`, id).
 		Scan(&p.ID, &p.Repo, &p.Ref, &p.SHA, &p.ConfigVersion, &p.ConfigSource,
-			&p.Source, &p.TriggeredBy, &p.CommitAuthor, &p.CommitMessage, &p.CreatedAt)
+			&p.Source, &p.TriggeredBy, &p.CommitAuthor, &p.CommitMessage, &p.CreatedAt, &p.PromotedFrom, &p.Coverage)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil, ErrNotFound
 	}
@@ -599,7 +615,7 @@ func (s *Store) GetPipeline(ctx context.Context, id int64) (*proto.Pipeline, []p
 		        j.status,
 		        CASE WHEN j.status='failed' AND j.allow_failure THEN 'success' ELSE j.status END,
 		        j.started_at, j.finished_at, j.exit_code, j.manual, j.allow_failure, j.status_reason,
-		        j.retry_of, j.resource_group,
+		        j.retry_of, j.resource_group, j.coverage::float8,
 		        COALESCE(array_agg(n.needs_job_id) FILTER (WHERE n.needs_job_id IS NOT NULL), '{}')
 		 FROM jobs j LEFT JOIN job_needs n ON n.job_id = j.id
 		 WHERE j.pipeline_id = $1 AND NOT j.superseded
@@ -619,7 +635,7 @@ func (s *Store) GetPipeline(ctx context.Context, id int64) (*proto.Pipeline, []p
 		var effective string
 		if err := rows.Scan(&j.ID, &j.PipelineID, &j.Name, &j.Stage, &j.StageIdx, &j.Image,
 			&j.Environment, &j.Status, &effective, &j.StartedAt, &j.FinishedAt, &j.ExitCode,
-			&j.Manual, &j.AllowFailure, &j.StatusReason, &j.RetryOf, &j.ResourceGroup, &j.Needs); err != nil {
+			&j.Manual, &j.AllowFailure, &j.StatusReason, &j.RetryOf, &j.ResourceGroup, &j.Coverage, &j.Needs); err != nil {
 			return nil, nil, err
 		}
 		jobs = append(jobs, j)
@@ -1260,12 +1276,14 @@ func (s *Store) AcquireJob(ctx context.Context, req proto.AcquireRequest) (*prot
 		 RETURNING j.id, j.pipeline_id, j.name, j.image, j.script, j.env,
 		           j.artifact_paths, j.report_junit, j.cache_paths, j.cache_key, j.cache_key_files,
 		           j.cache_policy, j.services, j.network, j.environment, j.timeout_seconds,
-		           p.repo, p.ref, p.sha, p.source, p.triggered_by, p.commit_author, p.commit_message`,
+		           p.repo, p.ref, p.sha, p.source, p.triggered_by, p.commit_author, p.commit_message,
+		           j.report_dotenv, j.coverage_report`,
 		req.RunnerID, runnerTags, candidate).
 		Scan(&j.ID, &j.PipelineID, &j.Name, &image, &j.Script, &envRaw,
 			&artifactsRaw, &reportJUnitRaw, &cachePathsRaw, &j.CacheKey, &cacheKeyFilesRaw,
 			&cachePolicy, &servicesRaw, &j.Network, &environment, &j.TimeoutSeconds, &repo, &ref, &sha,
-			&source, &triggeredBy, &commitAuthor, &commitMessage)
+			&source, &triggeredBy, &commitAuthor, &commitMessage,
+			&j.ReportDotenvPath, &j.CoverageReportPath)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -1302,6 +1320,14 @@ func (s *Store) AcquireJob(ctx context.Context, req proto.AcquireRequest) (*prot
 	})
 	for k, v := range resolved {
 		merged[k] = v
+	}
+	// Dotenv reports of the jobs this one needs (GitLab artifacts:reports:dotenv),
+	// oldest first so a later job's value wins. A promotion's deploy job gets
+	// the source build's DEPLOY_VERSION / DEPLOY_DIGEST this way.
+	if denv, err := s.neededDotenv(ctx, j.ID); err == nil {
+		for k, v := range denv {
+			merged[k] = v
+		}
 	}
 	jobEnv := map[string]string{}
 	_ = json.Unmarshal(envRaw, &jobEnv)
@@ -1494,16 +1520,21 @@ func (s *Store) CompleteJob(ctx context.Context, jobID int64, status string, exi
 		}
 	}
 	if status == "success" && environment != nil && *environment != "" {
+		envURL, outEnv, err := s.jobOutputEnv(ctx, tx, jobID)
+		if err != nil {
+			return "", "", err
+		}
+		url, version, digest := deployFacts(envURL, outEnv, sha)
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO deployments
-			     (repo, environment, sha, ref, pipeline_id, job_id, deployed_by, status)
+			     (repo, environment, sha, ref, pipeline_id, job_id, deployed_by, status, url, version, digest, promoted_from)
 			 VALUES ($1,$2,$3,$4,$5,$6,
 			         COALESCE((SELECT approver FROM job_approvals
 			                   WHERE job_id=$6 AND verdict='approved'
 			                   ORDER BY id DESC LIMIT 1), $7),
-			         'success')
+			         'success', $8, $9, $10, (SELECT promoted_from FROM pipelines WHERE id=$5))
 			 ON CONFLICT (job_id) DO NOTHING`,
-			repo, *environment, sha, ref, pipelineID, jobID, triggeredBy); err != nil {
+			repo, *environment, sha, ref, pipelineID, jobID, triggeredBy, url, version, digest); err != nil {
 			return "", "", err
 		}
 	}

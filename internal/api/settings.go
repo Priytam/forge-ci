@@ -39,6 +39,8 @@ func (s *Server) registerSettingsRoutes() {
 
 	// Test reports (JUnit). The runner POSTs XML; the server parses + stores it.
 	m.HandleFunc("POST /api/v1/runner/jobs/{id}/report", s.uploadReport)
+	m.HandleFunc("POST /api/v1/runner/jobs/{id}/dotenv", s.uploadDotenv)
+	m.HandleFunc("POST /api/v1/runner/jobs/{id}/coverage", s.uploadCoverage)
 	m.HandleFunc("GET /api/v1/jobs/{id}/report", s.getReport)
 
 	// Cache (runner restore/save; shared across pipelines per repo+key).
@@ -760,4 +762,64 @@ func (s *Server) deleteApproverGroup(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, "approver-group.delete", name, "", "ok", nil)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// uploadDotenv stores a job's dotenv report (artifacts: reports: dotenv:).
+// The runner sends it after a successful script and before it reports
+// completion, so the deployment record and the jobs that need this one see it.
+func (s *Server) uploadDotenv(w http.ResponseWriter, r *http.Request) {
+	if !s.requireRunnerAuth(w, r) {
+		return
+	}
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 256<<10))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "failed to read dotenv body")
+		return
+	}
+	vars, err := store.ParseDotenv(string(body))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.store.SetJobDotenv(r.Context(), id, vars); errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusConflict, "job is not running")
+		return
+	} else if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to store dotenv")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"variables": len(vars)})
+}
+
+// uploadCoverage reads overall coverage from a Cobertura report
+// (artifacts: reports: coverage_report:).
+func (s *Server) uploadCoverage(w http.ResponseWriter, r *http.Request) {
+	if !s.requireRunnerAuth(w, r) {
+		return
+	}
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxReportBytes))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "failed to read coverage body")
+		return
+	}
+	pct, err := store.ParseCobertura(string(body))
+	if err != nil {
+		writeErr(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	if err := s.store.SetJobCoverage(r.Context(), id, pct); err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to store coverage")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"coverage": pct})
 }

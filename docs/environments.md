@@ -26,6 +26,88 @@ When `deploy-prod` succeeds, a row is inserted into `deployments`
 (`repo, environment, sha, ref, pipeline_id, job_id, deployed_by, deployed_at,
 status=success`).
 
+### URL, version and digest
+
+A deployment also records **where** it is reachable and **what** was deployed,
+whatever the target — a Kubernetes cluster, a VM fleet, a serverless function,
+a static site. Forge doesn't need to know; the job says:
+
+```yaml
+jobs:
+  build:
+    stage: build
+    script:
+      - docker buildx build --push -t "$REGISTRY/shop:$CI_COMMIT_SHORT_SHA" --metadata-file meta.json .
+      - echo "DEPLOY_VERSION=1.4.$CI_PIPELINE_ID" >> build.env
+      - echo "DEPLOY_DIGEST=$(jq -r '."containerimage.digest"' meta.json)" >> build.env
+    artifacts:
+      reports:
+        dotenv: build.env          # KEY=VALUE, passed to the jobs that need this one
+  deploy-staging:
+    stage: deploy
+    needs: [build]
+    environment:
+      name: staging
+      url: https://staging.$APP_DOMAIN   # $VARS expanded when the deployment is recorded
+    script:
+      - ./deploy.sh "$REGISTRY/shop@$DEPLOY_DIGEST"   # deploy by digest, not by tag
+```
+
+| Field | From (first that is set) |
+|---|---|
+| `url` | the job's `DEPLOY_URL` (or `CI_ENVIRONMENT_URL`) dotenv variable, then `environment: url:` with variables expanded. Only `http(s)://` links are kept. |
+| `version` | `DEPLOY_VERSION`, else the short commit sha |
+| `digest` | `DEPLOY_DIGEST` — an image digest, artifact checksum, package version id… anything immutable |
+
+`DEPLOY_*` can come from the deploy job's own dotenv or be inherited from a
+job it needs (the build above). The environments page shows the version, a
+link to the URL, and the digest on each card and in the history.
+
+**Dotenv rules:** `KEY=VALUE` lines (`export` and quotes allowed, `#`
+comments), at most 100 variables of 4 KiB each; `CI_*` and `FORGE_*` are
+reserved and refused so a job can't spoof Forge's own variables. Variables
+flow to every job that `needs:` the reporting job (oldest first; a later
+job's value wins), before repo variables and the job's own `variables:`.
+
+## Promotion — ship the build you tested
+
+`POST /api/v1/environments/{repo}/{env}/promote` with
+`{"from_environment": "staging"}` (its current deployment) or
+`{"deployment_id": 123}` redeploys an earlier deployment's **build** to `env`
+— the **Promote →** button on each environment card does this. Forge:
+
+1. takes the source deployment's pipeline — its exact config, commit and ref;
+2. compiles it and keeps **only the jobs that deploy to `env`**;
+3. points their `needs:` on anything else (build, image push, tests) at the
+   source pipeline's **successful jobs**, so they download the same artifacts
+   and inherit the same dotenv — `DEPLOY_VERSION`, `DEPLOY_DIGEST`, image
+   references. Nothing is rebuilt.
+
+The promotion is an ordinary pipeline (`source: promotion`,
+`CI_PIPELINE_SOURCE=promotion` at run time) and goes through everything a
+deploy does: manual gates, approvals, branch rules, freezes, resource groups.
+Its jobs also see `CI_PROMOTION=true`, `CI_PROMOTED_FROM_ENVIRONMENT`,
+`CI_PROMOTED_FROM_DEPLOYMENT_ID` and `CI_PROMOTED_FROM_PIPELINE_ID`. Rules are
+evaluated as they were for the source pipeline, so a deploy job that existed
+then exists now. The resulting deployment records `promoted_from`, and
+promoting again (staging → production → dr) still reuses the **original**
+build.
+
+Errors are explicit: promoting to the same environment (use rollback), a
+config with no job for the target, or a deploy job that needs a job which
+didn't succeed in the source pipeline. Developers (`operate` on the repo) may
+promote; protected environments still need their approvals.
+
+## Cancelling superseded deploys
+
+Tick **Cancel superseded** on an environment (Admin → Environments &
+branches) and a deploy to it that is still **waiting** — queued, awaiting
+approval, behind a freeze or a resource group — is canceled once a deploy from
+a **newer pipeline** of the same repo has started or succeeded there. The job
+shows `superseded: pipeline #N has a newer deploy to production`, and its
+dependents are canceled with it. A deploy that is already running is never
+touched. Off by default; the starter registry turns it on for production.
+
 ### Where it's recorded, and why
 
 Recording happens **in `store.CompleteJob`, inside the same transaction as the

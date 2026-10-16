@@ -55,7 +55,7 @@ func mergeSpec(parent, child jobSpec) jobSpec {
 	if child.Image != "" {
 		out.Image = child.Image
 	}
-	if child.Environment != "" {
+	if child.Environment.Name != "" {
 		out.Environment = child.Environment
 	}
 	if child.Timeout != "" {
@@ -102,6 +102,15 @@ func mergeSpec(parent, child jobSpec) jobSpec {
 	}
 	if child.Artifacts.Reports.JUnit != nil {
 		out.Artifacts.Reports.JUnit = child.Artifacts.Reports.JUnit
+	}
+	if child.Artifacts.Reports.Dotenv != "" {
+		out.Artifacts.Reports.Dotenv = child.Artifacts.Reports.Dotenv
+	}
+	if child.Artifacts.Reports.CoverageReport != nil {
+		out.Artifacts.Reports.CoverageReport = child.Artifacts.Reports.CoverageReport
+	}
+	if child.Coverage != "" {
+		out.Coverage = child.Coverage
 	}
 	// Services: child replaces the whole list when it declares one (arrays are
 	// replaced, not element-merged — same rule as script/needs/tags).

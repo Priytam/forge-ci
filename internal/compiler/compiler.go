@@ -75,6 +75,10 @@ const (
 	SourcePush         = "push"
 	SourceSchedule     = "schedule"
 	SourceMergeRequest = "merge_request" // GitHub pull_request / Bitbucket pull-request
+	// SourcePromotion marks a pipeline that redeploys an earlier deployment's
+	// build to another environment. Its rules are evaluated with the source
+	// pipeline's source; at run time CI_PIPELINE_SOURCE is "promotion".
+	SourcePromotion = "promotion"
 )
 
 const (
@@ -87,7 +91,7 @@ type jobSpec struct {
 	Image        string            `yaml:"image"`
 	Script       []string          `yaml:"script"`
 	Needs        []string          `yaml:"needs"`
-	Environment  string            `yaml:"environment"`
+	Environment  envSpec           `yaml:"environment"` // name, or {name, url}
 	Variables    map[string]string `yaml:"variables"`
 	Only         []string          `yaml:"only"`
 	Except       []string          `yaml:"except"`
@@ -109,6 +113,28 @@ type jobSpec struct {
 	// RunnerAffinity: prefer the runner that last ran this job successfully
 	// (its local caches are warm). Opt-in.
 	RunnerAffinity bool `yaml:"runner_affinity"`
+	// Coverage is a /regex/ whose first match in the job log (first capture
+	// group, else the whole match) is the job's coverage percentage.
+	Coverage string `yaml:"coverage"`
+}
+
+// envSpec is a job's environment: a bare name, or GitLab's long form with
+// the URL the deployment is reachable at (it may use $VARIABLES, including
+// ones the job writes to its dotenv report).
+//
+//	environment: production
+//	environment: {name: production, url: "https://$DEPLOY_HOST"}
+type envSpec struct {
+	Name string `yaml:"name"`
+	URL  string `yaml:"url"`
+}
+
+func (e *envSpec) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.ScalarNode {
+		return n.Decode(&e.Name)
+	}
+	type plain envSpec
+	return n.Decode((*plain)(e))
 }
 
 type artifactSpec struct {
@@ -121,6 +147,18 @@ type artifactSpec struct {
 // and parsed by the server into per-job summaries. Only JUnit is supported.
 type reportsSpec struct {
 	JUnit stringOrSlice `yaml:"junit"` // one or more workspace globs of JUnit XML
+	// Dotenv is a KEY=VALUE file the job writes. Its variables are passed to
+	// the jobs that need this one, and DEPLOY_URL / DEPLOY_VERSION /
+	// DEPLOY_DIGEST fill in the deployment record of an environment job.
+	Dotenv string `yaml:"dotenv"`
+	// CoverageReport is a coverage file; Cobertura XML (what most tools can
+	// write: coverage.py, gocover-cobertura, jacoco converters, istanbul).
+	CoverageReport *coverageReportSpec `yaml:"coverage_report"`
+}
+
+type coverageReportSpec struct {
+	CoverageFormat string `yaml:"coverage_format"` // cobertura
+	Path           string `yaml:"path"`
 }
 
 // cacheSpec models a per-job cache: block (GitLab-style):
@@ -367,6 +405,15 @@ type CompiledJob struct {
 	// falls back to RETENTION_DAYS). The server stamps artifacts.expires_at =
 	// now()+this at upload time.
 	ArtifactExpireSeconds int
+	// EnvironmentURL is environment: url: as written ($VARS expanded when the
+	// deployment is recorded).
+	EnvironmentURL string
+	// ReportDotenv is the workspace path of the job's dotenv report ("" = none).
+	ReportDotenv string
+	// CoverageRegex extracts coverage from the log (Go regexp, "" = none);
+	// CoverageReportPath is a Cobertura file to read it from instead.
+	CoverageRegex      string
+	CoverageReportPath string
 	// ReportJUnit are workspace globs of JUnit XML the runner collects after a
 	// successful job; the server parses them into a per-job test summary.
 	ReportJUnit []string
@@ -695,6 +742,24 @@ func CompileWith(yml, ref, source string, opts CompileOpts) ([]CompiledJob, erro
 			return nil, err
 		}
 
+		coverageRegex, err := validateCoverageRegex(inst.orig, spec.Coverage)
+		if err != nil {
+			return nil, err
+		}
+		coveragePath := ""
+		if cr := spec.Artifacts.Reports.CoverageReport; cr != nil {
+			if f := strings.ToLower(cr.CoverageFormat); f != "" && f != "cobertura" {
+				return nil, fmt.Errorf("job %q: coverage_report format %q is not supported (use cobertura)", inst.orig, cr.CoverageFormat)
+			}
+			if cr.Path == "" || strings.HasPrefix(cr.Path, "/") || strings.HasPrefix(cr.Path, "..") {
+				return nil, fmt.Errorf("job %q: coverage_report needs a workspace-relative path", inst.orig)
+			}
+			coveragePath = cr.Path
+		}
+		if d := spec.Artifacts.Reports.Dotenv; d != "" && (strings.HasPrefix(d, "/") || strings.HasPrefix(d, "..")) {
+			return nil, fmt.Errorf("job %q: reports.dotenv needs a workspace-relative path", inst.orig)
+		}
+
 		// Retry precedence: job retry > YAML default.retry > 0 (no retry).
 		retry, err := validateRetry(fmt.Sprintf("job %q", inst.orig), spec.Retry)
 		if err != nil {
@@ -737,16 +802,17 @@ func CompileWith(yml, ref, source string, opts CompileOpts) ([]CompiledJob, erro
 		}
 
 		out = append(out, CompiledJob{
-			Name:          inst.name,
-			Stage:         spec.Stage,
-			StageIdx:      inst.stageIdx,
-			Image:         spec.Image,
-			Script:        strings.Join(spec.Script, "\n"),
-			Env:           inst.env,
-			Environment:   spec.Environment,
-			Needs:         needs,
-			Tags:          spec.Tags,
-			ArtifactPaths: spec.Artifacts.Paths,
+			Name:           inst.name,
+			Stage:          spec.Stage,
+			StageIdx:       inst.stageIdx,
+			Image:          spec.Image,
+			Script:         strings.Join(spec.Script, "\n"),
+			Env:            inst.env,
+			Environment:    spec.Environment.Name,
+			EnvironmentURL: spec.Environment.URL,
+			Needs:          needs,
+			Tags:           spec.Tags,
+			ArtifactPaths:  spec.Artifacts.Paths,
 
 			ArtifactExpireSeconds: expireSec,
 			ReportJUnit:           spec.Artifacts.Reports.JUnit,
@@ -762,6 +828,9 @@ func CompileWith(yml, ref, source string, opts CompileOpts) ([]CompiledJob, erro
 			Network:               network,
 			ResourceGroup:         resourceGroup,
 			RunnerAffinity:        spec.RunnerAffinity,
+			ReportDotenv:          spec.Artifacts.Reports.Dotenv,
+			CoverageRegex:         coverageRegex,
+			CoverageReportPath:    coveragePath,
 		})
 	}
 	return out, nil

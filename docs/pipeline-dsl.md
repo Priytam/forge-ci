@@ -594,6 +594,43 @@ failure**: the server records no report and the job still reports `success`.
 `reports.junit` is independent of `paths` — a job can publish a test report
 without archiving any other artifact.
 
+### `reports.dotenv` and `environment: url:`
+
+```yaml
+build:
+  artifacts:
+    reports:
+      dotenv: build.env        # KEY=VALUE file the job writes
+deploy:
+  needs: [build]
+  environment: {name: staging, url: "https://staging.$APP_DOMAIN"}
+```
+
+Dotenv variables are passed to the jobs that need the reporting job;
+`DEPLOY_URL`, `DEPLOY_VERSION` and `DEPLOY_DIGEST` fill in the deployment
+record. Details and limits: [environments.md](environments.md#url-version-and-digest).
+
+### Coverage — `coverage:` and `reports.coverage_report`
+
+```yaml
+unit:
+  script: [go test -coverprofile=c.out ./... && go tool cover -func=c.out]
+  coverage: '/total:\s+\(statements\)\s+(\d+\.\d+)%/'    # last match in the log wins
+python:
+  script: [pytest --cov --cov-report=xml]
+  artifacts:
+    reports:
+      coverage_report: {coverage_format: cobertura, path: coverage.xml}
+```
+
+`coverage:` is a `/regex/` applied to the job's (masked) log when it finishes;
+the first capture group (or the whole match) holds the percentage. A
+`coverage_report` in Cobertura XML — which coverage.py, gocover-cobertura,
+JaCoCo and Istanbul converters write — sets it from the report's overall
+`line-rate` instead. The pipeline shows the mean of its jobs; the repo's
+**Tests** page charts it over recent pipelines
+(`GET /api/v1/coverage?repo=&ref=&limit=`).
+
 ### Merge (`extends` / `include`)
 
 Each artifacts sub-field merges independently (child overrides when it sets it):

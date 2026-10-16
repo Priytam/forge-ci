@@ -133,12 +133,133 @@ func (s *Server) getEnvironmentSubtree(w http.ResponseWriter, r *http.Request) {
 
 // postEnvironmentSubtree serves POST .../environments/<repo>/<env>/rollback.
 func (s *Server) postEnvironmentSubtree(w http.ResponseWriter, r *http.Request) {
+	if repo, env, ok := parseEnvPath(r.URL.Path, "promote"); ok {
+		s.promote(w, r, repo, env)
+		return
+	}
 	repo, env, ok := parseEnvPath(r.URL.Path, "rollback")
 	if !ok {
 		writeErr(w, http.StatusNotFound, "not found")
 		return
 	}
 	s.rollback(w, r, repo, env)
+}
+
+// promote redeploys an earlier deployment's build to env without rebuilding:
+// a new pipeline at the same commit, from the exact config that built it,
+// containing only the jobs that deploy to env. Their needs on jobs outside
+// env (the build, the image push) point at the source pipeline's successful
+// jobs, so they download the same artifacts and inherit the same dotenv
+// (DEPLOY_VERSION, DEPLOY_DIGEST) — the thing that was tested is the thing
+// that ships. Approvals, freezes, branch rules and resource groups apply as
+// for any deploy.
+//
+//	POST /api/v1/environments/<repo>/<env>/promote
+//	{"from_environment": "staging"}   or   {"deployment_id": 123}
+func (s *Server) promote(w http.ResponseWriter, r *http.Request, repo, env string) {
+	if !s.requireOperate(w, r, repo) {
+		return
+	}
+	var req struct {
+		FromEnvironment string `json:"from_environment"`
+		DeploymentID    int64  `json:"deployment_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	policy, err := s.store.GetEnvPolicy(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to load environment policy")
+		return
+	}
+	target := policy.Canonical(env)
+	if req.FromEnvironment != "" {
+		req.FromEnvironment = policy.Canonical(req.FromEnvironment)
+	}
+	src, err := s.store.GetPromotionSource(r.Context(), repo, req.FromEnvironment, req.DeploymentID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "no successful deployment to promote from")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	d := src.Deployment
+	if d.Environment == target {
+		writeErr(w, http.StatusBadRequest, "source and target are the same environment (use rollback to redeploy)")
+		return
+	}
+	extra := map[string]string{
+		"CI_PROMOTION":                   "true",
+		"CI_PROMOTED_FROM_ENVIRONMENT":   d.Environment,
+		"CI_PROMOTED_FROM_DEPLOYMENT_ID": strconv.FormatInt(d.ID, 10),
+		"CI_PROMOTED_FROM_PIPELINE_ID":   strconv.FormatInt(d.PipelineID, 10),
+	}
+	ruleSource := src.PipelineSource
+	if ruleSource == "" || ruleSource == compiler.SourcePromotion {
+		ruleSource = compiler.SourceAPI
+	}
+	all, err := compiler.CompileWith(src.Config, d.Ref, ruleSource, compiler.CompileOpts{
+		Templates: s.store.TemplateResolver(r.Context(), repo), Includes: s.store.IncludeResolver(r.Context(), repo), Extra: extra,
+	})
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "the source pipeline's config no longer compiles: "+err.Error())
+		return
+	}
+	keep := map[string]bool{}
+	for _, j := range all {
+		if j.Environment != "" && policy.Canonical(j.Environment) == target {
+			keep[j.Name] = true
+		}
+	}
+	if len(keep) == 0 {
+		writeErr(w, http.StatusBadRequest, "the pipeline that built this deployment has no job for environment "+target)
+		return
+	}
+	jobs := []compiler.CompiledJob{}
+	external := map[string]int64{}
+	for _, j := range all {
+		if !keep[j.Name] {
+			continue
+		}
+		for _, need := range j.Needs {
+			if keep[need] {
+				continue
+			}
+			id, ok := src.SucceededJobs[need]
+			if !ok {
+				writeErr(w, http.StatusConflict, "job "+j.Name+" needs "+need+", which did not succeed in pipeline #"+
+					strconv.FormatInt(d.PipelineID, 10)+" — nothing to promote it from")
+				return
+			}
+			external[need] = id
+		}
+		jobs = append(jobs, j)
+	}
+	opts, err := compiler.Options(src.Config)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	p, err := s.store.CreatePipeline(r.Context(), proto.CreatePipelineRequest{
+		Repo: repo, Ref: d.Ref, SHA: d.SHA, Config: src.Config,
+		TriggeredBy:   s.sessionActor(r),
+		Source:        compiler.SourcePromotion,
+		CommitMessage: "Promote " + d.Version + " from " + d.Environment + " to " + target,
+		PromotedFrom:  d.ID, ExternalNeeds: external,
+	}, jobs, nil, false, opts.FailFast) // never auto-cancel: the source ref's pipelines are unrelated
+	if err != nil {
+		slog.Error("promote create pipeline", "err", err)
+		writeErr(w, http.StatusInternalServerError, "failed to create promotion pipeline")
+		return
+	}
+	s.audit(r, "environment.promote", strconv.FormatInt(p.ID, 10), repo, "ok", map[string]any{
+		"from_environment": d.Environment, "to_environment": target, "deployment_id": d.ID,
+		"sha": d.SHA, "version": d.Version, "digest": d.Digest, "new_pipeline_id": p.ID,
+	})
+	writeJSON(w, http.StatusCreated, map[string]any{"pipeline": p, "promoted_from": d})
 }
 
 // rollback re-deploys a prior deployment by creating a NEW pipeline at the

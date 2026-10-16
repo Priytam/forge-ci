@@ -18,6 +18,11 @@ type RegisteredEnv struct {
 	Aliases     []string `json:"aliases"`
 	AllowedRefs []string `json:"allowed_refs"` // glob patterns; empty = any branch
 	Description string   `json:"description"`
+	// CancelSuperseded: a deploy to this environment that is still waiting
+	// (queued, gated on approval or a freeze) is canceled once a deploy from a
+	// NEWER pipeline has started or succeeded here — an old build never lands
+	// on top of a newer one.
+	CancelSuperseded bool `json:"cancel_superseded"`
 }
 
 // EnvPolicy is the whole environment configuration of a server: the ordered
@@ -115,6 +120,15 @@ func (p *EnvPolicy) Resolve(name string) *RegisteredEnv {
 	return nil
 }
 
+// Canonical returns the registered name for name (an alias resolves to its
+// environment), or name itself when it isn't registered.
+func (p *EnvPolicy) Canonical(name string) string {
+	if e := p.Resolve(name); e != nil {
+		return e.Name
+	}
+	return name
+}
+
 // AllowsRef reports whether ref may deploy to e. A ref of the form
 // refs/heads/x is matched as x. '*' in a pattern matches any characters,
 // including '/', so release/* covers release/1.2 and release/2024/q1.
@@ -179,7 +193,7 @@ func (s *Store) GetEnvPolicy(ctx context.Context) (*EnvPolicy, error) {
 		return nil, err
 	}
 	rows, err := s.pool.Query(ctx,
-		`SELECT name, tier, aliases, allowed_refs, description
+		`SELECT name, tier, aliases, allowed_refs, description, cancel_superseded
 		 FROM environment_registry ORDER BY position, name`)
 	if err != nil {
 		return nil, err
@@ -187,7 +201,7 @@ func (s *Store) GetEnvPolicy(ctx context.Context) (*EnvPolicy, error) {
 	defer rows.Close()
 	for rows.Next() {
 		var e RegisteredEnv
-		if err := rows.Scan(&e.Name, &e.Tier, &e.Aliases, &e.AllowedRefs, &e.Description); err != nil {
+		if err := rows.Scan(&e.Name, &e.Tier, &e.Aliases, &e.AllowedRefs, &e.Description, &e.CancelSuperseded); err != nil {
 			return nil, err
 		}
 		p.Environments = append(p.Environments, e)
@@ -259,9 +273,9 @@ func (s *Store) SaveEnvPolicy(ctx context.Context, p EnvPolicy) error {
 	}
 	for i, e := range p.Environments {
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO environment_registry (name, position, tier, aliases, allowed_refs, description)
-			 VALUES ($1,$2,$3,$4,$5,$6)`,
-			e.Name, i, e.Tier, e.Aliases, e.AllowedRefs, e.Description); err != nil {
+			`INSERT INTO environment_registry (name, position, tier, aliases, allowed_refs, description, cancel_superseded)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+			e.Name, i, e.Tier, e.Aliases, e.AllowedRefs, e.Description, e.CancelSuperseded); err != nil {
 			return err
 		}
 	}

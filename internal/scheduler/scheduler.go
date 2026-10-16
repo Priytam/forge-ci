@@ -321,6 +321,7 @@ func (sc *Scheduler) step(ctx context.Context) {
 	}{
 		{"cancel_dead", sc.store.CancelDeadJobs},
 		{"fail_fast_cancel", sc.store.FailFastCancel},
+		{"cancel_superseded_deploys", sc.store.CancelSupersededDeploys},
 		{"promote_ready", sc.store.PromoteReadyJobs},
 		{"expire_blocked", sc.store.ExpireBlockedJobs},
 		{"fail_overdue", sc.store.FailOverdueJobs},

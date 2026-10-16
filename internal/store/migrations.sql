@@ -870,3 +870,27 @@ CREATE TABLE IF NOT EXISTS template_catalog (
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (name, version)
 );
+
+-- Deploy records and promotion. A job's environment may carry a URL
+-- (environment: {name, url}); a job may write a dotenv report whose variables
+-- flow to the jobs that need it and whose DEPLOY_URL / DEPLOY_VERSION /
+-- DEPLOY_DIGEST fill the deployment record. A promotion pipeline redeploys an
+-- earlier deployment's build to another environment (pipelines.promoted_from
+-- = that deployment), and its deployment remembers where it came from.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS environment_url TEXT NOT NULL DEFAULT '';
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS report_dotenv   TEXT NOT NULL DEFAULT '';
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS dotenv          JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE deployments ADD COLUMN IF NOT EXISTS url     TEXT NOT NULL DEFAULT '';
+ALTER TABLE deployments ADD COLUMN IF NOT EXISTS version TEXT NOT NULL DEFAULT '';
+ALTER TABLE deployments ADD COLUMN IF NOT EXISTS digest  TEXT NOT NULL DEFAULT '';
+ALTER TABLE deployments ADD COLUMN IF NOT EXISTS promoted_from BIGINT REFERENCES deployments(id) ON DELETE SET NULL;
+ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS promoted_from BIGINT REFERENCES deployments(id) ON DELETE SET NULL;
+
+-- Coverage: from a coverage: /regex/ over the job log, or a Cobertura report.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS coverage_regex  TEXT NOT NULL DEFAULT '';
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS coverage_report TEXT NOT NULL DEFAULT '';
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS coverage        NUMERIC(6,2);
+
+-- Per environment: cancel a waiting deploy once a newer pipeline has started
+-- or finished deploying there (opt-in; see Store.CancelSupersededDeploys).
+ALTER TABLE environment_registry ADD COLUMN IF NOT EXISTS cancel_superseded BOOLEAN NOT NULL DEFAULT FALSE;

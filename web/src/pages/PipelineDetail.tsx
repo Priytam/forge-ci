@@ -295,6 +295,11 @@ export default function PipelineDetail() {
             {sourceLabel(pipeline.source) && (
               <span className="source-chip">{sourceLabel(pipeline.source)}</span>
             )}
+            {pipeline.coverage != null && (
+              <span className="source-chip" title="Mean coverage of the jobs that report one">
+                coverage {pipeline.coverage.toFixed(1)}%
+              </span>
+            )}
           </div>
         </div>
         <div className="pipeline-head-side">
@@ -375,6 +380,7 @@ export default function PipelineDetail() {
                   allowedFail ? "failed (allowed to fail)" : job.status,
                   isTerminalStatus(job.status) && dur ? dur : null,
                   job.environment,
+                  job.coverage != null ? `coverage ${job.coverage}%` : null,
                   job.status_reason,
                 ]
                   .filter(Boolean)
@@ -407,6 +413,11 @@ export default function PipelineDetail() {
                       {job.allow_failure && (
                         <span className="allowfail-tag" title="allowed to fail">
                           AF
+                        </span>
+                      )}
+                      {job.coverage != null && (
+                        <span className="allowfail-tag" title={`coverage ${job.coverage}%`}>
+                          {Math.round(job.coverage)}%
                         </span>
                       )}
                     </div>

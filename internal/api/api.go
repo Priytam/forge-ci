@@ -1025,6 +1025,12 @@ func (s *Server) complete(w http.ResponseWriter, r *http.Request) {
 	// backend only; no-op for postgres). Best-effort — the scheduler safety-net
 	// sweep re-archives anything missed.
 	if final == "success" || final == "failed" || final == "canceled" {
+		// coverage: /regex/ — read from the finished (masked) log.
+		if text, err := s.logs.FullText(r.Context(), id); err == nil {
+			if err := s.store.CoverageFromLog(r.Context(), id, text); err != nil {
+				slog.Warn("coverage from log", "err", err, "job", id)
+			}
+		}
 		if err := s.logs.Archive(r.Context(), id); err != nil {
 			slog.Error("archive log", "err", err, "job", id)
 		}

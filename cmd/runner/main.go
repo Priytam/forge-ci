@@ -12,6 +12,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -365,6 +366,15 @@ func runJob(execCtx, drainCtx context.Context, c *client, exec executor.Executor
 	// them after a successful job so the server can parse pass/fail counts.
 	if status == "success" && len(job.ReportJUnitPaths) > 0 {
 		uploadJUnitReports(c, logs, job, workdir)
+	}
+	// Job outputs: the dotenv report (deploy URL/version/digest and variables
+	// for later jobs) and a coverage file. Sent before completion, which is
+	// when the server writes the deployment record.
+	if status == "success" && job.ReportDotenvPath != "" {
+		uploadWorkspaceFile(c, logs, job, workdir, job.ReportDotenvPath, "dotenv", "text/plain")
+	}
+	if status == "success" && job.CoverageReportPath != "" {
+		uploadWorkspaceFile(c, logs, job, workdir, job.CoverageReportPath, "coverage", "application/xml")
 	}
 	finish(status, exitCode)
 }
@@ -817,6 +827,42 @@ func uploadJUnitReports(c *client, logs *logStreamer, job *proto.RunnerJob, work
 		return
 	}
 	logs.printf("reports: uploaded %d junit file(s)\n", matched)
+}
+
+// uploadWorkspaceFile posts one workspace file to /runner/jobs/{id}/<kind>.
+// A missing file or rejected upload is logged, never a job failure.
+func uploadWorkspaceFile(c *client, logs *logStreamer, job *proto.RunnerJob, workdir, rel, kind, contentType string) {
+	clean := filepath.Clean(strings.TrimSpace(rel))
+	if clean == "." || filepath.IsAbs(clean) || strings.HasPrefix(clean, "..") {
+		logs.printf("reports: skipping unsafe %s path %q\n", kind, rel)
+		return
+	}
+	data, err := os.ReadFile(filepath.Join(workdir, clean))
+	if err != nil {
+		logs.printf("reports: %s file %q not found\n", kind, rel)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		fmt.Sprintf("%s/api/v1/runner/jobs/%d/%s", c.base, job.ID, kind), bytes.NewReader(data))
+	if err != nil {
+		logs.printf("reports: %s request error: %v\n", kind, err)
+		return
+	}
+	req.Header.Set("Content-Type", contentType)
+	resp, err := c.do(req)
+	if err != nil {
+		logs.printf("reports: %s upload failed: %v\n", kind, err)
+		return
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode >= 300 {
+		logs.printf("reports: %s rejected (%d): %s\n", kind, resp.StatusCode, strings.TrimSpace(string(body)))
+		return
+	}
+	logs.printf("reports: %s uploaded: %s\n", kind, strings.TrimSpace(string(body)))
 }
 
 // logStreamer batches log bytes and flushes them to the server periodically.

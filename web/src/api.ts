@@ -22,6 +22,10 @@ export interface StageStatus {
 
 export interface Pipeline {
   id: number;
+  /** mean coverage of the jobs that report one */
+  coverage?: number;
+  /** deployment a promotion pipeline redeploys */
+  promoted_from?: number;
   repo: string;
   ref: string;
   sha: string;
@@ -71,6 +75,8 @@ export function triggerVerb(source?: string): string {
       return "opened the PR";
     case "schedule":
       return "scheduled run";
+    case "promotion":
+      return "promoted a build";
     default:
       return "started this run";
   }
@@ -83,6 +89,8 @@ export function sourceLabel(source?: string): string {
       return "merge request";
     case "schedule":
       return "scheduled";
+    case "promotion":
+      return "promotion";
     default:
       return "";
   }
@@ -90,6 +98,8 @@ export function sourceLabel(source?: string): string {
 
 export interface Job {
   id: number;
+  /** coverage percentage, when the job reports one */
+  coverage?: number;
   pipeline_id: number;
   name: string;
   stage: string;
@@ -665,19 +675,21 @@ export interface Deployment {
   deployed_by: string;
   deployed_at: string;
   status: string;
+  /** where it's reachable (environment: url:, or the job's DEPLOY_URL) */
+  url?: string;
+  /** DEPLOY_VERSION from the job, else the short sha */
+  version?: string;
+  /** immutable build identity (image digest, checksum) when reported */
+  digest?: string;
+  /** deployment this one was promoted from */
+  promoted_from?: number;
 }
 
 export interface Environment {
   /** the environment name (server field is `environment`) */
   environment: string;
   repo?: string;
-  current: {
-    sha: string;
-    ref: string;
-    pipeline_id: number;
-    deployed_by: string;
-    deployed_at: string;
-  } | null;
+  current: Deployment | null;
   deployment_count: number;
   drift: "in_sync" | "drifted" | "unknown";
   ref_tip_sha?: string;
@@ -730,6 +742,28 @@ export async function listDeployments(
   const total = Number(res.headers.get("X-Total-Count") ?? "0");
   const items = (await res.json()) as Deployment[];
   return { items, total };
+}
+
+/** Redeploys an earlier deployment's build (same commit, same artifacts) to env. */
+export function promoteToEnvironment(
+  repo: string,
+  env: string,
+  from: { from_environment?: string; deployment_id?: number }
+): Promise<{ pipeline: Pipeline; promoted_from: Deployment }> {
+  return postJSON<{ pipeline: Pipeline; promoted_from: Deployment }>(envPath(repo, env, "promote"), from);
+}
+
+export interface CoveragePoint {
+  pipeline_id: number;
+  ref: string;
+  sha: string;
+  coverage: number;
+  created_at: string;
+}
+
+export function getCoverageTrend(repo: string, ref?: string): Promise<CoveragePoint[]> {
+  const qs = `?repo=${encodeURIComponent(repo)}${ref ? `&ref=${encodeURIComponent(ref)}` : ""}`;
+  return getJSON<{ points: CoveragePoint[] }>(`/coverage${qs}`).then((r) => r.points ?? []);
 }
 
 export function rollbackEnvironment(
@@ -1491,6 +1525,8 @@ export interface RegisteredEnv {
   /** branch globs allowed to deploy here; empty = any branch */
   allowed_refs: string[];
   description: string;
+  /** cancel a waiting deploy once a newer pipeline has deployed here */
+  cancel_superseded?: boolean;
 }
 
 export interface EnvPolicy {

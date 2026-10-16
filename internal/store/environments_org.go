@@ -230,7 +230,7 @@ func (s *Store) EnvMatrix(ctx context.Context, f EnvMatrixFilter, limit, offset 
 	// Current (latest successful) deployment per repo × env.
 	drows, err := s.pool.Query(ctx,
 		`SELECT DISTINCT ON (repo, environment)
-		        id, repo, environment, sha, ref, pipeline_id, job_id, deployed_by, deployed_at, status
+		        id, repo, environment, sha, ref, pipeline_id, job_id, deployed_by, deployed_at, status, url, version, digest, promoted_from
 		 FROM deployments WHERE repo = ANY($1) AND status = 'success'
 		 ORDER BY repo, environment, id DESC`, repos)
 	if err != nil {
@@ -239,7 +239,7 @@ func (s *Store) EnvMatrix(ctx context.Context, f EnvMatrixFilter, limit, offset 
 	for drows.Next() {
 		var d proto.Deployment
 		if err := drows.Scan(&d.ID, &d.Repo, &d.Environment, &d.SHA, &d.Ref, &d.PipelineID,
-			&d.JobID, &d.DeployedBy, &d.DeployedAt, &d.Status); err != nil {
+			&d.JobID, &d.DeployedBy, &d.DeployedAt, &d.Status, &d.URL, &d.Version, &d.Digest, &d.PromotedFrom); err != nil {
 			drows.Close()
 			return nil, 0, err
 		}
