@@ -20,6 +20,7 @@ const PATHS: Record<string, string> = {
   expand: "M6 4l4 4-4 4",
   plus: "M8 3v10M3 8h10",
   play: "M5 3.5v9l7-4.5-7-4.5Z",
+  bell: "M4 11V7a4 4 0 0 1 8 0v4l1.5 1.5h-11L4 11ZM6.5 13.5a1.5 1.5 0 0 0 3 0",
 };
 
 export type IconName = keyof typeof PATHS;

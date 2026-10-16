@@ -19,7 +19,6 @@ package api
 
 import (
 	"encoding/json"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -232,9 +231,8 @@ func arnPrincipal(arn string) string {
 // a header, so the payload is classified before dispatch. Unknown events are
 // acknowledged (202) and ignored.
 func (s *Server) codecommitWebhook(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "unreadable body")
+	body, ok := s.readWebhookBody(w, r)
+	if !ok {
 		return
 	}
 	switch codeCommitEventKind(body) {

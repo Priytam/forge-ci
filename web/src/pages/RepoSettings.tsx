@@ -41,6 +41,7 @@ import {
   type Schedule,
   type Variable,
 } from "../api";
+import LintPanel from "../components/LintPanel";
 import { usePoll } from "../hooks/usePoll";
 
 const MASKED_PLACEHOLDER = "********************";
@@ -917,6 +918,8 @@ function ConfigSection({ repo }: { repo: string }) {
         spellCheck={false}
         placeholder="stages: [build, test, deploy]&#10;jobs:&#10;  ..."
       />
+
+      <LintPanel config={text} repo={repo} />
 
       {actionError && <div className="error-banner">{actionError}</div>}
       {pushedVersion !== null && (

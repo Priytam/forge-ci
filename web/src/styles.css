@@ -4001,3 +4001,52 @@ textarea.yaml-input,
     text-overflow: ellipsis;
   }
 }
+
+/* Config validation */
+.lint-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 0 12px;
+}
+.lint-panel .filter-bar {
+  margin-bottom: 0;
+  align-items: center;
+}
+.lint-ref {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.lint-ref input {
+  width: 160px;
+  font-family: var(--mono);
+}
+.lint-error {
+  margin: 0;
+  padding: 8px 12px;
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+  white-space: pre-wrap;
+  color: var(--danger-fg);
+  background: color-mix(in srgb, var(--danger) 8%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
+  border-radius: var(--radius);
+}
+
+/* Admin settings forms */
+.card.settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 820px;
+}
+.card.settings-form h2 {
+  margin: 0;
+}
+.card.settings-form .form-row .field {
+  flex: 1 1 180px;
+}
+.card.settings-form > .btn {
+  align-self: flex-start;
+}

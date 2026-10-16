@@ -19,6 +19,7 @@ import ApiTokens from "./pages/ApiTokens";
 import Jobs from "./pages/Jobs";
 import EnvironmentBoard from "./pages/EnvironmentBoard";
 import AdminEnvironments from "./pages/AdminEnvironments";
+import AdminNotifications from "./pages/AdminNotifications";
 import Environments from "./pages/Environments";
 import TestHistory from "./pages/TestHistory";
 import Shell from "./components/Shell";
@@ -49,6 +50,7 @@ export default function App() {
           <Route path="/login" element={<Login />} />
           <Route path="/admin/sso" element={<AdminSso />} />
           <Route path="/admin/environments" element={<AdminEnvironments />} />
+          <Route path="/admin/notifications" element={<AdminNotifications />} />
           <Route path="/admin/audit" element={<AdminAudit />} />
           <Route path="/admin/runner-tokens" element={<AdminRunnerTokens />} />
           <Route path="/pipelines" element={<AllPipelines />} />

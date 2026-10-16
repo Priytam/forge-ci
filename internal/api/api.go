@@ -43,6 +43,7 @@ type Server struct {
 	maxJobLogBytes   int64  // MAX_JOB_LOG_BYTES
 	maxArtifactBytes int64  // MAX_ARTIFACT_BYTES
 	maxCacheBytes    int64  // MAX_CACHE_BYTES
+	maxWebhookBytes  int64  // WEBHOOK_MAX_BYTES
 }
 
 func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
@@ -55,6 +56,7 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 		maxJobLogBytes:   envBytes("MAX_JOB_LOG_BYTES", defaultMaxJobLogBytes),
 		maxArtifactBytes: envBytes("MAX_ARTIFACT_BYTES", defaultMaxArtifactByte),
 		maxCacheBytes:    envBytes("MAX_CACHE_BYTES", defaultMaxCacheByte),
+		maxWebhookBytes:  envBytes("WEBHOOK_MAX_BYTES", defaultMaxWebhookBytes),
 	}
 	srv.initRunnerAuth()
 	m := srv.mux
@@ -73,6 +75,7 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 	m.HandleFunc("POST /api/v1/jobs/{id}/cancel", srv.cancelJob)
 	m.HandleFunc("POST /api/v1/jobs/{id}/play", srv.playJob)
 	m.HandleFunc("GET /api/v1/permissions", srv.permissions)
+	m.HandleFunc("POST /api/v1/lint", srv.lint)
 	m.HandleFunc("GET /api/v1/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -93,6 +96,7 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 	srv.registerAPITokenRoutes()
 	srv.registerPipelineViewRoutes()
 	srv.registerOrgViewRoutes()
+	srv.registerNotificationRoutes()
 	srv.registerAuditRoutes()
 	srv.registerOIDCRoutes()
 	srv.registerTestHistoryRoutes()

@@ -716,3 +716,41 @@ The compiler rejects, with clear messages:
   over-deep include nesting.
 - `cache:` with `paths` but no `key`, a `key`/`policy` with no `paths`, an empty
   `key.files` list, or an invalid `policy` (not `pull`/`push`/`pull-push`).
+
+## Predefined variables in jobs
+
+Every job's environment carries these, set by the server when a runner picks
+the job up (all executors). Repo variables and the job's own `variables:`
+override them, as in GitLab.
+
+| Variable | Value |
+|---|---|
+| `CI`, `FORGE_CI` | `true` |
+| `CI_COMMIT_SHA` / `CI_COMMIT_SHORT_SHA` | full / first 8 characters of the commit |
+| `CI_COMMIT_REF_NAME` | branch or tag name (`refs/heads/` / `refs/tags/` stripped) |
+| `CI_COMMIT_BRANCH` | branch name — **unset for tag pipelines** |
+| `CI_COMMIT_TAG` | tag name — **set only for tag pipelines** (ref `refs/tags/…`) |
+| `CI_COMMIT_REF_SLUG` | ref name lowercased, non-alphanumerics → `-`, max 63 chars (for image tags, hostnames) |
+| `CI_COMMIT_MESSAGE` / `CI_COMMIT_TITLE` | full message / first line |
+| `CI_COMMIT_AUTHOR` | who wrote the commit, when the provider says |
+| `CI_TRIGGERED_BY` (alias `GITLAB_USER_LOGIN`) | who started the run |
+| `CI_PIPELINE_ID`, `CI_PIPELINE_SOURCE` | pipeline id; `api` / `push` / `webhook` / `merge_request` / `schedule` |
+| `CI_JOB_ID`, `CI_JOB_NAME` | the job |
+| `CI_PROJECT_PATH`, `CI_PROJECT_NAMESPACE`, `CI_PROJECT_NAME` | `acme/cos`, `acme`, `cos` |
+| `CI_ENVIRONMENT_NAME` | the job's environment (registered name), when it has one |
+| `FORGE_OIDC_TOKEN` (`CI_JOB_JWT`) | per-job OIDC token for keyless cloud auth (docs/oidc.md) |
+
+## Validating a config without running it
+
+`POST /api/v1/lint {"config": "<yaml>", "ref": "main", "repo": "acme/cos"}`
+compiles the YAML exactly as a run on `ref` would — includes from the repo's
+templates, `rules:` evaluated for that branch, and this server's environment
+branch rules — and returns `{valid, error, stages, jobs}`. Each job lists its
+stage, environment, needs and, if the environment rules would refuse it on
+that branch, why (`refused`). Nothing is started. The **Validate** button on
+Run pipeline and on Settings → Pipeline config calls it.
+
+```sh
+curl -s -H "Authorization: Bearer $FORGE_TOKEN" -X POST $FORGE/api/v1/lint \
+  -d "$(jq -n --rawfile c .forge-ci.yml '{config:$c, ref:"main"}')"
+```

@@ -763,3 +763,11 @@ CREATE TABLE IF NOT EXISTS environment_registry (
 -- Why a job ended without running (e.g. its branch may not deploy to its
 -- environment). Shown on the job and pipeline pages.
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS status_reason TEXT NOT NULL DEFAULT '';
+
+-- Approval notifications: when a job starts waiting for environment approval
+-- the scheduler notifies the eligible approvers once (Slack and/or email, per
+-- the 'notifications' platform setting) and stamps this column. NULL = not
+-- notified yet; jobs blocked long ago are never back-filled.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS approval_notified_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS jobs_approval_unnotified_idx
+    ON jobs (blocked_at) WHERE status = 'blocked' AND NOT manual AND approval_notified_at IS NULL;

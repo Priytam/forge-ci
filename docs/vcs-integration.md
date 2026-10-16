@@ -362,6 +362,10 @@ Beyond branch pushes, Forge builds a pipeline for a **pull request** (GitHub) /
 - **Dedup and HMAC are unchanged.** GitHub PR deliveries are deduped by
   `X-GitHub-Delivery` and still HMAC-verified (`X-Hub-Signature-256`) when
   `WEBHOOK_SECRET` is set; Bitbucket by `X-Request-UUID`.
+- **Payload size:** webhook bodies up to `WEBHOOK_MAX_BYTES` (default 25 MiB,
+  GitHub's maximum) are accepted. A larger body is rejected with `413` — it is
+  never truncated, so the signature is always checked over the exact bytes the
+  provider signed.
 
 ## Commit status write-back
 

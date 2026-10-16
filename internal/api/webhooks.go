@@ -436,13 +436,39 @@ func (s *Server) dedupDelivery(w http.ResponseWriter, r *http.Request, provider,
 	return true, created
 }
 
+// defaultMaxWebhookBytes is GitHub's documented 25 MB payload cap. A body is
+// never truncated: truncating it silently broke the HMAC check for large pushes.
+const defaultMaxWebhookBytes = 25 << 20
+
+// readWebhookBody reads the whole request body up to WEBHOOK_MAX_BYTES
+// (default 25 MiB). A larger body is rejected with 413 rather than cut short,
+// so signature verification always runs over the exact bytes the provider
+// signed.
+func (s *Server) readWebhookBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	max := s.maxWebhookBytes
+	if max <= 0 {
+		max = defaultMaxWebhookBytes
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, max+1))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "unreadable body")
+		return nil, false
+	}
+	if int64(len(body)) > max {
+		slog.Warn("webhook body over limit", "bytes_limit", max, "path", r.URL.Path)
+		writeErr(w, http.StatusRequestEntityTooLarge,
+			"webhook payload exceeds WEBHOOK_MAX_BYTES ("+strconv.FormatInt(max, 10)+" bytes)")
+		return nil, false
+	}
+	return body, true
+}
+
 // githubWebhook handles push and pull_request events. If WEBHOOK_SECRET is set,
 // the X-Hub-Signature-256 HMAC is verified. The X-GitHub-Event header selects
 // the handler; any other event is acknowledged (202) and ignored.
 func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "unreadable body")
+	body, ok := s.readWebhookBody(w, r)
+	if !ok {
 		return
 	}
 	if secret := os.Getenv("WEBHOOK_SECRET"); secret != "" {
@@ -669,9 +695,8 @@ func bodyHash(body []byte) string {
 // payload shape). The X-Event-Key header selects the handler; any other event is
 // acknowledged (202) and ignored.
 func (s *Server) bitbucketWebhook(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "unreadable body")
+	body, ok := s.readWebhookBody(w, r)
+	if !ok {
 		return
 	}
 	switch r.Header.Get("X-Event-Key") {

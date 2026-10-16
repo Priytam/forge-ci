@@ -44,6 +44,7 @@ export const NAV: NavSection[] = [
     adminOnly: true,
     items: [
       { to: "/admin/environments", label: "Environments & branches", icon: "sliders", keywords: "registry aliases branch rules" },
+      { to: "/admin/notifications", label: "Notifications", icon: "bell", keywords: "slack email approval alert" },
       { to: "/admin/runner-tokens", label: "Runner tokens", icon: "key", keywords: "register runner" },
       { to: "/admin/sso", label: "SSO", icon: "lock", keywords: "login google microsoft github" },
       { to: "/admin/audit", label: "Audit log", icon: "audit", keywords: "history who" },
@@ -64,6 +65,7 @@ const ADMIN_TITLES: Record<string, string> = {
   audit: "Audit log",
   "runner-tokens": "Runner tokens",
   environments: "Environments & branches",
+  notifications: "Notifications",
 };
 
 export interface Crumb {

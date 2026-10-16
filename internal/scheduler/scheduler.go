@@ -17,6 +17,7 @@ import (
 	"github.com/priytamjeepandey/forge-ci/internal/blob"
 	"github.com/priytamjeepandey/forge-ci/internal/cron"
 	"github.com/priytamjeepandey/forge-ci/internal/logstore"
+	"github.com/priytamjeepandey/forge-ci/internal/notify"
 	"github.com/priytamjeepandey/forge-ci/internal/store"
 	"github.com/priytamjeepandey/forge-ci/internal/vcs"
 )
@@ -38,6 +39,10 @@ type Scheduler struct {
 	statusSem     chan struct{}       // bounds concurrent in-flight posts
 	inflightMu    sync.Mutex          // guards inflight
 	inflight      map[string]struct{} // (pipeline:status) currently being posted this process
+
+	// Approval notifications (notify.go).
+	sender      *notify.Sender
+	notifyEvery time.Duration
 }
 
 func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Scheduler {
@@ -55,6 +60,8 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Scheduler {
 		statusEnabled: os.Getenv("COMMIT_STATUS") != "off",
 		statusSem:     make(chan struct{}, 4),
 		inflight:      map[string]struct{}{},
+		sender:        &notify.Sender{},
+		notifyEvery:   notifyEvery,
 	}
 }
 
@@ -103,6 +110,7 @@ func (sc *Scheduler) Run(ctx context.Context) {
 	// its next_run_at (e.g. while the server was down) fires promptly rather than
 	// waiting a full scheduleEvery interval.
 	firstSchedules := time.After(5 * time.Second)
+	go sc.notifyLoop(ctx)
 	for {
 		select {
 		case <-ctx.Done():

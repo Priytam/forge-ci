@@ -1502,3 +1502,58 @@ export async function putEnvRegistry(p: EnvPolicy): Promise<EnvPolicy> {
   envPolicyCache = Promise.resolve(saved);
   return saved;
 }
+
+// --- Config validation ---
+
+export interface LintJob {
+  name: string;
+  stage: string;
+  environment?: string;
+  needs: string[];
+  image?: string;
+  tags?: string[];
+  manual?: boolean;
+  allow_failure?: boolean;
+  /** set when this server's environment rules would refuse the job on ref */
+  refused?: string;
+}
+
+export interface LintResult {
+  valid: boolean;
+  error?: string;
+  ref: string;
+  stages: string[];
+  jobs: LintJob[];
+}
+
+/** Compile config as a run on ref would, without running anything. */
+export function lintConfig(body: { config: string; ref?: string; repo?: string }): Promise<LintResult> {
+  return postJSON<LintResult>("/lint", body);
+}
+
+// --- Notifications (admin) ---
+
+export interface NotifySettings {
+  slack_webhook_url?: string;
+  has_slack: boolean;
+  email_enabled: boolean;
+  smtp_host: string;
+  smtp_port: number;
+  smtp_username: string;
+  smtp_password?: string;
+  has_smtp_password: boolean;
+  smtp_from: string;
+  clear_slack?: boolean;
+}
+
+export function getNotifySettings(): Promise<NotifySettings> {
+  return getJSON<NotifySettings>("/notification-settings");
+}
+
+export function putNotifySettings(s: Partial<NotifySettings>): Promise<NotifySettings> {
+  return putJSON<NotifySettings>("/notification-settings", s);
+}
+
+export function testNotify(): Promise<{ sent: boolean; email_to: string }> {
+  return postJSON<{ sent: boolean; email_to: string }>("/notification-settings/test", {});
+}

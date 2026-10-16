@@ -1170,7 +1170,7 @@ func (s *Store) AcquireJob(ctx context.Context, req proto.AcquireRequest) (*prot
 	var image, environment *string
 	var envRaw, artifactsRaw, reportJUnitRaw, cachePathsRaw, cacheKeyFilesRaw, servicesRaw []byte
 	var cachePolicy string
-	var repo, ref, sha string
+	var repo, ref, sha, source, triggeredBy, commitAuthor, commitMessage string
 	err = s.pool.QueryRow(ctx,
 		`UPDATE jobs j
 		 SET status='running', started_at=now(), heartbeat_at=now(), runner_id=$1
@@ -1183,11 +1183,12 @@ func (s *Store) AcquireJob(ctx context.Context, req proto.AcquireRequest) (*prot
 		 RETURNING j.id, j.pipeline_id, j.name, j.image, j.script, j.env,
 		           j.artifact_paths, j.report_junit, j.cache_paths, j.cache_key, j.cache_key_files,
 		           j.cache_policy, j.services, j.network, j.environment, j.timeout_seconds,
-		           p.repo, p.ref, p.sha`,
+		           p.repo, p.ref, p.sha, p.source, p.triggered_by, p.commit_author, p.commit_message`,
 		req.RunnerID, runnerTags).
 		Scan(&j.ID, &j.PipelineID, &j.Name, &image, &j.Script, &envRaw,
 			&artifactsRaw, &reportJUnitRaw, &cachePathsRaw, &j.CacheKey, &cacheKeyFilesRaw,
-			&cachePolicy, &servicesRaw, &j.Network, &environment, &j.TimeoutSeconds, &repo, &ref, &sha)
+			&cachePolicy, &servicesRaw, &j.Network, &environment, &j.TimeoutSeconds, &repo, &ref, &sha,
+			&source, &triggeredBy, &commitAuthor, &commitMessage)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -1208,12 +1209,22 @@ func (s *Store) AcquireJob(ctx context.Context, req proto.AcquireRequest) (*prot
 	if err != nil {
 		return nil, err
 	}
+	// Predefined CI_* variables first; repo variables, then the job's own
+	// YAML variables, override them (GitLab precedence).
+	merged := PredefinedVars(JobContext{
+		Repo: repo, Ref: ref, SHA: sha, Source: source, TriggeredBy: triggeredBy,
+		CommitAuthor: commitAuthor, CommitMessage: commitMessage, Environment: env,
+		PipelineID: j.PipelineID, JobID: j.ID, JobName: j.Name,
+	})
+	for k, v := range resolved {
+		merged[k] = v
+	}
 	jobEnv := map[string]string{}
 	_ = json.Unmarshal(envRaw, &jobEnv)
 	for k, v := range jobEnv { // job-level YAML variables win
-		resolved[k] = v
+		merged[k] = v
 	}
-	j.Env = resolved
+	j.Env = merged
 
 	// Keyless cloud auth: mint a short-lived, per-job OIDC ID token and inject it
 	// as FORGE_OIDC_TOKEN (with the GitLab-style CI_JOB_JWT alias). The job

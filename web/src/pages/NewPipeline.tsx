@@ -9,6 +9,7 @@ import {
   type RegisteredRepo,
   type RepoConfig,
 } from "../api";
+import LintPanel from "../components/LintPanel";
 
 const OTHER = "__other__";
 
@@ -296,6 +297,8 @@ export default function NewPipeline() {
             )}
           </span>
         </label>
+
+        <LintPanel config={config} repo={repo} defaultRef={ref} key={ref} />
 
         {error && <div className="error-banner">{error}</div>}
 
