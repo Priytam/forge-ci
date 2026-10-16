@@ -11,15 +11,10 @@
  * scheduled run genuinely has no actor, and inventing one would be a lie.
  */
 
-/** Tints, built exactly like the existing status chips: colour at 0.18 over the
- *  ground, hairline at 0.35, bright foreground. Nothing new enters the palette. */
+/** One neutral tint for everyone: colour in this UI means status, and a red
+ *  or green avatar read as a failed or passed run. Initials carry identity. */
 const TINTS = [
-  { bg: "rgba(56, 139, 253, 0.18)", fg: "#60a5fa", ring: "rgba(56, 139, 253, 0.35)" },
-  { bg: "rgba(188, 140, 255, 0.18)", fg: "#c4a7ff", ring: "rgba(188, 140, 255, 0.35)" },
-  { bg: "rgba(46, 164, 79, 0.18)", fg: "#4ade80", ring: "rgba(46, 164, 79, 0.35)" },
-  { bg: "rgba(232, 131, 58, 0.18)", fg: "#fb923c", ring: "rgba(232, 131, 58, 0.35)" },
-  { bg: "rgba(212, 167, 44, 0.18)", fg: "#fbbf24", ring: "rgba(212, 167, 44, 0.35)" },
-  { bg: "rgba(229, 83, 75, 0.18)", fg: "#f87171", ring: "rgba(229, 83, 75, 0.35)" },
+  { bg: "var(--surface-2)", fg: "var(--text-muted)", ring: "var(--border-strong)" },
 ];
 
 /** displayName strips an email down to its local part so the UI reads "alice",

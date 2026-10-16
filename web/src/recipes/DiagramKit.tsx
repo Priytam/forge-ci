@@ -19,14 +19,16 @@ export type Tone =
   | "gate"
   | "neutral";
 
+// Tones distinguish kinds of step in a recipe diagram; they resolve through
+// the theme tokens so diagrams read in light and dark.
 const TONE: Record<Tone, { stroke: string; fill: string; text: string }> = {
-  commit: { stroke: "#388bfd", fill: "rgba(56,139,253,0.12)", text: "#9dc7ff" },
-  build: { stroke: "#3b82f6", fill: "rgba(59,130,246,0.12)", text: "#a9c9ff" },
-  test: { stroke: "#d4a72c", fill: "rgba(212,167,44,0.12)", text: "#e6cd7a" },
-  scan: { stroke: "#e8833a", fill: "rgba(232,131,58,0.12)", text: "#f2b58a" },
-  deploy: { stroke: "#2ea44f", fill: "rgba(46,164,79,0.14)", text: "#84d99b" },
-  gate: { stroke: "#e5534b", fill: "rgba(229,83,75,0.12)", text: "#f0a09a" },
-  neutral: { stroke: "#6e7681", fill: "rgba(110,118,129,0.12)", text: "#b7bec8" },
+  commit: { stroke: "var(--neutral)", fill: "color-mix(in srgb, var(--neutral) 10%, var(--surface))", text: "var(--text)" },
+  build: { stroke: "var(--accent)", fill: "color-mix(in srgb, var(--accent) 10%, var(--surface))", text: "var(--text)" },
+  test: { stroke: "var(--warning)", fill: "color-mix(in srgb, var(--warning) 10%, var(--surface))", text: "var(--text)" },
+  scan: { stroke: "var(--attention)", fill: "color-mix(in srgb, var(--attention) 10%, var(--surface))", text: "var(--text)" },
+  deploy: { stroke: "var(--success)", fill: "color-mix(in srgb, var(--success) 10%, var(--surface))", text: "var(--text)" },
+  gate: { stroke: "var(--danger)", fill: "color-mix(in srgb, var(--danger) 10%, var(--surface))", text: "var(--text)" },
+  neutral: { stroke: "var(--neutral)", fill: "color-mix(in srgb, var(--neutral) 10%, var(--surface))", text: "var(--text)" },
 };
 
 export interface NodeSpec {
@@ -97,7 +99,7 @@ export function PipelineFlow({
           key={`${i}-${ai}-${bi}`}
           d={`M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2 - 7} ${y2}`}
           fill="none"
-          stroke="#4a525e"
+          style={{ stroke: "var(--border-strong)" }}
           strokeWidth={1.5}
           markerEnd="url(#rc-arrow)"
         />
@@ -123,7 +125,7 @@ export function PipelineFlow({
             markerHeight="7"
             orient="auto-start-reverse"
           >
-            <path d="M 0 0 L 10 5 L 0 10 z" fill="#5a636f" />
+            <path d="M 0 0 L 10 5 L 0 10 z" style={{ fill: "var(--text-subtle)" }} />
           </marker>
         </defs>
         {arrows}
@@ -137,8 +139,7 @@ export function PipelineFlow({
                 fontSize={10}
                 fontWeight={700}
                 letterSpacing="0.5"
-                fill="#8b949e"
-                style={{ textTransform: "uppercase" }}
+                style={{ fill: "var(--text-muted)", textTransform: "uppercase" }}
               >
                 {col.title.toUpperCase()}
               </text>
@@ -153,9 +154,8 @@ export function PipelineFlow({
                     y={cy - BOX_H / 2}
                     width={BOX_W}
                     height={BOX_H}
-                    rx={10}
-                    fill={t.fill}
-                    stroke={t.stroke}
+                    rx={6}
+                    style={{ fill: t.fill, stroke: t.stroke }}
                     strokeWidth={1.25}
                   />
                   <text
@@ -164,7 +164,7 @@ export function PipelineFlow({
                     textAnchor="middle"
                     fontSize={12.5}
                     fontWeight={600}
-                    fill={t.text}
+                    style={{ fill: t.text }}
                   >
                     {n.label}
                   </text>
@@ -174,7 +174,7 @@ export function PipelineFlow({
                       y={cy + 13}
                       textAnchor="middle"
                       fontSize={9.5}
-                      fill="#8b949e"
+                      style={{ fill: "var(--text-muted)" }}
                     >
                       {n.sub}
                     </text>

@@ -18,7 +18,7 @@ function StatTile({
   sublabel,
   valueClass,
   dot,
-  accent = "#8b949e",
+  accent = "var(--text-muted)",
 }: {
   value: ReactNode;
   label: string;
@@ -31,7 +31,7 @@ function StatTile({
   return (
     <div
       className="stat-tile"
-      style={{ "--accent": accent } as React.CSSProperties}
+      style={{ "--tile-accent": accent } as React.CSSProperties}
     >
       <div className={`stat-value ${valueClass ?? ""}`}>
         {value}
@@ -187,10 +187,10 @@ function MiniChart({
                   >
                     <stop
                       offset="0"
-                      stopColor={s.color}
+                      style={{ stopColor: s.color }}
                       stopOpacity={s.areaAlpha ?? 0.22}
                     />
-                    <stop offset="1" stopColor={s.color} stopOpacity="0" />
+                    <stop offset="1" style={{ stopColor: s.color }} stopOpacity="0" />
                   </linearGradient>
                 )
             )}
@@ -204,8 +204,8 @@ function MiniChart({
                 x2="100"
                 y2="0"
               >
-                <stop offset="0" stopColor={s.color} stopOpacity="0.25" />
-                <stop offset="1" stopColor={s.color} stopOpacity="1" />
+                <stop offset="0" style={{ stopColor: s.color }} stopOpacity="0.25" />
+                <stop offset="1" style={{ stopColor: s.color }} stopOpacity="1" />
               </linearGradient>
             ))}
           </defs>
@@ -238,7 +238,7 @@ function MiniChart({
               x2={xOf(hover)}
               y1={0}
               y2={100}
-              stroke="rgba(255,255,255,0.15)"
+              style={{ stroke: "var(--border-strong)" }}
               strokeWidth={1}
               vectorEffect="non-scaling-stroke"
             />
@@ -323,25 +323,25 @@ export default function Dashboard() {
           value={now.running_jobs}
           label="Jobs running"
           dot={now.running_jobs > 0}
-          accent="#58a6ff"
+          accent="var(--accent)"
         />
-        <StatTile value={now.pending_jobs} label="Queued" accent="#8b949e" />
+        <StatTile value={now.pending_jobs} label="Queued" accent="var(--text-muted)" />
         <StatTile
           value={now.blocked_jobs}
           label="Awaiting approval"
           valueClass={now.blocked_jobs > 0 ? "stat-blocked" : ""}
-          accent="#d29922"
+          accent="var(--warning)"
         />
         <StatTile
           value={now.online_runners}
           label="Runners online"
-          accent="#3fb950"
+          accent="var(--success)"
         />
         <StatTile
           value={now.active_executors}
           label="Executors in flight"
           sublabel="forked runners/pods"
-          accent="#bc8cff"
+          accent="var(--neutral)"
         />
         <StatTile
           value={
@@ -369,12 +369,12 @@ export default function Dashboard() {
           valueClass={rateClass}
           accent={
             rate < 0
-              ? "#8b949e"
+              ? "var(--text-muted)"
               : rate >= 90
-                ? "#3fb950"
+                ? "var(--success)"
                 : rate >= 70
-                  ? "#d29922"
-                  : "#f85149"
+                  ? "var(--warning)"
+                  : "var(--danger)"
           }
         />
       </div>
@@ -387,20 +387,20 @@ export default function Dashboard() {
         series={[
           {
             name: "Passed",
-            color: "#3fb950",
+            color: "var(--success)",
             values: data.pipelines.map((b) => b.success),
             area: true,
             areaAlpha: 0.2,
           },
           {
             name: "Failed",
-            color: "#f85149",
+            color: "var(--danger)",
             values: data.pipelines.map((b) => b.failed),
             area: false,
           },
           {
             name: "Jobs",
-            color: "#58a6ff",
+            color: "var(--accent)",
             values: data.jobs.map((b) => b.count),
             area: true,
             areaAlpha: 0.08,
