@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -72,6 +73,8 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 	m.HandleFunc("GET /api/v1/stats", srv.dashboardStats)
 	m.HandleFunc("GET /api/v1/jobs/{id}/logs", srv.getLogs)
 	m.HandleFunc("GET /api/v1/jobs/{id}/logs/stream", srv.streamLogs)
+	m.HandleFunc("GET /api/v1/jobs/{id}/logs/summary", srv.logSummary)
+	m.HandleFunc("GET /api/v1/jobs/{id}/logs/search", srv.logSearch)
 	m.HandleFunc("POST /api/v1/jobs/{id}/approvals", srv.approve)
 	m.HandleFunc("POST /api/v1/jobs/{id}/cancel", srv.cancelJob)
 	m.HandleFunc("POST /api/v1/jobs/{id}/play", srv.playJob)
@@ -82,6 +85,7 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 		w.WriteHeader(http.StatusOK)
 	})
 	m.HandleFunc("GET /api/v1/metrics", srv.metrics)
+	m.HandleFunc("GET /api/v1/runner-load", srv.runnerLoad)
 
 	// Runner protocol.
 	m.HandleFunc("POST /api/v1/runner/acquire", srv.acquire)
@@ -368,11 +372,113 @@ func (s *Server) getLogs(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// logSummary returns the first error-looking line of a job's log (with a few
+// lines of context) and the log's last lines — what you want first when a
+// job fails. Heuristic; see logstore.Summarize.
+func (s *Server) logSummary(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+	text, err := s.logs.FullText(r.Context(), id)
+	if err != nil {
+		slog.Error("log summary", "err", err)
+		writeErr(w, http.StatusInternalServerError, "failed to load logs")
+		return
+	}
+	writeJSON(w, http.StatusOK, logstore.Summarize(text))
+}
+
+// logSearch returns the lines of a job's log containing ?q (case-insensitive,
+// at most 500 matches) with their 1-based line numbers.
+func (s *Server) logSearch(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+	q := strings.ToLower(r.URL.Query().Get("q"))
+	if q == "" {
+		writeErr(w, http.StatusBadRequest, "q is required")
+		return
+	}
+	text, err := s.logs.FullText(r.Context(), id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to load logs")
+		return
+	}
+	type match struct {
+		Line int    `json:"line"`
+		Text string `json:"text"`
+	}
+	out := []match{}
+	for i, l := range strings.Split(text, "\n") {
+		if strings.Contains(strings.ToLower(l), q) {
+			out = append(out, match{Line: i + 1, Text: l})
+			if len(out) == 500 {
+				break
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"matches": out, "truncated": len(out) == 500})
+}
+
 // metrics exposes the log-tier counters in Prometheus text format. It is a GET
 // (CSRF-exempt) and auth-exempt (see authExempt) so a scraper needs no session.
-func (s *Server) metrics(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-	_, _ = io.WriteString(w, s.logs.Metrics().Render(s.logs.Backend()))
+	if s.logs != nil {
+		_, _ = io.WriteString(w, s.logs.Metrics().Render(s.logs.Backend()))
+	}
+	if load, err := s.store.GetRunnerLoad(r.Context()); err == nil {
+		_, _ = io.WriteString(w, renderQueueMetrics(load))
+	} else {
+		slog.Error("metrics: runner load", "err", err)
+	}
+}
+
+// renderQueueMetrics exposes queue depth per required tag set and runner
+// counts — what an autoscaler (KEDA / HPA on external metrics) scales on.
+func renderQueueMetrics(l *store.RunnerLoad) string {
+	var b strings.Builder
+	b.WriteString("# HELP forge_queue_pending_jobs Jobs waiting for a runner, by required runner tags.\n")
+	b.WriteString("# TYPE forge_queue_pending_jobs gauge\n")
+	for _, q := range l.Queues {
+		fmt.Fprintf(&b, "forge_queue_pending_jobs{tags=%q} %d\n", strings.Join(q.Tags, ","), q.Pending)
+	}
+	b.WriteString("# HELP forge_queue_oldest_wait_seconds Age of the oldest queued job, by required runner tags.\n")
+	b.WriteString("# TYPE forge_queue_oldest_wait_seconds gauge\n")
+	for _, q := range l.Queues {
+		fmt.Fprintf(&b, "forge_queue_oldest_wait_seconds{tags=%q} %d\n", strings.Join(q.Tags, ","), q.OldestWaitSeconds)
+	}
+	online, busy := 0, 0
+	for _, r := range l.Runners {
+		if r.Online && !r.Paused {
+			online++
+			if r.Running > 0 {
+				busy++
+			}
+		}
+	}
+	fmt.Fprintf(&b, "# HELP forge_jobs_pending Jobs waiting for a runner.\n# TYPE forge_jobs_pending gauge\nforge_jobs_pending %d\n", l.Pending)
+	fmt.Fprintf(&b, "# HELP forge_jobs_running Jobs running now.\n# TYPE forge_jobs_running gauge\nforge_jobs_running %d\n", l.Running)
+	fmt.Fprintf(&b, "# HELP forge_runners_online Online, unpaused runners.\n# TYPE forge_runners_online gauge\nforge_runners_online %d\n", online)
+	fmt.Fprintf(&b, "# HELP forge_runners_busy Online runners running at least one job.\n# TYPE forge_runners_busy gauge\nforge_runners_busy %d\n", busy)
+	return b.String()
+}
+
+// runnerLoad serves the runner load page: queue depth per required tag set
+// (with how many eligible runners are online/busy) and what each runner is
+// doing.
+func (s *Server) runnerLoad(w http.ResponseWriter, r *http.Request) {
+	load, err := s.store.GetRunnerLoad(r.Context())
+	if err != nil {
+		slog.Error("runner load", "err", err)
+		writeErr(w, http.StatusInternalServerError, "failed to load runner load")
+		return
+	}
+	writeJSON(w, http.StatusOK, load)
 }
 
 func (s *Server) approve(w http.ResponseWriter, r *http.Request) {

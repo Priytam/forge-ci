@@ -1648,3 +1648,51 @@ export function createServiceToken(
 ): Promise<ApiToken> {
   return postJSON<ApiToken>(`/service-accounts/${id}/tokens`, b);
 }
+
+// --- Job log tools ---
+
+export interface LogSummary {
+  first_error?: string;
+  first_error_line: number;
+  context?: string[];
+  tail: string[];
+  lines: number;
+}
+
+export function getLogSummary(jobId: number | string): Promise<LogSummary> {
+  return getJSON<LogSummary>(`/jobs/${jobId}/logs/summary`);
+}
+
+// --- Runner load ---
+
+export interface QueueStat {
+  tags: string[];
+  pending: number;
+  oldest_wait_seconds: number;
+  eligible_online: number;
+  eligible_busy: number;
+}
+
+export interface RunnerLoadRow {
+  id: string;
+  executor: string;
+  tags: string[];
+  paused: boolean;
+  online: boolean;
+  last_contact_at: string;
+  running: number;
+  running_jobs: { job_id: number; pipeline_id: number; repo: string; name: string; started_at: string }[];
+  jobs_24h: number;
+  busy_seconds_24h: number;
+}
+
+export interface RunnerLoad {
+  queues: QueueStat[];
+  runners: RunnerLoadRow[];
+  pending: number;
+  running: number;
+}
+
+export function getRunnerLoad(): Promise<RunnerLoad> {
+  return getJSON<RunnerLoad>("/runner-load");
+}

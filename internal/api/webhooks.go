@@ -385,7 +385,12 @@ func (s *Server) triggerFromWebhook(w http.ResponseWriter, r *http.Request, run 
 		writeErr(w, http.StatusInternalServerError, "failed to load repo config")
 		return false
 	}
-	jobs, err := compiler.Compile(config, ref, source, s.store.TemplateResolver(r.Context(), repo), extraCtx)
+	mrBase := ""
+	if pr != nil {
+		mrBase = pr.BaseSHA
+	}
+	changes := s.store.PipelineChangeSet(r.Context(), repo, ref, sha, source, mrBase)
+	jobs, err := compiler.CompileWithChanges(config, ref, source, s.store.TemplateResolver(r.Context(), repo), changes, extraCtx)
 	if err != nil {
 		writeErr(w, http.StatusUnprocessableEntity, "pipeline config error: "+err.Error())
 		return false

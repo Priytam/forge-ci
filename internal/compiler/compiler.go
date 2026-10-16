@@ -426,6 +426,12 @@ func buildContext(ref, source string, extra map[string]string) map[string]string
 // emitted job's Env so job scripts can read them. Existing callers pass no extra
 // map and are unaffected.
 func Compile(yml, ref, source string, tmpl TemplateFunc, extra ...map[string]string) ([]CompiledJob, error) {
+	return CompileWithChanges(yml, ref, source, tmpl, nil, extra...)
+}
+
+// CompileWithChanges is Compile with the pipeline's change set, so
+// rules: changes: can be evaluated (nil = unknown, every changes: matches).
+func CompileWithChanges(yml, ref, source string, tmpl TemplateFunc, changes *ChangeSet, extra ...map[string]string) ([]CompiledJob, error) {
 	var extraCtx map[string]string
 	if len(extra) > 0 {
 		extraCtx = extra[0]
@@ -499,7 +505,7 @@ func Compile(yml, ref, source string, tmpl TemplateFunc, extra ...map[string]str
 		d.spec = spec
 		if len(spec.Rules) > 0 {
 			// rules: supersede only/except entirely for this job.
-			outcome, err := evalRules(spec.Rules, ctx)
+			outcome, err := evalRules(spec.Rules, ctx, changes)
 			if err != nil {
 				return nil, fmt.Errorf("job %q: %w", name, err)
 			}

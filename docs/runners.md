@@ -190,3 +190,41 @@ Cancelling a running job (`POST /api/v1/jobs/{id}/cancel` or a whole pipeline)
 is delivered to the runner through the heartbeat response: the next heartbeat
 (≤10s) returns `{cancel:true}`, the runner kills the job's process group /
 container / pod exactly like a timeout, and reports the job as `canceled`.
+
+## Queue depth, load and autoscaling
+
+The **Runners** page shows the queue, grouped by the runner tags jobs need:
+how many jobs wait, how long the oldest has waited, and how many eligible
+runners are online and busy ("none — jobs can't start" means no online runner
+has those tags). Each runner shows what it is running now and how busy it was
+over the last 24 hours. Same data: `GET /api/v1/runner-load`.
+
+`GET /api/v1/metrics` (Prometheus text, no auth) exports:
+
+| Metric | Labels | Meaning |
+|---|---|---|
+| `forge_queue_pending_jobs` | `tags` (sorted, comma-joined) | jobs waiting for a runner with those tags |
+| `forge_queue_oldest_wait_seconds` | `tags` | age of the oldest waiting job |
+| `forge_jobs_pending`, `forge_jobs_running` | — | totals |
+| `forge_runners_online`, `forge_runners_busy` | — | online unpaused runners, and those running a job |
+
+Scale runner Deployments on them, for example with KEDA's Prometheus scaler:
+
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata: {name: forge-runners-linux}
+spec:
+  scaleTargetRef: {name: forge-runners}
+  minReplicaCount: 1
+  maxReplicaCount: 20
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring:9090
+        query: sum(forge_queue_pending_jobs{tags=~"(^|.*,)linux(,.*|$)"})
+        threshold: "2"
+```
+
+A runner that is stopped mid-scale-down drains: it finishes (or requeues) its
+current job before exiting (see *Graceful shutdown* above).

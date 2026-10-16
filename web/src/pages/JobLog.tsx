@@ -23,6 +23,7 @@ import ApprovalGate from "../components/ApprovalGate";
 import PlayButton from "../components/PlayButton";
 import CancelJobButton from "../components/CancelJobButton";
 import RetryJobButton from "../components/RetryJobButton";
+import LogTools from "../components/LogTools";
 
 /**
  * Live job log: an SSE EventSource on /logs/stream?offset=0 that appends
@@ -405,6 +406,9 @@ export default function JobLog() {
         <span className="artifacts-title">Log</span>
         {streaming && <span className="log-live">● live</span>}
       </div>
+      {job && (
+        <LogTools jobId={job.id} text={logs} failed={job.status === "failed" && !job.status_reason} />
+      )}
       <pre ref={termRef} className="terminal" onScroll={onTermScroll}>
         {logs || (job?.status_reason ? "No log — this job never ran." : "Waiting for logs…")}
       </pre>

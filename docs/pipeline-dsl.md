@@ -57,7 +57,7 @@ jobs:
 | `when:` | `on_success` (default), `manual`, `never`, or `always`. `never` excludes the job. |
 | `allow_failure:` | `true`/`false`; overrides the job-level `allow_failure`. |
 | `variables:` | Extra variables injected into the job when this rule matches. |
-| `changes: [globs]` | **Documented no-op** — see limitations. |
+| `changes: [globs]` | Matches when the pipeline's commit changed a file matching any glob — see *`changes:`* below. |
 | `exists: [globs]` | **Documented no-op** — see limitations. |
 
 A rule with multiple clauses matches only when **all** its clauses are
@@ -690,15 +690,49 @@ Semantics and scope:
 
 ---
 
-## `changes:` / `exists:` — honest limitations
+## `changes:` — run jobs only when their files changed
 
-Both are **parsed and validated** but always treated as **satisfied (true)** —
-they are documented no-ops. Forge compiles pipelines **without a repo checkout
-or a file diff**: a webhook delivers only `repo`, `ref`, and `sha`, and Forge
-does not clone at compile time. There is therefore no honest way to know which
-files changed (`changes:`) or which files exist in the tree (`exists:`), so
-Forge does **not** fake them. A rule that relies solely on `changes:`/`exists:`
-will always match; combine them with an `if:` clause to get meaningful gating.
+```yaml
+web-build:
+  stage: build
+  rules:
+    - changes: ["web/**/*", "package-lock.json"]
+  script: [npm ci, npm run build]
+api-deploy:
+  stage: deploy
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes: ["api/**", "go.mod", "go.sum"]
+  script: [./deploy-api.sh]
+```
+
+A `changes:` clause matches when **any file the pipeline's commit changed**
+matches any of its globs (`**` = any directories, `*` = within one directory,
+`?` = one character, `{a,b}` = alternatives, a trailing `/` = everything
+under that directory). It combines with `if:` by AND, like every clause.
+
+What "changed" is compared against:
+
+| Pipeline | Compared with |
+|---|---|
+| push to a branch with an earlier **successful** pipeline | that pipeline's commit (so a fix after a red run still rebuilds what the red run touched) |
+| push to a branch with no successful pipeline yet | the repo's default branch, from the merge base |
+| merge request / pull request | the target commit of the merge request |
+
+The file list comes from the provider (GitHub compare, Bitbucket diffstat,
+CodeCommit GetDifferences) for repos connected under Repos → Add repository.
+
+**When Forge can't tell, nothing is skipped:** the change set is *unknown* and
+every `changes:` clause matches for API / manual runs, schedules, the first
+run on the default branch, repos that aren't connected, a provider error, or a
+diff too large for the provider to list (GitHub: 300 files). That's the safe
+direction — a job runs rather than silently not running.
+
+Preview it: `POST /api/v1/lint {"config": …, "ref": "main", "changed_files":
+["web/src/App.tsx"]}` shows which jobs that change would run.
+
+`exists:` is still a documented no-op (always true): Forge compiles without a
+checkout of the tree.
 
 ---
 

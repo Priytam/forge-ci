@@ -42,6 +42,9 @@ func (s *Server) lint(w http.ResponseWriter, r *http.Request) {
 		Ref    string `json:"ref"`
 		Repo   string `json:"repo"`
 		Source string `json:"source"`
+		// ChangedFiles, when given, previews rules: changes: as if these files
+		// changed; omitted = unknown (every changes: matches).
+		ChangedFiles []string `json:"changed_files"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body (want {config, ref, repo})")
@@ -59,7 +62,11 @@ func (s *Server) lint(w http.ResponseWriter, r *http.Request) {
 		source = req.Source
 	}
 	resp := lintResponse{Ref: req.Ref, Stages: []string{}, Jobs: []lintJob{}}
-	jobs, err := compiler.Compile(req.Config, req.Ref, source, s.store.TemplateResolver(r.Context(), req.Repo))
+	var changes *compiler.ChangeSet
+	if req.ChangedFiles != nil {
+		changes = &compiler.ChangeSet{Files: req.ChangedFiles}
+	}
+	jobs, err := compiler.CompileWithChanges(req.Config, req.Ref, source, s.store.TemplateResolver(r.Context(), req.Repo), changes)
 	if err == nil {
 		_, err = compiler.Options(req.Config)
 	}

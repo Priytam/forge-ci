@@ -828,3 +828,20 @@ CREATE TABLE IF NOT EXISTS service_accounts (
 );
 ALTER TABLE api_tokens ADD COLUMN IF NOT EXISTS service_account_id BIGINT
     REFERENCES service_accounts(id) ON DELETE CASCADE;
+
+-- Queue visibility: when a job last entered the queue (status → pending), by
+-- whichever path (promotion, approval, retry requeue, drain requeue). Feeds
+-- the runner load page and the forge_queue_* metrics.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS queued_at TIMESTAMPTZ;
+CREATE OR REPLACE FUNCTION forge_jobs_stamp_queued() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.status = 'pending' AND (TG_OP = 'INSERT' OR OLD.status IS DISTINCT FROM 'pending') THEN
+        NEW.queued_at := now();
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE OR REPLACE TRIGGER jobs_stamp_queued BEFORE INSERT OR UPDATE OF status ON jobs
+    FOR EACH ROW EXECUTE FUNCTION forge_jobs_stamp_queued();
+CREATE INDEX IF NOT EXISTS jobs_pending_queue_idx ON jobs (queued_at) WHERE status = 'pending';

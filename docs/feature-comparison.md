@@ -15,7 +15,7 @@ Legend: ✅ shipped · 🟡 partial · ❌ not yet (roadmap).
 |---|---|---|---|
 | YAML pipeline (stages, jobs, script, image) | ✅ | ✅ | |
 | DAG via `needs` | ✅ | ✅ | explicit must point to earlier stage |
-| Ref-conditional jobs (`only/except`, `rules:`) | ✅ rules engine | ✅ `only/except` globs + `rules:` engine | `rules: if/when` with a safe expr evaluator; `changes/exists` are documented no-ops (no checkout at compile time) — see docs/pipeline-dsl.md |
+| Ref-conditional jobs (`only/except`, `rules:`) | ✅ rules engine | ✅ `only/except` globs + `rules:` engine | `rules: if/when/changes` with a safe expr evaluator; `changes:` compares against the last green pipeline on the branch (or the merge base); `exists:` is a documented no-op — see docs/pipeline-dsl.md |
 | `variables` at job level | ✅ | ✅ | |
 | Artifacts (`paths`) | ✅ + expiry, reports | ✅ `paths` + `expire_in` + `reports.junit` | per-artifact TTL (server-side GC, independent of `RETENTION_DAYS`); JUnit XML parsed into a per-job pass/fail summary at `GET /jobs/{id}/report` — see docs/pipeline-dsl.md |
 | Caching (keyed, per-lockfile) | ✅ | ✅ | `cache: {key, paths, policy}`, literal or content-addressed `key.files`, shared across pipelines — see docs/pipeline-dsl.md |
