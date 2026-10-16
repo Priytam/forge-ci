@@ -106,6 +106,9 @@ type jobSpec struct {
 	// ResourceGroup serialises jobs: at most one job per (repo, group) runs at
 	// a time. "$CI_ENVIRONMENT_NAME" resolves to the job's environment.
 	ResourceGroup string `yaml:"resource_group"`
+	// RunnerAffinity: prefer the runner that last ran this job successfully
+	// (its local caches are warm). Opt-in.
+	RunnerAffinity bool `yaml:"runner_affinity"`
 }
 
 type artifactSpec struct {
@@ -378,6 +381,8 @@ type CompiledJob struct {
 	AllowFailure  bool     // failure does not block dependents or fail the pipeline
 	// ResourceGroup: at most one job per (repo, ResourceGroup) runs at once.
 	ResourceGroup string
+	// RunnerAffinity: prefer the runner that last ran this job successfully.
+	RunnerAffinity bool
 	// Services are sidecar containers started alongside the job (docker/k8s only).
 	Services []proto.ServiceSpec
 	// Network is the container network for the job (docker executor). Empty
@@ -736,6 +741,7 @@ func CompileWithChanges(yml, ref, source string, tmpl TemplateFunc, changes *Cha
 			Services:              services,
 			Network:               network,
 			ResourceGroup:         resourceGroup,
+			RunnerAffinity:        spec.RunnerAffinity,
 		})
 	}
 	return out, nil

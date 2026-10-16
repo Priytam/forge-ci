@@ -824,3 +824,9 @@ re-runs it **inside the same pipeline**, together with every job after it (via
 - Same permission as retrying a whole pipeline: anyone with a role on the
   repo. The pipeline-level **Retry** still starts a fresh copy of the whole
   pipeline.
+
+## `runner_affinity:` — prefer the runner with warm caches
+
+`runner_affinity: true` on a job makes its next run prefer the runner that
+last ran it successfully, for up to `RUNNER_AFFINITY_WAIT` (default 1m) before
+any runner may take it. See docs/runners.md → *Cache affinity*.

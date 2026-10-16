@@ -47,6 +47,7 @@ type Store struct {
 	fetcher    *vcs.Fetcher      // fetches in-repo .forge-ci.yml at the event sha (config-from-repo)
 
 	// Execution-timeout policy (env-configured, see New).
+	affinityWait      time.Duration // RUNNER_AFFINITY_WAIT: how long a job waits for its preferred runner
 	defaultJobTimeout time.Duration // DEFAULT_JOB_TIMEOUT, jobs without timeout:
 	maxJobTimeout     time.Duration // MAX_JOB_TIMEOUT, hard cap on job values
 	queueTimeout      time.Duration // QUEUE_TIMEOUT, max time in pending
@@ -112,6 +113,7 @@ func New(ctx context.Context, dsn string) (*Store, error) {
 		appMinter:         githubapp.New(),
 		fetcher:           vcs.NewFetcher(),
 		defaultJobTimeout: envDuration("DEFAULT_JOB_TIMEOUT", time.Hour),
+		affinityWait:      envDuration("RUNNER_AFFINITY_WAIT", time.Minute),
 		maxJobTimeout:     envDuration("MAX_JOB_TIMEOUT", 4*time.Hour),
 		queueTimeout:      envDuration("QUEUE_TIMEOUT", 24*time.Hour),
 	}
@@ -320,6 +322,10 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 			environment = &canonicalEnv
 		}
 		resourceGroup := expandResourceGroup(j.ResourceGroup, canonicalEnv)
+		affinityKey := ""
+		if j.RunnerAffinity {
+			affinityKey = req.Repo + "#" + j.Name
+		}
 		// Manual jobs start gated in the 'blocked' state (with the manual flag so
 		// the scheduler and approval endpoint distinguish them from an
 		// environment-approval block); a play releases them back to 'created'.
@@ -336,9 +342,9 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 		}
 		var id int64
 		err = tx.QueryRow(ctx,
-			`INSERT INTO jobs (pipeline_id, name, stage, stage_idx, image, script, env, environment, tags, artifact_paths, artifact_expire_seconds, report_junit, cache_paths, cache_key, cache_key_files, cache_policy, services, network, timeout_seconds, max_attempts, status, manual, allow_failure, blocked_at, finished_at, status_reason, resource_group)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27) RETURNING id`,
-			p.ID, j.Name, j.Stage, j.StageIdx, image, j.Script, env, environment, tags, artifacts, j.ArtifactExpireSeconds, reportJUnit, cachePaths, j.CacheKey, cacheKeyFiles, j.CachePolicy, services, j.Network, timeoutSec, j.Retry+1, status, j.Manual, j.AllowFailure, blockedAt, finishedAt, denied, resourceGroup).Scan(&id)
+			`INSERT INTO jobs (pipeline_id, name, stage, stage_idx, image, script, env, environment, tags, artifact_paths, artifact_expire_seconds, report_junit, cache_paths, cache_key, cache_key_files, cache_policy, services, network, timeout_seconds, max_attempts, status, manual, allow_failure, blocked_at, finished_at, status_reason, resource_group, affinity_key)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28) RETURNING id`,
+			p.ID, j.Name, j.Stage, j.StageIdx, image, j.Script, env, environment, tags, artifacts, j.ArtifactExpireSeconds, reportJUnit, cachePaths, j.CacheKey, cacheKeyFiles, j.CachePolicy, services, j.Network, timeoutSec, j.Retry+1, status, j.Manual, j.AllowFailure, blockedAt, finishedAt, denied, resourceGroup, affinityKey).Scan(&id)
 		if err != nil {
 			return nil, err
 		}
@@ -1207,14 +1213,23 @@ func (s *Store) AcquireJob(ctx context.Context, req proto.AcquireRequest) (*prot
 	defer tx.Rollback(ctx)
 	var candidate int64
 	var candGroup, candRepo string
+	// Cache affinity: a job whose preferred runner (the last to run it
+	// successfully) is another online, unpaused runner able to take it is left
+	// for that runner until it has waited affinityWait; this runner's own
+	// preferred jobs come first.
 	err = tx.QueryRow(ctx,
 		`SELECT j.id, j.resource_group, p.repo FROM jobs j JOIN pipelines p ON p.id = j.pipeline_id
+		 LEFT JOIN runner_affinity a ON j.affinity_key <> '' AND a.key = j.affinity_key
 		 WHERE j.status = 'pending' AND j.tags <@ $1::text[]
 		   AND (j.resource_group = '' OR NOT EXISTS (
 		         SELECT 1 FROM jobs r JOIN pipelines rp ON rp.id = r.pipeline_id
 		         WHERE r.status = 'running' AND r.resource_group = j.resource_group AND rp.repo = p.repo))
-		 ORDER BY j.id
-		 FOR UPDATE OF j SKIP LOCKED LIMIT 1`, runnerTags).Scan(&candidate, &candGroup, &candRepo)
+		   AND (a.runner_id IS NULL OR a.runner_id = $2
+		        OR j.queued_at < now() - make_interval(secs => $3)
+		        OR NOT EXISTS (SELECT 1 FROM runners pr WHERE pr.id = a.runner_id AND NOT pr.paused
+		                       AND pr.last_contact_at > now() - interval '30 seconds' AND j.tags <@ pr.tags))
+		 ORDER BY (a.runner_id IS NOT NULL AND a.runner_id = $2) DESC, j.id
+		 FOR UPDATE OF j SKIP LOCKED LIMIT 1`, runnerTags, req.RunnerID, s.affinityWait.Seconds()).Scan(&candidate, &candGroup, &candRepo)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -1460,6 +1475,15 @@ func (s *Store) CompleteJob(ctx context.Context, jobID int64, status string, exi
 	// dedupes: a given job's success is recorded at most once, even on a late or
 	// duplicated runner report. deployed_by is the environment approver when the
 	// job was approval-gated, otherwise the pipeline's triggered_by.
+	if status == "success" {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO runner_affinity (key, runner_id)
+			 SELECT affinity_key, runner_id FROM jobs
+			 WHERE id = $1 AND affinity_key <> '' AND runner_id IS NOT NULL
+			 ON CONFLICT (key) DO UPDATE SET runner_id = EXCLUDED.runner_id, updated_at = now()`, jobID); err != nil {
+			return "", "", err
+		}
+	}
 	if status == "success" && environment != nil && *environment != "" {
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO deployments

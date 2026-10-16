@@ -228,3 +228,38 @@ spec:
 
 A runner that is stopped mid-scale-down drains: it finishes (or requeues) its
 current job before exiting (see *Graceful shutdown* above).
+
+## Persistent BuildKit cache and cache affinity
+
+### Cache affinity (`runner_affinity: true`)
+
+```yaml
+build-image:
+  stage: build
+  tags: [docker-builder]
+  runner_affinity: true
+  script: [./build.sh]
+```
+
+After a job with `runner_affinity: true` succeeds, Forge remembers which
+runner ran it (per repo + job name). The next run of that job **prefers that
+runner**: other runners leave it in the queue while the preferred runner is
+online, unpaused and has the job's tags, for up to `RUNNER_AFFINITY_WAIT`
+(server env, default `1m`, Go duration). After that — or immediately when
+the preferred runner is offline or paused — any eligible runner takes it, and
+affinity moves to whichever runner succeeds. Jobs without the key are never
+held.
+
+It pays off where the runner keeps state between jobs: **shell runners**
+(language caches in the runner user's home, a local Docker daemon used by the
+job) and dedicated build hosts. With the docker/kubernetes executors each job
+starts in a fresh container, so prefer the registry cache
+(docs/docker-layer-cache.md) there.
+
+### Persistent per-runner BuildKit cache — not built yet
+
+A long-lived BuildKit daemon per runner (shared across jobs) would make
+container builds on docker/kubernetes runners hit a warm local cache. It is
+**deliberately not shipped**: done naively it is a cross-repo security hole.
+See docs/design/persistent-buildkit-cache.md for the design and the open
+decisions.

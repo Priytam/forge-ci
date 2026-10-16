@@ -845,3 +845,15 @@ $$;
 CREATE OR REPLACE TRIGGER jobs_stamp_queued BEFORE INSERT OR UPDATE OF status ON jobs
     FOR EACH ROW EXECUTE FUNCTION forge_jobs_stamp_queued();
 CREATE INDEX IF NOT EXISTS jobs_pending_queue_idx ON jobs (queued_at) WHERE status = 'pending';
+
+-- Runner cache affinity (opt-in per job: runner_affinity: true). A job's
+-- affinity_key ('' = none) names the work whose local caches it benefits
+-- from (repo + job name). After a successful run, runner_affinity remembers
+-- which runner did it; the next such job prefers that runner while it is
+-- online, and any runner may take it once it has waited the affinity window.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS affinity_key TEXT NOT NULL DEFAULT '';
+CREATE TABLE IF NOT EXISTS runner_affinity (
+    key        TEXT        PRIMARY KEY,
+    runner_id  TEXT        NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);

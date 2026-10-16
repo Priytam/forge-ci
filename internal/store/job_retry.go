@@ -23,7 +23,7 @@ var (
 // defines what to run, nothing about how the last attempt went.
 const jobSpecCols = `pipeline_id, name, stage, stage_idx, image, script, env, environment, tags,
 	artifact_paths, artifact_expire_seconds, report_junit, cache_paths, cache_key, cache_key_files,
-	cache_policy, services, network, timeout_seconds, max_attempts, allow_failure, resource_group`
+	cache_policy, services, network, timeout_seconds, max_attempts, allow_failure, resource_group, affinity_key`
 
 // RetryResult says which jobs a retry re-queued: old id → new id.
 type RetryResult struct {
