@@ -1,15 +1,24 @@
 # OIDC / keyless cloud authentication
 
 Forge issues a **short-lived, signed OpenID Connect ID token per job** so that a
-job can exchange it for cloud credentials with **no static cloud keys** stored
-anywhere:
+job can exchange it for credentials with **no static keys** stored anywhere.
+It is a standard OIDC issuer, so it works with **anything that trusts one** —
+the examples below are AWS, GCP, Azure and HashiCorp Vault; Kubernetes
+(service account issuer discovery), Cloudflare, Terraform Cloud and others
+follow the same pattern:
 
-- **AWS** — `sts assume-role-with-web-identity`
-- **GCP** — Workload Identity Federation
+| Target | Exchange |
+|---|---|
+| AWS | `sts assume-role-with-web-identity` (`AWS_WEB_IDENTITY_TOKEN_FILE`) |
+| GCP | Workload Identity Federation (`--credential-source-file`) |
+| Azure | Entra ID workload identity federation (federated credential on an app / managed identity) |
+| HashiCorp Vault | JWT/OIDC auth method (`vault write auth/jwt/login`) |
 
-Forge uses this path itself: a runner cloning an **AWS CodeCommit** repository
-exchanges the same token for credentials to sign the git clone, so CodeCommit
-runners hold no AWS key either. See [codecommit.md](codecommit.md).
+Inside every job the token is in `$FORGE_OIDC_TOKEN` and, kept fresh for the
+whole job, in the file `$FORGE_OIDC_TOKEN_FILE` — always point credential
+configs at the file. (Forge uses the same path itself: runners cloning AWS
+CodeCommit sign the clone with credentials from this token —
+[codecommit.md](codecommit.md).)
 
 The cloud provider validates the token against Forge's **public** JWKS (fetched
 over the OIDC discovery document). The whole trust chain is a public key: Forge
@@ -114,6 +123,8 @@ always yields the same `kid`.
 ---
 
 ## AWS setup (STS AssumeRoleWithWebIdentity)
+
+*One example of many — the Azure and Vault sections below follow the same shape.*
 
 Forge must be reachable at a stable HTTPS `EXTERNAL_URL`. Set
 `OIDC_AUDIENCE=sts.amazonaws.com` (AWS expects that audience).
@@ -221,6 +232,47 @@ audience you configure on the provider).
    ```
 
 ---
+
+## Azure setup (workload identity federation)
+
+1. In Entra ID, on an app registration (or user-assigned managed identity) →
+   **Federated credentials → Add → Other issuer**:
+   - Issuer: Forge's `EXTERNAL_URL`
+   - Subject: e.g. `repo:acme/widgets:ref:refs/heads/main:environment:production`
+   - Audience: set `OIDC_AUDIENCE=api://AzureADTokenExchange` on the server
+     (Azure's default audience for federation).
+2. Grant that identity the Azure roles the job needs.
+3. In the job:
+
+   ```yaml
+   deploy:
+     image: mcr.microsoft.com/azure-cli
+     script:
+       - az login --service-principal -u "$AZURE_CLIENT_ID" -t "$AZURE_TENANT_ID"
+           --federated-token "$(cat "$FORGE_OIDC_TOKEN_FILE")"
+       - az account show
+   ```
+
+   SDKs that support `AZURE_FEDERATED_TOKEN_FILE` refresh by re-reading it:
+   set `AZURE_FEDERATED_TOKEN_FILE=$FORGE_OIDC_TOKEN_FILE`.
+
+## HashiCorp Vault setup (JWT auth)
+
+```sh
+vault auth enable jwt
+vault write auth/jwt/config oidc_discovery_url="$FORGE_EXTERNAL_URL" bound_issuer="$FORGE_EXTERNAL_URL"
+vault write auth/jwt/role/deploy role_type=jwt user_claim=sub \
+  bound_audiences=forge-ci \
+  bound_claims='{"repo":"acme/widgets","environment":"production"}' \
+  policies=deploy ttl=15m
+```
+
+In the job:
+
+```sh
+export VAULT_TOKEN=$(vault write -field=token auth/jwt/login role=deploy jwt=@"$FORGE_OIDC_TOKEN_FILE")
+vault kv get secret/deploy/db
+```
 
 ## Notes & limitations
 

@@ -38,15 +38,24 @@ const maxChangedFiles = 3000
 // truncated the list or the provider is unsupported; callers must then not
 // skip anything on the basis of the list.
 func (f *Fetcher) ChangedFiles(ctx context.Context, req CompareRequest) (files []string, complete bool, err error) {
-	switch req.Provider {
-	case "github":
-		return f.githubChanged(ctx, req)
-	case "bitbucket":
-		return f.bitbucketChanged(ctx, req)
-	case "codecommit":
-		return f.codecommitChanged(ctx, req)
+	repo := RepoRef{
+		Provider: req.Provider, Repo: req.Repo, CloneURL: req.CloneURL, Token: req.Token,
+		Region: req.Region, Profile: req.Profile, RoleARN: req.RoleARN,
 	}
-	return nil, false, nil
+	p := Lookup(req.Provider)
+	files, complete, err = p.ChangedFiles(ctx, f, repo, req.Base, req.Head)
+	if err == nil && complete {
+		return files, true, nil
+	}
+	// The host's API failed or truncated the list: diff with git itself when
+	// the repo is reachable over https/ssh (any host, not CodeCommit's
+	// helper-only codecommit:: URLs).
+	if p.Name() != "git" && gitAvailable() && gitReachable(req.CloneURL) {
+		if gf, gc, gerr := Lookup("git").ChangedFiles(ctx, f, repo, req.Base, req.Head); gerr == nil && gc {
+			return gf, true, nil
+		}
+	}
+	return files, complete, err
 }
 
 func (f *Fetcher) getJSON(ctx context.Context, reqURL, token string, v any) error {

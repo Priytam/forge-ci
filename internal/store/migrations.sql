@@ -224,7 +224,7 @@ ALTER TABLE repo_registry ADD COLUMN IF NOT EXISTS github_app_installation_id TE
 -- because the new value only widens the allowed set.
 ALTER TABLE repo_registry DROP CONSTRAINT IF EXISTS repo_registry_provider_check;
 ALTER TABLE repo_registry ADD CONSTRAINT repo_registry_provider_check
-    CHECK (provider IN ('github','bitbucket','codecommit','other'));
+    CHECK (provider IN ('github','gitlab','bitbucket','gitea','codecommit','git','other'));
 ALTER TABLE repo_registry ADD COLUMN IF NOT EXISTS aws_region   TEXT NOT NULL DEFAULT '';
 ALTER TABLE repo_registry ADD COLUMN IF NOT EXISTS aws_profile  TEXT NOT NULL DEFAULT '';
 ALTER TABLE repo_registry ADD COLUMN IF NOT EXISTS aws_role_arn TEXT NOT NULL DEFAULT '';

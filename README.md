@@ -1,8 +1,26 @@
 # Forge CI
 
-A GitLab-style CI/CD engine: YAML pipelines compiled to a job DAG, a
-Postgres-backed scheduler, pull-based runners with pluggable executors, an
-approval gate for protected environments, and a React dashboard.
+A self-hosted CI/CD engine that works with **any git host, any cloud and any
+kind of machine**: YAML pipelines compiled to a job DAG, a Postgres-backed
+scheduler, pull-based runners with pluggable executors, approval gates and
+deploy controls for protected environments, and a web dashboard.
+
+Forge is deliberately generic. Every integration is a pluggable provider; the
+ones listed are examples, not requirements:
+
+| Area | Works with |
+|---|---|
+| Git hosts | GitHub (cloud + Enterprise), GitLab (cloud + self-hosted), Bitbucket, Gitea / Forgejo, AWS CodeCommit, **any git server** over https/ssh (plain git) |
+| Where jobs run | `shell` (any machine: bare metal, VM, laptop), `docker` (any Docker host), `kubernetes` (any cluster, one pod per job) |
+| Cloud credentials for jobs | keyless per-job OIDC tokens, refreshed for long builds — federates with AWS, GCP, Azure, HashiCorp Vault or anything that trusts an OIDC issuer |
+| Artifacts, caches, logs | local disk or any S3-compatible object store (AWS S3, MinIO, Ceph, Cloudflare R2, GCS interoperability, …) |
+| Registries | any OCI registry (images, BuildKit layer cache) |
+| Sign-in | Google, Microsoft Entra ID, GitHub OAuth |
+| Notifications | Slack incoming webhooks, email (SMTP) |
+
+The server, runners and Postgres run anywhere — one VM, Docker Compose, or
+Kubernetes (Helm chart and Terraform modules included; AWS and GCP are just
+the two worked examples).
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
@@ -19,7 +37,7 @@ Monorepo with three deployables:
 | Deployable | Path | What it is |
 |---|---|---|
 | `forge-server` | `cmd/server` | Control plane: REST API, YAML→DAG compiler, scheduler, approvals |
-| `forge-runner` | `cmd/runner` | Pull-based build agent; `shell` and `docker` executors |
+| `forge-runner` | `cmd/runner` | Pull-based build agent; `shell`, `docker` and `kubernetes` executors |
 | web | `web/` | React dashboard (pipeline list, stage view, live logs, approve/reject) |
 
 ## Architecture
@@ -34,7 +52,7 @@ Monorepo with three deployables:
      runner protocol (HTTP long-poll)
  ◄── acquire (FOR UPDATE SKIP LOCKED) ── forge-runner ×N
  ──► logs (streamed chunks) / heartbeat / complete       │
-                                                shell | docker executor
+                                      shell | docker | kubernetes executor
 ```
 
 Job state machine:

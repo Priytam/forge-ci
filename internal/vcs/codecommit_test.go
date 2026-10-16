@@ -268,7 +268,8 @@ func TestFetchCodeCommitBadCloneURL(t *testing.T) {
 
 // Regression: adding the CodeCommit branch must not change how the other
 // providers resolve. A single-segment repo name is still invalid for GitHub, and
-// provider "other" still reports "fall back" rather than an error.
+// provider "other" (the generic git provider) reports "fall back" rather than
+// an error when its clone URL isn't one plain git can fetch.
 func TestFetchNonCodeCommitProvidersUnchanged(t *testing.T) {
 	f := NewFetcher()
 

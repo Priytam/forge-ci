@@ -21,13 +21,15 @@ const PAGE = 24;
 export function ProviderChip({ provider }: { provider: string | null }) {
   if (!provider) return null;
   const label =
-    provider === "github"
-      ? "GitHub"
-      : provider === "bitbucket"
-        ? "Bitbucket"
-        : provider === "codecommit"
-          ? "CodeCommit"
-          : "Git";
+    (
+      {
+        github: "GitHub",
+        gitlab: "GitLab",
+        bitbucket: "Bitbucket",
+        gitea: "Gitea",
+        codecommit: "CodeCommit",
+      } as Record<string, string>
+    )[provider] ?? "Git";
   return <span className={`provider-chip provider-${provider}`}>{label}</span>;
 }
 

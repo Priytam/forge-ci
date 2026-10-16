@@ -399,7 +399,7 @@ func (sc *Scheduler) deliverStatus(ctx context.Context, c store.StatusCandidate)
 		sc.deliverCodeCommitComment(ctx, c)
 		return
 	}
-	provider, token, ok, err := sc.store.RepoStatusTarget(ctx, c.Repo)
+	provider, token, cloneURL, ok, err := sc.store.RepoStatusTarget(ctx, c.Repo)
 	if err != nil {
 		slog.Error("commit-status: resolve repo token", "err", err, "repo", c.Repo)
 		sc.releaseStatus(ctx, c) // treat as transient; retry later
@@ -407,19 +407,24 @@ func (sc *Scheduler) deliverStatus(ctx context.Context, c store.StatusCandidate)
 	}
 	// Belt-and-braces: the candidate query already excludes unpostable repos,
 	// but the registry could have changed between the query and here.
-	if !ok || token == "" || (provider != "github" && provider != "bitbucket") {
+	if !ok || token == "" {
 		slog.Debug("commit-status: repo not postable, skipping", "repo", c.Repo, "provider", provider)
 		return
 	}
 
 	err = sc.poster.Post(ctx, vcs.PostRequest{
 		Provider:  provider,
+		CloneURL:  cloneURL,
 		Repo:      c.Repo,
 		SHA:       c.SHA,
 		Token:     token,
 		Status:    c.Status,
 		TargetURL: pipelineURL(c.PipelineID),
 	})
+	if errors.Is(err, vcs.ErrNoStatusAPI) {
+		slog.Debug("commit-status: provider has no status API", "repo", c.Repo, "provider", provider)
+		return
+	}
 	if err == nil {
 		slog.Info("commit-status posted", "repo", c.Repo, "sha", shortSHA(c.SHA),
 			"status", c.Status, "provider", provider)
@@ -427,8 +432,8 @@ func (sc *Scheduler) deliverStatus(ctx context.Context, c store.StatusCandidate)
 	}
 	var pe *vcs.PostError
 	if errors.As(err, &pe) && pe.Permanent {
-		slog.Error("commit-status: giving up — check the repo's token scope "+
-			"(GitHub repo:status / Bitbucket repositories:write), repo name and sha",
+		slog.Error("commit-status: giving up — check that the repo's token may write "+
+			"commit statuses on its host, and the repo name and sha",
 			"repo", c.Repo, "sha", shortSHA(c.SHA), "status", c.Status,
 			"provider", provider, "http_status", pe.StatusCode, "attempts", pe.Attempts)
 		return // keep the claim: don't re-hammer a misconfigured repo

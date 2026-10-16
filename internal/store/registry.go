@@ -304,6 +304,21 @@ func (s *Store) AppTokenForValidation(ctx context.Context, repo, appID, keyPEM, 
 // against the registered clone URL. Returns ErrNotFound when the repo isn't
 // registered; token is stripped from any error text.
 func (s *Store) ResolveRef(ctx context.Context, repo, ref string) (string, error) {
+	// CodeCommit: resolve branches through the AWS SDK, so the server needs no
+	// git-remote-codecommit helper. Tags (and anything GetBranch can't find)
+	// fall through to git ls-remote, which needs the optional helper.
+	if conn, found, err := s.resolveRepoAuth(ctx, repo); err == nil && found && conn.Provider == "codecommit" {
+		sha, ok, cerr := s.fetcher.ResolveCodeCommitRef(ctx, vcs.RepoRef{
+			Provider: "codecommit", Repo: repo, CloneURL: conn.CloneURL,
+			Region: conn.AWS.Region, Profile: conn.AWS.Profile, RoleARN: conn.AWS.RoleARN,
+		}, ref)
+		if cerr != nil {
+			return "", cerr
+		}
+		if ok {
+			return sha, nil
+		}
+	}
 	cloneURL, token, err := s.cloneAuth(ctx, repo)
 	if err != nil {
 		return "", err
@@ -365,11 +380,8 @@ func (s *Store) cloneTarget(ctx context.Context, repo string) (cloneURL, token s
 	if perr != nil || !strings.HasPrefix(u.Scheme, "http") {
 		return conn.CloneURL, conn.Token, conn, nil
 	}
-	switch conn.Provider {
-	case "bitbucket":
-		u.User = url.UserPassword("x-token-auth", conn.Token)
-	default: // github and generic HTTPS token auth
-		u.User = url.UserPassword("x-access-token", conn.Token)
+	if ui := vcs.Lookup(conn.Provider).CloneUser(conn.Token); ui != nil {
+		u.User = ui // each host's token form (x-access-token, oauth2, x-token-auth, ...)
 	}
 	return u.String(), conn.Token, conn, nil
 }

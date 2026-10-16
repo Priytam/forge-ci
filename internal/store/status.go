@@ -14,7 +14,7 @@ type StatusCandidate struct {
 	Repo       string
 	Ref        string
 	SHA        string
-	Provider   string // github | bitbucket | codecommit (never "other" — filtered out)
+	Provider   string // a provider with a status API, or codecommit (PR comments)
 	Status     string // the phase to post (see statusForPost)
 
 	// CodeCommit only: it has no commit-status API, so the result goes to the
@@ -92,7 +92,7 @@ func (s *Store) PipelinesPendingStatusPost(ctx context.Context) ([]StatusCandida
 		 FROM pipelines p
 		 JOIN repo_registry rr ON rr.repo = p.repo
 		      AND (
-		        (rr.provider IN ('github','bitbucket')
+		        (rr.provider IN ('github','bitbucket','gitlab','gitea')
 		         AND (rr.token <> ''
 		              OR (rr.github_app_id <> '' AND rr.github_app_installation_id <> ''
 		                  AND rr.github_app_private_key <> '')))
@@ -173,15 +173,15 @@ func (s *Store) ReleaseStatusPost(ctx context.Context, pipelineID int64, status 
 // cloneAuth (see resolveRepoAuth). ok is false when the repo is not registered.
 // The token is used only for outbound VCS API calls (Authorization header) — it
 // is never returned over Forge's own HTTP API and never logged.
-func (s *Store) RepoStatusTarget(ctx context.Context, repo string) (provider, token string, ok bool, err error) {
+func (s *Store) RepoStatusTarget(ctx context.Context, repo string) (provider, token, cloneURL string, ok bool, err error) {
 	conn, found, err := s.resolveRepoAuth(ctx, repo)
 	if err != nil {
-		return "", "", false, err
+		return "", "", "", false, err
 	}
 	if !found {
-		return "", "", false, nil
+		return "", "", "", false, nil
 	}
-	return conn.Provider, conn.Token, true, nil
+	return conn.Provider, conn.Token, conn.CloneURL, true, nil
 }
 
 // CodeCommitStatusTarget resolves where a CodeCommit pull-request comment

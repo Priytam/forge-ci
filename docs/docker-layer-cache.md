@@ -28,16 +28,24 @@ docker buildx build \
 
 ### Registry credentials for long builds
 
-`docker login` with a short-lived access token can expire mid-build. Prefer a
-credential helper that fetches a token per request:
+Any OCI registry works: GHCR, GitLab Container Registry, Docker Hub, Harbor,
+Quay, Gitea's registry, AWS ECR, Google Artifact Registry, Azure ACR, a
+self-hosted `registry:2`. A `docker login` with a short-lived access token can
+expire mid-build, so prefer, in order:
 
-- **Google Artifact Registry:** in an image with `gcloud` and the Docker CLI,
-  create a Workload Identity cred-config with
-  `--credential-source-file="$FORGE_OIDC_TOKEN_FILE"` (docs/oidc.md), then
-  `gcloud auth configure-docker REGION-docker.pkg.dev`. Forge keeps that token
-  file fresh for the whole job.
-- **AWS ECR:** `amazon-ecr-credential-helper` with `AWS_ROLE_ARN` set and
-  `AWS_WEB_IDENTITY_TOKEN_FILE` (Forge sets it to the same refreshing file).
+1. A **long-lived registry credential** stored as a masked, protected variable
+   (`REGISTRY_USER` / `REGISTRY_PASSWORD`) — simplest, works everywhere.
+2. A **credential helper** that fetches a token per request, fed by Forge's
+   refreshing OIDC token file (docs/oidc.md):
+   - AWS ECR — `amazon-ecr-credential-helper`, with `AWS_ROLE_ARN` and
+     `AWS_WEB_IDENTITY_TOKEN_FILE` (Forge sets it to the refreshing file);
+   - Google Artifact Registry — a Workload Identity cred-config with
+     `--credential-source-file="$FORGE_OIDC_TOKEN_FILE"`, then
+     `gcloud auth configure-docker REGION-docker.pkg.dev`;
+   - Azure ACR — `az login --federated-token "$(cat "$FORGE_OIDC_TOKEN_FILE")"`
+     then `az acr login`; repeat the login before a long push if needed;
+   - Harbor / Quay / registries trusting an OIDC issuer — exchange the token
+     per their docs.
 
 ## 2. Persistent runner cache
 

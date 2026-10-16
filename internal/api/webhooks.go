@@ -31,6 +31,8 @@ import (
 func (s *Server) registerWebhookRoutes() {
 	s.mux.HandleFunc("POST /api/v1/webhooks/github", s.githubWebhook)
 	s.mux.HandleFunc("POST /api/v1/webhooks/bitbucket", s.bitbucketWebhook)
+	s.mux.HandleFunc("POST /api/v1/webhooks/gitlab", s.gitlabWebhook)
+	s.mux.HandleFunc("POST /api/v1/webhooks/gitea", s.giteaWebhook)
 	// CodeCommit has no webhooks: this route is fed by an EventBridge API
 	// Destination. See internal/api/webhooks_codecommit.go.
 	s.mux.HandleFunc("POST /api/v1/webhooks/codecommit", s.codecommitWebhook)
@@ -115,13 +117,20 @@ func (s *Server) registerRepo(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
-	case "other":
+	case "gitlab":
 		if req.CloneURL == "" {
-			writeErr(w, http.StatusBadRequest, `provider "other" requires clone_url`)
+			req.CloneURL = "https://gitlab.com/" + req.Repo + ".git"
+		}
+	case "gitea", "git", "other":
+		if req.CloneURL == "" {
+			writeErr(w, http.StatusBadRequest, `provider "`+req.Provider+`" requires clone_url`)
 			return
 		}
+		if req.Provider == "other" {
+			req.Provider = "git" // the generic git provider
+		}
 	default:
-		writeErr(w, http.StatusBadRequest, "provider must be github, bitbucket, codecommit or other")
+		writeErr(w, http.StatusBadRequest, "provider must be one of: "+strings.Join(vcs.Names(), ", ")+" (git = any git server)")
 		return
 	}
 	if req.DefaultBranch == "" {
@@ -294,10 +303,8 @@ func validateCloneAccessWithToken(ctx context.Context, cloneURL, token, provider
 	if token != "" {
 		parsed, err := url.Parse(u)
 		if err == nil {
-			if provider == "bitbucket" {
-				parsed.User = url.UserPassword("x-token-auth", token)
-			} else {
-				parsed.User = url.UserPassword("x-access-token", token)
+			if ui := vcs.Lookup(provider).CloneUser(token); ui != nil {
+				parsed.User = ui
 			}
 			u = parsed.String()
 		}
@@ -388,6 +395,9 @@ func (s *Server) triggerFromWebhook(w http.ResponseWriter, r *http.Request, run 
 	mrBase := ""
 	if pr != nil {
 		mrBase = pr.BaseSHA
+		if mrBase == "" {
+			mrBase = extraCtx["CI_MERGE_REQUEST_TARGET_BRANCH"] // diff from the merge base with the target
+		}
 	}
 	changes := s.store.PipelineChangeSet(r.Context(), repo, ref, sha, source, mrBase)
 	jobs, err := compiler.CompileWithChanges(config, ref, source, s.store.TemplateResolver(r.Context(), repo), changes, extraCtx)

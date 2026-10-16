@@ -1,10 +1,24 @@
-# GitHub / Bitbucket integration
+# Git host integration
 
-> **AWS CodeCommit** is also a first-class provider, but it works differently
-> enough — EventBridge instead of webhooks, IAM SigV4 instead of a token, a pull
-> request comment instead of a commit status — that it has its own guide:
-> **[codecommit.md](codecommit.md)**. This page covers the two token-based
-> providers.
+Forge works with **any git host**. Each host is a provider plugin
+(`internal/vcs/provider_*.go`) behind one interface — read a file at a commit,
+list changed files, post a commit status, link to a file — so adding a host
+is one file. The hosts below are the built-in examples:
+
+| Provider (`provider`) | Triggers | Config from repo | `rules: changes:` | Commit status | Clone auth |
+|---|---|---|---|---|---|
+| `github` — github.com, GitHub Enterprise | webhook `/webhooks/github` (push, PR) | contents API | compare API | statuses API | PAT or GitHub App |
+| `gitlab` — gitlab.com or self-hosted | webhook `/webhooks/gitlab` (push, tag, MR) | files API | compare API | statuses API | any access token |
+| `bitbucket` — Bitbucket Cloud | webhook `/webhooks/bitbucket` (push, PR) | src API | diffstat API | build statuses | token / app password |
+| `gitea` — Gitea, Forgejo, Codeberg | webhook `/webhooks/gitea` (push, PR) | raw API | compare API (≥1.22; git fallback below) | statuses API | access token |
+| `codecommit` — AWS CodeCommit | EventBridge → `/webhooks/codecommit` | AWS SDK | GetDifferences | PR comment | IAM (no token) — see [codecommit.md](codecommit.md) |
+| `git` — **any git server** over https/ssh | API trigger, schedules, or any webhook you can point at the API | plain git (shallow, blob-less fetch) | `git diff` | — | token in the clone URL or ssh |
+
+When a host's API fails or truncates a diff (e.g. more than 300 files on
+GitHub), Forge falls back to diffing with git itself, for any host reachable
+over https or ssh. Self-hosted GitLab and Gitea need no extra setting: the API
+address is derived from the clone URL (`GITLAB_API_BASE` / `GITEA_API_BASE`
+override it). The legacy provider name `other` means `git`.
 
 Forge is a standalone CI system — it does not host repositories. Three things
 connect it to your VCS:
@@ -71,6 +85,40 @@ connect it to your VCS:
 3. Push a commit; the pipeline triggers with the actor as `triggered_by`.
    (Bitbucket Cloud has no HMAC signing — restrict by network/allowlist or a
    token in the URL if exposure is a concern.)
+
+## GitLab (cloud or self-hosted) — step by step
+
+1. Connect the repo with provider `gitlab`, the full project path
+   (`group/subgroup/project`), and an access token (personal, project or
+   group token) with `read_repository` — plus `api` if Forge should post
+   commit statuses. For a self-hosted instance give its `clone_url`.
+2. Set `WEBHOOK_SECRET` on the server.
+3. In GitLab: **Settings → Webhooks → Add new webhook**
+   - URL: `https://<forge-host>/api/v1/webhooks/gitlab`
+   - Secret token: the same `WEBHOOK_SECRET` (GitLab sends it as
+     `X-Gitlab-Token`)
+   - Triggers: *Push events*, *Tag push events*, *Merge request events*
+4. Push. Merge requests build on open, reopen and new commits (`CI_MERGE_REQUEST_*`
+   are set); title edits and approvals don't trigger.
+
+## Gitea / Forgejo — step by step
+
+1. Connect the repo with provider `gitea`, `owner/name`, its `clone_url`, and
+   an access token with repository read (and write, for commit statuses).
+2. Set `WEBHOOK_SECRET`.
+3. In Gitea/Forgejo: **Settings → Webhooks → Add webhook → Gitea**
+   - Target URL: `https://<forge-host>/api/v1/webhooks/gitea`
+   - Secret: the same `WEBHOOK_SECRET` (verified as HMAC-SHA256 in
+     `X-Gitea-Signature` / `X-Forgejo-Signature`)
+   - Events: *Push* and *Pull request*
+
+## Any other git server (plain git)
+
+Provider `git` with any https or ssh `clone_url` (Azure Repos, cgit, Gerrit,
+a bare repo on a VM, …). Forge reads `.forge-ci.yml` and computes `changes:`
+with shallow, blob-less git fetches; there is no status API. Trigger pipelines
+from the host's own hook system with `POST /api/v1/pipelines` and a service
+account token (docs/api-tokens.md), or with schedules.
 
 ## GitHub App authentication
 
@@ -386,31 +434,37 @@ reused for the status post (the App needs *Commit statuses: write*).
   retries, so a slow or broken VCS API never blocks the scheduler.
 - **Status mapping:**
 
-  | Forge pipeline phase | GitHub state | Bitbucket state |
-  |---|---|---|
-  | pending / running / blocked | `pending` | `INPROGRESS` |
-  | success | `success` | `SUCCESSFUL` |
-  | failed | `failure` | `FAILED` |
-  | canceled | `error` | `STOPPED` |
+  | Forge pipeline phase | GitHub | GitLab | Bitbucket | Gitea |
+  |---|---|---|---|---|
+  | pending / blocked | `pending` | `pending` | `INPROGRESS` | `pending` |
+  | running | `pending` | `running` | `INPROGRESS` | `pending` |
+  | success | `success` | `success` | `SUCCESSFUL` | `success` |
+  | failed | `failure` | `failed` | `FAILED` | `failure` |
+  | canceled | `error` | `canceled` | `STOPPED` | `error` |
 
   (`canceled` → GitHub `error` rather than `failure`: the run did not complete,
   but it wasn't a test failure.)
 - **APIs used:**
   - GitHub — `POST /repos/{owner}/{repo}/statuses/{sha}`.
+  - GitLab — `POST /api/v4/projects/{path}/statuses/{sha}`.
   - Bitbucket — `POST /2.0/repositories/{workspace}/{repo}/commit/{sha}/statuses/build`.
+  - Gitea — `POST /api/v1/repos/{owner}/{repo}/statuses/{sha}`.
 
-  Both bases are overridable via `GITHUB_API_BASE` / `BITBUCKET_API_BASE`
-  (used for testing against a stub; leave unset in production).
+  Bases are overridable via `GITHUB_API_BASE` / `GITLAB_API_BASE` /
+  `BITBUCKET_API_BASE` / `GITEA_API_BASE`; GitLab and Gitea otherwise use the
+  clone URL's host, so self-hosted instances work as-is.
 - **Required token scope:**
   - GitHub — a token with **`repo:status`** (classic PAT) or the fine-grained
     **"Commit statuses: write"** permission. The same connection token used for
     cloning is reused; a public-repo clone token without this scope will clone
     fine but get a `403` on status write (logged with an actionable message —
     the token is never logged).
+  - GitLab — a token with the **`api`** scope.
   - Bitbucket — a token / app password with **`repositories:write`**.
+  - Gitea — a token with **write:repository**.
 - **Skipped silently** (logged at debug, nothing posted) when the repo has **no
-  token and no GitHub App** or **provider `other`** (not every git host has a
-  status API).
+  token and no GitHub App** or the host has no status API (plain `git`;
+  CodeCommit reports via a pull-request comment instead).
 - **Disable:** set `COMMIT_STATUS=off` on `forge-server` to turn write-back off
   globally. It is on by default and only ever acts on repos that have a token.
 

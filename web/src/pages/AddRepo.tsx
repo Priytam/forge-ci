@@ -9,7 +9,9 @@ function derivedCloneUrl(
 ): string {
   const name = repo.trim();
   if (!name) return "";
+  // Public hosts only; self-hosted instances type their own clone URL.
   if (provider === "github") return `https://github.com/${name}.git`;
+  if (provider === "gitlab") return `https://gitlab.com/${name}.git`;
   if (provider === "bitbucket") return `https://bitbucket.org/${name}.git`;
   // git-remote-codecommit form; the runner signs it with SigV4 at clone time.
   if (provider === "codecommit") {
@@ -21,10 +23,16 @@ function derivedCloneUrl(
 
 const PROVIDER_LABEL: Record<RepoProvider, string> = {
   github: "GitHub",
+  gitlab: "GitLab",
   bitbucket: "Bitbucket",
-  codecommit: "CodeCommit",
-  other: "Other",
+  gitea: "Gitea / Forgejo",
+  codecommit: "AWS CodeCommit",
+  git: "any git server",
+  other: "any git server",
 };
+
+/** Hosts whose clone URL can't be guessed (always self-hosted or arbitrary). */
+const NEEDS_URL: RepoProvider[] = ["gitea", "git", "other"];
 
 export default function AddRepo() {
   const navigate = useNavigate();
@@ -43,10 +51,11 @@ export default function AddRepo() {
   const [busy, setBusy] = useState(false);
   const [connected, setConnected] = useState<string | null>(null);
 
-  const autoUrl = provider !== "other";
-  const effectiveCloneUrl = autoUrl
-    ? derivedCloneUrl(provider, repo, awsRegion)
-    : cloneUrl;
+  // CodeCommit's URL is always derived; everything else is editable so
+  // self-hosted GitHub Enterprise / GitLab / Gitea instances work.
+  const autoUrl = provider === "codecommit";
+  const suggestedUrl = derivedCloneUrl(provider, repo, awsRegion);
+  const effectiveCloneUrl = autoUrl ? suggestedUrl : cloneUrl;
   // GitHub App auth only applies to GitHub repos.
   const appMode = provider === "github" && authMethod === "app";
   // CodeCommit holds no credential at all: it is reached with an AWS identity,
@@ -61,7 +70,7 @@ export default function AddRepo() {
       await registerRepo({
         repo: repo.trim(),
         provider,
-        clone_url: autoUrl ? undefined : cloneUrl.trim(),
+        clone_url: autoUrl ? undefined : cloneUrl.trim() || undefined,
         token: appMode || isCodeCommit ? undefined : token || undefined,
         default_branch: branch.trim() || "main",
         ...(isCodeCommit
@@ -147,10 +156,12 @@ export default function AddRepo() {
               value={provider}
               onChange={(e) => setProvider(e.target.value as RepoProvider)}
             >
-              <option value="github">GitHub</option>
+              <option value="github">GitHub / GitHub Enterprise</option>
+              <option value="gitlab">GitLab (cloud or self-hosted)</option>
               <option value="bitbucket">Bitbucket</option>
+              <option value="gitea">Gitea / Forgejo</option>
               <option value="codecommit">AWS CodeCommit</option>
-              <option value="other">Other</option>
+              <option value="git">Any git server (plain git)</option>
             </select>
           </label>
           <label className="field">
@@ -178,15 +189,16 @@ export default function AddRepo() {
             value={effectiveCloneUrl}
             onChange={(e) => setCloneUrl(e.target.value)}
             disabled={autoUrl}
-            placeholder={autoUrl ? "" : "https://git.example.com/owner/name.git"}
-            required={!autoUrl}
+            placeholder={suggestedUrl || "https://git.example.com/owner/name.git"}
+            required={NEEDS_URL.includes(provider)}
           />
-          {autoUrl && (
-            <span className="field-hint">
-              Derived from the repo {isCodeCommit ? "name and region" : "full name"}{" "}
-              for {PROVIDER_LABEL[provider]}.
-            </span>
-          )}
+          <span className="field-hint">
+            {autoUrl
+              ? `Derived from the repo name and region for ${PROVIDER_LABEL[provider]}.`
+              : NEEDS_URL.includes(provider)
+                ? `Required for ${PROVIDER_LABEL[provider]}: https or ssh clone URL.`
+                : `Leave empty for ${PROVIDER_LABEL[provider]} cloud; enter your instance's clone URL if self-hosted.`}
+          </span>
         </label>
 
         {isCodeCommit && (

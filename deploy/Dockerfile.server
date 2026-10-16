@@ -16,16 +16,23 @@ RUN CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -o /out/downloads/forge-run
     CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o /out/downloads/forge-runner-windows-amd64.exe  ./cmd/runner
 
 FROM alpine:3
-# git: the server runs `git ls-remote` to resolve refs for connected repos
-# (internal/store/registry.go, internal/api/webhooks.go).
-# git-remote-codecommit: CodeCommit repos are resolved via codecommit:: URLs,
-# which git hands to this helper. It lives in its own venv (Alpine's pip
-# refuses system-wide installs, PEP 668) and is linked onto PATH so the
-# non-root forge user finds it.
-RUN apk add --no-cache git ca-certificates python3 \
- && python3 -m venv /opt/codecommit-venv \
- && /opt/codecommit-venv/bin/pip install --no-cache-dir git-remote-codecommit==1.17 \
- && ln -s /opt/codecommit-venv/bin/git-remote-codecommit /usr/local/bin/git-remote-codecommit \
+# git: the server reads and diffs repos on any git host with plain git, and
+# resolves refs with `git ls-remote` (internal/vcs/provider_git.go).
+#
+# Optional git remote helpers, one build arg per host that needs one. None is
+# needed by default: CodeCommit branches resolve through the AWS SDK. Only
+# resolving CodeCommit *tags* (codecommit:: URLs) needs git-remote-codecommit:
+#   docker build --build-arg WITH_CODECOMMIT_HELPER=true -f deploy/Dockerfile.server .
+# It lives in its own venv (Alpine's pip refuses system-wide installs, PEP 668)
+# and is linked onto PATH for the non-root forge user.
+ARG WITH_CODECOMMIT_HELPER=false
+RUN apk add --no-cache git ca-certificates \
+ && if [ "$WITH_CODECOMMIT_HELPER" = "true" ]; then \
+      apk add --no-cache python3 \
+      && python3 -m venv /opt/codecommit-venv \
+      && /opt/codecommit-venv/bin/pip install --no-cache-dir git-remote-codecommit==1.17 \
+      && ln -s /opt/codecommit-venv/bin/git-remote-codecommit /usr/local/bin/git-remote-codecommit; \
+    fi \
  && adduser -D forge
 COPY --from=build /out/forge-server /usr/local/bin/forge-server
 COPY --from=build /out/downloads /usr/local/share/forge-downloads

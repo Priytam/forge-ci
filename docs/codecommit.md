@@ -240,3 +240,18 @@ simply shows no link. See
 | `FORGE_AWS_ROLE_ARN` | runner | override the role assumed for the clone |
 | `FORGE_AWS_AUTH` | runner | `instance` pins the ambient credential chain |
 | `AWS_REGION`, `AWS_PROFILE`, … | both | standard AWS SDK configuration |
+
+## Server image and the `git-remote-codecommit` helper
+
+The server resolves CodeCommit **branches** through the AWS SDK
+(`GetBranch`), reads `.forge-ci.yml` with `GetFile` and computes `changes:`
+with `GetDifferences`, so the stock server image needs no CodeCommit-specific
+software. Only resolving a CodeCommit **tag** by name (e.g. *Run pipeline* on
+a tag) falls back to `git ls-remote codecommit::…`, which needs the helper —
+build the image with it if you need that:
+
+```sh
+docker build --build-arg WITH_CODECOMMIT_HELPER=true -f deploy/Dockerfile.server -t forge-server .
+```
+
+Runners never need it: they clone CodeCommit over SigV4-signed HTTPS.

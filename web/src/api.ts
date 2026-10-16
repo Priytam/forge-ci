@@ -263,7 +263,8 @@ export interface Schedule {
   next_run_at: string | null;
 }
 
-export type RepoProvider = "github" | "bitbucket" | "codecommit" | "other";
+/** A git host Forge integrates with; "git" is any git server (plain git). */
+export type RepoProvider = "github" | "gitlab" | "bitbucket" | "gitea" | "codecommit" | "git" | "other";
 
 export interface RegisteredRepo {
   repo: string;

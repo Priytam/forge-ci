@@ -18,7 +18,6 @@ package vcs
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -82,8 +81,9 @@ func MapBitbucketState(status string) (state, description string) {
 // PostRequest is one commit-status write. Token is a plaintext VCS token used
 // only in the Authorization header; it is never logged.
 type PostRequest struct {
-	Provider  string // github | bitbucket
-	Repo      string // owner/name (github) or workspace/slug (bitbucket)
+	Provider  string // a registered provider name (see Provider)
+	Repo      string // the repo as registered (owner/name, group/sub/project, ...)
+	CloneURL  string // registered clone URL (self-hosted hosts derive their API from it)
 	SHA       string
 	Token     string
 	Status    string // Forge pipeline phase (mapped per provider)
@@ -160,13 +160,13 @@ func apiBase(env, fallback string) string {
 // PostError.Permanent lets the caller decide whether a further retry on a later
 // tick is worthwhile.
 func (p *Poster) Post(ctx context.Context, req PostRequest) error {
-	url, body, err := p.build(req)
+	call, err := Lookup(req.Provider).StatusRequest(p, req)
 	if err != nil {
 		return err
 	}
 	var last *PostError
 	for attempt := 1; attempt <= p.maxAttempts; attempt++ {
-		code, perr := p.attempt(ctx, url, req.Token, body)
+		code, perr := p.attempt(ctx, call)
 		if perr == nil && code >= 200 && code < 300 {
 			return nil
 		}
@@ -182,12 +182,14 @@ func (p *Poster) Post(ctx context.Context, req PostRequest) error {
 	return last
 }
 
-func (p *Poster) attempt(ctx context.Context, url, token string, body []byte) (int, error) {
-	r, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+func (p *Poster) attempt(ctx context.Context, call *StatusCall) (int, error) {
+	r, err := http.NewRequestWithContext(ctx, http.MethodPost, call.URL, bytes.NewReader(call.Body))
 	if err != nil {
 		return 0, err
 	}
-	r.Header.Set("Authorization", "Bearer "+token)
+	for k, v := range call.Headers {
+		r.Header.Set(k, v)
+	}
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Accept", "application/json")
 	resp, err := p.client.Do(r)
@@ -200,37 +202,14 @@ func (p *Poster) attempt(ctx context.Context, url, token string, body []byte) (i
 	return resp.StatusCode, nil
 }
 
-// build produces the provider-specific request URL and JSON body.
+// build produces the provider-specific request URL and JSON body (kept for
+// tests and callers that only need the payload).
 func (p *Poster) build(req PostRequest) (url string, body []byte, err error) {
-	owner, name, ok := splitRepo(req.Repo)
-	if !ok {
-		return "", nil, fmt.Errorf("invalid repo %q (want owner/name)", req.Repo)
+	call, err := Lookup(req.Provider).StatusRequest(p, req)
+	if err != nil {
+		return "", nil, err
 	}
-	switch req.Provider {
-	case "github":
-		state, desc := MapGitHubState(req.Status)
-		body, _ = json.Marshal(map[string]string{
-			"state":       state,
-			"target_url":  req.TargetURL,
-			"context":     StatusContext,
-			"description": desc,
-		})
-		url = fmt.Sprintf("%s/repos/%s/%s/statuses/%s", p.githubBase, owner, name, req.SHA)
-	case "bitbucket":
-		state, desc := MapBitbucketState(req.Status)
-		body, _ = json.Marshal(map[string]string{
-			"key":         StatusContext,
-			"state":       state,
-			"url":         req.TargetURL,
-			"name":        "Forge CI",
-			"description": desc,
-		})
-		url = fmt.Sprintf("%s/2.0/repositories/%s/%s/commit/%s/statuses/build", p.bitbucketBase, owner, name, req.SHA)
-	default:
-		// CodeCommit reaches its comment path before build() is ever called.
-		return "", nil, fmt.Errorf("provider %q has no commit-status API", req.Provider)
-	}
-	return url, body, nil
+	return call.URL, call.Body, nil
 }
 
 // splitRepo splits "owner/name" on the first slash.
