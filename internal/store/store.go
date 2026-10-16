@@ -319,6 +319,7 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 		if canonicalEnv != "" {
 			environment = &canonicalEnv
 		}
+		resourceGroup := expandResourceGroup(j.ResourceGroup, canonicalEnv)
 		// Manual jobs start gated in the 'blocked' state (with the manual flag so
 		// the scheduler and approval endpoint distinguish them from an
 		// environment-approval block); a play releases them back to 'created'.
@@ -335,9 +336,9 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 		}
 		var id int64
 		err = tx.QueryRow(ctx,
-			`INSERT INTO jobs (pipeline_id, name, stage, stage_idx, image, script, env, environment, tags, artifact_paths, artifact_expire_seconds, report_junit, cache_paths, cache_key, cache_key_files, cache_policy, services, network, timeout_seconds, max_attempts, status, manual, allow_failure, blocked_at, finished_at, status_reason)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26) RETURNING id`,
-			p.ID, j.Name, j.Stage, j.StageIdx, image, j.Script, env, environment, tags, artifacts, j.ArtifactExpireSeconds, reportJUnit, cachePaths, j.CacheKey, cacheKeyFiles, j.CachePolicy, services, j.Network, timeoutSec, j.Retry+1, status, j.Manual, j.AllowFailure, blockedAt, finishedAt, denied).Scan(&id)
+			`INSERT INTO jobs (pipeline_id, name, stage, stage_idx, image, script, env, environment, tags, artifact_paths, artifact_expire_seconds, report_junit, cache_paths, cache_key, cache_key_files, cache_policy, services, network, timeout_seconds, max_attempts, status, manual, allow_failure, blocked_at, finished_at, status_reason, resource_group)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27) RETURNING id`,
+			p.ID, j.Name, j.Stage, j.StageIdx, image, j.Script, env, environment, tags, artifacts, j.ArtifactExpireSeconds, reportJUnit, cachePaths, j.CacheKey, cacheKeyFiles, j.CachePolicy, services, j.Network, timeoutSec, j.Retry+1, status, j.Manual, j.AllowFailure, blockedAt, finishedAt, denied, resourceGroup).Scan(&id)
 		if err != nil {
 			return nil, err
 		}
@@ -440,7 +441,7 @@ type stageJob struct {
 func (s *Store) ListPipelines(ctx context.Context, repo string) ([]proto.Pipeline, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT `+pipelineWithStagesCols+`
-		 FROM pipelines p LEFT JOIN jobs j ON j.pipeline_id = p.id
+		 FROM pipelines p LEFT JOIN jobs j ON j.pipeline_id = p.id AND NOT j.superseded
 		 WHERE ($1 = '' OR p.repo = $1)
 		 GROUP BY p.id ORDER BY p.id DESC LIMIT 200`, repo)
 	if err != nil {
@@ -553,7 +554,7 @@ func (s *Store) ListRepos(ctx context.Context, q RepoQuery) ([]proto.RepoSummary
 
 	// The last pipeline of each card, with its stages, for the card header.
 	rows, err = s.pool.Query(ctx, `SELECT `+pipelineWithStagesCols+`
-		FROM pipelines p LEFT JOIN jobs j ON j.pipeline_id = p.id
+		FROM pipelines p LEFT JOIN jobs j ON j.pipeline_id = p.id AND NOT j.superseded
 		WHERE p.id = ANY($1) GROUP BY p.id`, lastIDs)
 	if err != nil {
 		return nil, 0, err
@@ -592,9 +593,10 @@ func (s *Store) GetPipeline(ctx context.Context, id int64) (*proto.Pipeline, []p
 		        j.status,
 		        CASE WHEN j.status='failed' AND j.allow_failure THEN 'success' ELSE j.status END,
 		        j.started_at, j.finished_at, j.exit_code, j.manual, j.allow_failure, j.status_reason,
+		        j.retry_of, j.resource_group,
 		        COALESCE(array_agg(n.needs_job_id) FILTER (WHERE n.needs_job_id IS NOT NULL), '{}')
 		 FROM jobs j LEFT JOIN job_needs n ON n.job_id = j.id
-		 WHERE j.pipeline_id = $1
+		 WHERE j.pipeline_id = $1 AND NOT j.superseded
 		 GROUP BY j.id ORDER BY j.stage_idx, j.name`, id)
 	if err != nil {
 		return nil, nil, err
@@ -611,7 +613,7 @@ func (s *Store) GetPipeline(ctx context.Context, id int64) (*proto.Pipeline, []p
 		var effective string
 		if err := rows.Scan(&j.ID, &j.PipelineID, &j.Name, &j.Stage, &j.StageIdx, &j.Image,
 			&j.Environment, &j.Status, &effective, &j.StartedAt, &j.FinishedAt, &j.ExitCode,
-			&j.Manual, &j.AllowFailure, &j.StatusReason, &j.Needs); err != nil {
+			&j.Manual, &j.AllowFailure, &j.StatusReason, &j.RetryOf, &j.ResourceGroup, &j.Needs); err != nil {
 			return nil, nil, err
 		}
 		jobs = append(jobs, j)
@@ -673,13 +675,13 @@ func (s *Store) GetJob(ctx context.Context, id int64) (*proto.Job, error) {
 	err := s.pool.QueryRow(ctx,
 		`SELECT j.id, j.pipeline_id, j.name, j.stage, j.stage_idx, j.image, j.environment,
 		        j.status, j.started_at, j.finished_at, j.exit_code, j.manual, j.allow_failure,
-		        j.status_reason,
+		        j.status_reason, j.retry_of, j.resource_group,
 		        COALESCE(array_agg(n.needs_job_id) FILTER (WHERE n.needs_job_id IS NOT NULL), '{}')
 		 FROM jobs j LEFT JOIN job_needs n ON n.job_id = j.id
 		 WHERE j.id = $1 GROUP BY j.id`, id).
 		Scan(&j.ID, &j.PipelineID, &j.Name, &j.Stage, &j.StageIdx, &j.Image,
 			&j.Environment, &j.Status, &j.StartedAt, &j.FinishedAt, &j.ExitCode,
-			&j.Manual, &j.AllowFailure, &j.StatusReason, &j.Needs)
+			&j.Manual, &j.AllowFailure, &j.StatusReason, &j.RetryOf, &j.ResourceGroup, &j.Needs)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -1171,20 +1173,57 @@ func (s *Store) AcquireJob(ctx context.Context, req proto.AcquireRequest) (*prot
 	var envRaw, artifactsRaw, reportJUnitRaw, cachePathsRaw, cacheKeyFilesRaw, servicesRaw []byte
 	var cachePolicy string
 	var repo, ref, sha, source, triggeredBy, commitAuthor, commitMessage string
-	err = s.pool.QueryRow(ctx,
+	// Pick the next pending job this runner can take. A job in a
+	// resource_group is skipped while another job of the same (repo, group)
+	// is running; the per-group advisory lock + re-check below closes the race
+	// between two runners picking two jobs of one group at the same moment.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	var candidate int64
+	var candGroup, candRepo string
+	err = tx.QueryRow(ctx,
+		`SELECT j.id, j.resource_group, p.repo FROM jobs j JOIN pipelines p ON p.id = j.pipeline_id
+		 WHERE j.status = 'pending' AND j.tags <@ $1::text[]
+		   AND (j.resource_group = '' OR NOT EXISTS (
+		         SELECT 1 FROM jobs r JOIN pipelines rp ON rp.id = r.pipeline_id
+		         WHERE r.status = 'running' AND r.resource_group = j.resource_group AND rp.repo = p.repo))
+		 ORDER BY j.id
+		 FOR UPDATE OF j SKIP LOCKED LIMIT 1`, runnerTags).Scan(&candidate, &candGroup, &candRepo)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if candGroup != "" {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`,
+			"forge-resource-group:"+candRepo+":"+candGroup); err != nil {
+			return nil, err
+		}
+		var busy bool
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM jobs r JOIN pipelines rp ON rp.id = r.pipeline_id
+			  WHERE r.status = 'running' AND r.resource_group = $1 AND rp.repo = $2 AND r.id <> $3)`,
+			candGroup, candRepo, candidate).Scan(&busy); err != nil {
+			return nil, err
+		}
+		if busy {
+			return nil, nil // another runner just took this group; it stays pending
+		}
+	}
+	err = tx.QueryRow(ctx,
 		`UPDATE jobs j
 		 SET status='running', started_at=now(), heartbeat_at=now(), runner_id=$1
-		 FROM (SELECT id FROM jobs
-		       WHERE status='pending' AND tags <@ $2::text[]
-		       ORDER BY id
-		       FOR UPDATE SKIP LOCKED LIMIT 1) next,
-		      pipelines p
-		 WHERE j.id = next.id AND p.id = j.pipeline_id
+		 FROM pipelines p
+		 WHERE j.id = $3 AND p.id = j.pipeline_id AND j.status = 'pending' AND j.tags <@ $2::text[]
 		 RETURNING j.id, j.pipeline_id, j.name, j.image, j.script, j.env,
 		           j.artifact_paths, j.report_junit, j.cache_paths, j.cache_key, j.cache_key_files,
 		           j.cache_policy, j.services, j.network, j.environment, j.timeout_seconds,
 		           p.repo, p.ref, p.sha, p.source, p.triggered_by, p.commit_author, p.commit_message`,
-		req.RunnerID, runnerTags).
+		req.RunnerID, runnerTags, candidate).
 		Scan(&j.ID, &j.PipelineID, &j.Name, &image, &j.Script, &envRaw,
 			&artifactsRaw, &reportJUnitRaw, &cachePathsRaw, &j.CacheKey, &cacheKeyFilesRaw,
 			&cachePolicy, &servicesRaw, &j.Network, &environment, &j.TimeoutSeconds, &repo, &ref, &sha,
@@ -1193,6 +1232,9 @@ func (s *Store) AcquireJob(ctx context.Context, req proto.AcquireRequest) (*prot
 		return nil, nil
 	}
 	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	if image != nil {
@@ -1648,7 +1690,7 @@ func (s *Store) FailOverdueJobs(ctx context.Context) (int64, error) {
 // FINAL, retries-exhausted failure of a non-allow_failure job matches here.
 const hasGenuineFailure = `EXISTS (
 	SELECT 1 FROM jobs f
-	WHERE f.pipeline_id = j.pipeline_id
+	WHERE f.pipeline_id = j.pipeline_id AND NOT f.superseded
 	  AND f.status='failed' AND NOT f.allow_failure)`
 
 // FailFastCancel implements opt-in pipeline-level fail-fast. For every pipeline

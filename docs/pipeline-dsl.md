@@ -754,3 +754,39 @@ Run pipeline and on Settings → Pipeline config calls it.
 curl -s -H "Authorization: Bearer $FORGE_TOKEN" -X POST $FORGE/api/v1/lint \
   -d "$(jq -n --rawfile c .forge-ci.yml '{config:$c, ref:"main"}')"
 ```
+
+## `resource_group:` — one deploy at a time
+
+```yaml
+deploy:
+  stage: deploy
+  environment: production
+  resource_group: deploy-$CI_ENVIRONMENT_NAME   # → "deploy-production"
+  script: [./deploy.sh]
+```
+
+At most **one job per (repo, `resource_group`) runs at a time**. Other jobs of
+the same group wait in the queue (status *pending*) and start, oldest first, as
+soon as the running one finishes. Different repos and different groups don't
+wait on each other. `$CI_ENVIRONMENT_NAME` (or `${CI_ENVIRONMENT_NAME}`)
+resolves to the job's registered environment name, so one line gives "one
+deploy per environment". Enforced when a runner picks the job up, under a
+database lock, so it holds across server replicas and for jobs released by an
+approval. Allowed characters: letters, digits, `_ . - /`.
+
+## Retrying one job
+
+**Retry job** on a failed or canceled job (UI, or `POST /api/v1/jobs/{id}/retry`)
+re-runs it **inside the same pipeline**, together with every job after it (via
+`needs`, transitively) that did not succeed. Jobs that succeeded are not re-run.
+
+- Each re-run job is a **new job** (its own log and attempt count) with
+  `retry_of` pointing at the attempt it replaces; the old attempt stays
+  visible from the job page ("retry of job N") but no longer counts towards
+  the pipeline's status.
+- The scheduler runs the new jobs normally: approvals, deploy freezes,
+  resource groups and environment branch rules all apply again — a job the
+  branch rules refuse can't be brought back by a retry (`403`).
+- Same permission as retrying a whole pipeline: anyone with a role on the
+  repo. The pipeline-level **Retry** still starts a fresh copy of the whole
+  pipeline.

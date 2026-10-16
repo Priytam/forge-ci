@@ -78,6 +78,10 @@ type Job struct {
 	// StatusReason says why a job ended without running — e.g. its branch may
 	// not deploy to its environment. Empty otherwise.
 	StatusReason string `json:"status_reason,omitempty"`
+	// RetryOf is the job this one re-runs (POST /jobs/{id}/retry), if any.
+	RetryOf *int64 `json:"retry_of,omitempty"`
+	// ResourceGroup: at most one job per (repo, group) runs at a time.
+	ResourceGroup string `json:"resource_group,omitempty"`
 
 	// Approval gate, populated only for a job that targets a protected
 	// environment. Approvals is the append-only vote record (one per approver,
@@ -100,6 +104,11 @@ type JobApproval struct {
 
 // RunnerJob is the payload handed to a runner when it acquires a job.
 type RunnerJob struct {
+	// RunDir is runner-local (never sent over the wire): a per-job directory
+	// for files the runner keeps fresh while the job runs, such as the OIDC
+	// token file. Executors expose it to the job (see executor.RunPath).
+	RunDir string `json:"-"`
+
 	ID         int64             `json:"id"`
 	PipelineID int64             `json:"pipeline_id"`
 	Name       string            `json:"name"`
@@ -454,4 +463,10 @@ type ProtectedEnvironment struct {
 	ApprovalTimeoutHours int      `json:"approval_timeout_hours"`
 	ApproverRoles        []string `json:"approver_roles"`
 	AllowSelfApproval    bool     `json:"allow_self_approval"`
+}
+
+// OIDCTokenResponse is a freshly minted per-job OIDC token (runner protocol).
+type OIDCTokenResponse struct {
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expires_at"`
 }

@@ -56,6 +56,7 @@ package compiler
 import (
 	"fmt"
 	"path"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -102,6 +103,9 @@ type jobSpec struct {
 	When         string            `yaml:"when"`          // on_success|manual|never|always (job-level; rules override)
 	AllowFailure *bool             `yaml:"allow_failure"` // failure does not fail dependents/pipeline
 	Network      string            `yaml:"network"`       // container network: bridge (default) | none | host | <named>
+	// ResourceGroup serialises jobs: at most one job per (repo, group) runs at
+	// a time. "$CI_ENVIRONMENT_NAME" resolves to the job's environment.
+	ResourceGroup string `yaml:"resource_group"`
 }
 
 type artifactSpec struct {
@@ -372,6 +376,8 @@ type CompiledJob struct {
 	Retry         int      // additional attempts on failure (0..10); 0 = no retry
 	Manual        bool     // when: manual — starts gated, released by a manual "play"
 	AllowFailure  bool     // failure does not block dependents or fail the pipeline
+	// ResourceGroup: at most one job per (repo, ResourceGroup) runs at once.
+	ResourceGroup string
 	// Services are sidecar containers started alongside the job (docker/k8s only).
 	Services []proto.ServiceSpec
 	// Network is the container network for the job (docker executor). Empty
@@ -389,6 +395,8 @@ type CompiledJob struct {
 // merge_request pipeline). It is overlaid last so a caller can set/override any
 // key, and its entries are also injected into every emitted job's Env by Compile
 // so job scripts can read them.
+var resourceGroupRe = regexp.MustCompile(`^(?:[A-Za-z0-9_./-]|\$\{?CI_ENVIRONMENT_NAME\}?){1,100}$`)
+
 func buildContext(ref, source string, extra map[string]string) map[string]string {
 	ctx := map[string]string{
 		"CI_COMMIT_REF":      ref,
@@ -637,6 +645,10 @@ func Compile(yml, ref, source string, tmpl TemplateFunc, extra ...map[string]str
 		// Network: a job with services gets a dedicated per-job network so it can
 		// resolve service aliases, so the two settings cannot both apply. Reject
 		// rather than silently ignoring one of them.
+		resourceGroup := strings.TrimSpace(spec.ResourceGroup)
+		if resourceGroup != "" && !resourceGroupRe.MatchString(resourceGroup) {
+			return nil, fmt.Errorf("job %q: resource_group %q may only contain letters, digits, _ . - / and $CI_ENVIRONMENT_NAME", inst.orig, resourceGroup)
+		}
 		network, err := validateNetwork(fmt.Sprintf("job %q", inst.orig), spec.Network)
 		if err != nil {
 			return nil, err
@@ -717,6 +729,7 @@ func Compile(yml, ref, source string, tmpl TemplateFunc, extra ...map[string]str
 			AllowFailure:          inst.allowFailure,
 			Services:              services,
 			Network:               network,
+			ResourceGroup:         resourceGroup,
 		})
 	}
 	return out, nil

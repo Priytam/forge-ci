@@ -75,7 +75,7 @@ func (s *Store) DashboardStats(ctx context.Context) (*DashboardStats, error) {
 		      WHEN bool_and(j.status='success') THEN 'success'
 		      ELSE 'other'
 		    END AS status
-		  FROM pipelines p JOIN jobs j ON j.pipeline_id = p.id
+		  FROM pipelines p JOIN jobs j ON j.pipeline_id = p.id AND NOT j.superseded
 		  WHERE p.created_at > now() - interval '24 hours'
 		  GROUP BY p.id
 		)

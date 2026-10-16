@@ -208,12 +208,11 @@ audience you configure on the provider).
      deploy:
        image: google/cloud-sdk
        script:
-         - echo "$FORGE_OIDC_TOKEN" > /tmp/oidc.jwt
          - >
            gcloud iam workload-identity-pools create-cred-config
            projects/<num>/locations/global/workloadIdentityPools/forge-pool/providers/forge-provider
            --service-account=deploy@<proj>.iam.gserviceaccount.com
-           --credential-source-file=/tmp/oidc.jwt
+           --credential-source-file="$FORGE_OIDC_TOKEN_FILE"
            --credential-source-type=text
            --output-file=/tmp/gcp-creds.json
          - export GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcp-creds.json
@@ -226,6 +225,18 @@ audience you configure on the provider).
 ## Notes & limitations
 
 - The token is **short-lived (15 min), per-job, and never a static key**.
+- **Long builds:** the runner keeps a fresh token in the file named by
+  `$FORGE_OIDC_TOKEN_FILE`, re-minting it every 5 minutes for as long as the
+  job runs (`POST /api/v1/runner/jobs/{id}/oidc-token`). Point credential
+  configs at the **file**, not the `$FORGE_OIDC_TOKEN` variable (which is fixed
+  at job start): GCP's `--credential-source-file="$FORGE_OIDC_TOKEN_FILE"` and
+  the AWS SDKs' `AWS_WEB_IDENTITY_TOKEN_FILE` (set to the same file unless the
+  job sets it) re-read it on every refresh, so a 3-hour build keeps working.
+  For registry pushes, use `gcloud auth configure-docker <region>-docker.pkg.dev`
+  (a credential helper that asks gcloud for a token on every push) rather than
+  `docker login` with a one-off access token. The file lives at
+  `/var/run/forge/oidc-token` in docker/kubernetes jobs and in a per-job temp
+  directory for shell jobs; needs runner and server from this release.
 - `EXTERNAL_URL` **must be publicly reachable** by AWS/GCP for the JWKS fetch —
   a private/localhost issuer cannot be used for real cloud exchange.
 - v1 uses a **single signing key** (no rotation/overlap yet). To rotate, replace

@@ -56,10 +56,10 @@ func (f PipelineFilter) where() (string, []any) {
 		add("p.ref = $?", f.Ref)
 	}
 	if f.Runner != "" {
-		add("EXISTS (SELECT 1 FROM jobs j WHERE j.pipeline_id = p.id AND j.runner_id = $?)", f.Runner)
+		add("EXISTS (SELECT 1 FROM jobs j WHERE j.pipeline_id = p.id AND NOT j.superseded AND j.runner_id = $?)", f.Runner)
 	}
 	if f.Environment != "" {
-		add("EXISTS (SELECT 1 FROM jobs j WHERE j.pipeline_id = p.id AND j.environment = $?)", f.Environment)
+		add("EXISTS (SELECT 1 FROM jobs j WHERE j.pipeline_id = p.id AND NOT j.superseded AND j.environment = $?)", f.Environment)
 	}
 	if len(f.Statuses) > 0 {
 		add("p.status = ANY($?)", f.Statuses)
@@ -84,7 +84,7 @@ func (s *Store) ListPipelinesFiltered(ctx context.Context, f PipelineFilter, lim
 		     ORDER BY p.id DESC LIMIT $%d OFFSET $%d)
 		 SELECT %s
 		 FROM page JOIN pipelines p ON p.id = page.id
-		 LEFT JOIN jobs j ON j.pipeline_id = p.id
+		 LEFT JOIN jobs j ON j.pipeline_id = p.id AND NOT j.superseded
 		 GROUP BY p.id ORDER BY p.id DESC`, where, n+1, n+2, pipelineWithStagesCols), args...)
 	if err != nil {
 		return nil, 0, err

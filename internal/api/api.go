@@ -15,6 +15,7 @@ import (
 	"github.com/priytamjeepandey/forge-ci/internal/blob"
 	"github.com/priytamjeepandey/forge-ci/internal/compiler"
 	"github.com/priytamjeepandey/forge-ci/internal/logstore"
+	"github.com/priytamjeepandey/forge-ci/internal/oidc"
 	"github.com/priytamjeepandey/forge-ci/internal/proto"
 	"github.com/priytamjeepandey/forge-ci/internal/store"
 )
@@ -74,6 +75,7 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 	m.HandleFunc("POST /api/v1/jobs/{id}/approvals", srv.approve)
 	m.HandleFunc("POST /api/v1/jobs/{id}/cancel", srv.cancelJob)
 	m.HandleFunc("POST /api/v1/jobs/{id}/play", srv.playJob)
+	m.HandleFunc("POST /api/v1/jobs/{id}/retry", srv.retryJob)
 	m.HandleFunc("GET /api/v1/permissions", srv.permissions)
 	m.HandleFunc("POST /api/v1/lint", srv.lint)
 	m.HandleFunc("GET /api/v1/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -86,6 +88,7 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 	m.HandleFunc("POST /api/v1/runner/jobs/{id}/logs", srv.pushLogs)
 	m.HandleFunc("POST /api/v1/runner/jobs/{id}/heartbeat", srv.heartbeat)
 	m.HandleFunc("POST /api/v1/runner/jobs/{id}/complete", srv.complete)
+	m.HandleFunc("POST /api/v1/runner/jobs/{id}/oidc-token", srv.refreshOIDCToken)
 
 	srv.registerSettingsRoutes()
 	srv.registerEnvironmentRoutes()
@@ -310,7 +313,12 @@ func (s *Server) getPipeline(w http.ResponseWriter, r *http.Request) {
 	} else {
 		p.ConfigURL = link
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"pipeline": p, "jobs": jobs})
+	previous, err := s.store.SupersededJobs(r.Context(), id)
+	if err != nil {
+		slog.Error("superseded jobs", "err", err)
+		previous = nil
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"pipeline": p, "jobs": jobs, "previous_jobs": previous})
 }
 
 // getLogs serves a job's log two ways, chosen by the presence of ?offset:
@@ -593,6 +601,48 @@ func (s *Server) playJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"job": job})
 }
 
+// retryJob re-runs one failed or canceled job — and the downstream jobs that
+// did not succeed — inside the same pipeline (see store.RetryJob). Same
+// permission as retrying a whole pipeline.
+func (s *Server) retryJob(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+	repo, err := s.store.JobRepo(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "job not found")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to load job")
+		return
+	}
+	if !s.requireOperate(w, r, repo) {
+		return
+	}
+	res, err := s.store.RetryJob(r.Context(), id)
+	switch {
+	case errors.Is(err, store.ErrNotRetryable):
+		writeErr(w, http.StatusConflict, err.Error())
+		return
+	case errors.Is(err, store.ErrRetryRefused):
+		writeErr(w, http.StatusForbidden, err.Error())
+		return
+	case err != nil:
+		slog.Error("retry job", "job", id, "err", err)
+		writeErr(w, http.StatusInternalServerError, "failed to retry job")
+		return
+	}
+	s.audit(r, "job.retry", strconv.FormatInt(id, 10), repo, "ok", map[string]any{
+		"pipeline_id": res.PipelineID, "new_job_id": res.Retried[id], "jobs_requeued": len(res.Retried),
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"pipeline_id": res.PipelineID, "job_id": res.Retried[id], "retried": len(res.Retried),
+	})
+}
+
 // ---- runner handlers ----
 
 // acquire long-polls for up to 25s waiting for a pending job; 204 when none.
@@ -783,6 +833,39 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, proto.HeartbeatResponse{Cancel: cancel})
+}
+
+// refreshOIDCToken re-mints the per-job OIDC token for a job that is still
+// running. The runner calls it every few minutes and rewrites the job's
+// token file, so cloud credentials built on that file (GCP Workload Identity
+// cred-config, AWS_WEB_IDENTITY_TOKEN_FILE) keep refreshing past the token's
+// 15-minute lifetime.
+func (s *Server) refreshOIDCToken(w http.ResponseWriter, r *http.Request) {
+	if !s.requireRunnerAuth(w, r) {
+		return
+	}
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+	tok, err := s.store.RefreshJobOIDCToken(r.Context(), id)
+	if errors.Is(err, store.ErrJobNotRunning) {
+		writeErr(w, http.StatusConflict, "job is not running")
+		return
+	}
+	if err != nil {
+		slog.Error("refresh oidc token", "job", id, "err", err)
+		writeErr(w, http.StatusInternalServerError, "failed to mint token")
+		return
+	}
+	if tok == "" {
+		writeErr(w, http.StatusServiceUnavailable, "OIDC signing is not configured on this server")
+		return
+	}
+	writeJSON(w, http.StatusOK, proto.OIDCTokenResponse{
+		Token: tok, ExpiresAt: time.Now().Add(oidc.TokenTTL),
+	})
 }
 
 func (s *Server) complete(w http.ResponseWriter, r *http.Request) {

@@ -111,6 +111,10 @@ export interface Job {
   required_approvals?: number;
   /** why the job ended without running, e.g. a branch rule refused it */
   status_reason?: string;
+  /** the job this one re-runs, when it came from "Retry job" */
+  retry_of?: number;
+  /** at most one job per (repo, group) runs at a time */
+  resource_group?: string;
 }
 
 /** One recorded vote on an approval-gated job. */
@@ -124,6 +128,8 @@ export interface JobApproval {
 export interface PipelineDetail {
   pipeline: Pipeline;
   jobs: Job[];
+  /** earlier attempts replaced by "Retry job", newest first */
+  previous_jobs?: Job[];
 }
 
 export interface Variable {
@@ -1556,4 +1562,10 @@ export function putNotifySettings(s: Partial<NotifySettings>): Promise<NotifySet
 
 export function testNotify(): Promise<{ sent: boolean; email_to: string }> {
   return postJSON<{ sent: boolean; email_to: string }>("/notification-settings/test", {});
+}
+
+/** Re-run one failed/canceled job (and its downstream jobs that didn't
+ * succeed) inside the same pipeline. Returns the new job's id. */
+export function retryJob(jobId: number | string): Promise<{ pipeline_id: number; job_id: number; retried: number }> {
+  return postJSON<{ pipeline_id: number; job_id: number; retried: number }>(`/jobs/${jobId}/retry`, {});
 }

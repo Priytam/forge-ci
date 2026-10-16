@@ -22,6 +22,7 @@ import StatusBadge from "../components/StatusBadge";
 import ApprovalGate from "../components/ApprovalGate";
 import PlayButton from "../components/PlayButton";
 import CancelJobButton from "../components/CancelJobButton";
+import RetryJobButton from "../components/RetryJobButton";
 
 /**
  * Live job log: an SSE EventSource on /logs/stream?offset=0 that appends
@@ -173,7 +174,11 @@ export default function JobLog() {
 
   const job: Job | null = useMemo(() => {
     if (!detail) return null;
-    return detail.jobs.find((j) => String(j.id) === jobId) ?? null;
+    return (
+      detail.jobs.find((j) => String(j.id) === jobId) ??
+      detail.previous_jobs?.find((j) => String(j.id) === jobId) ??
+      null
+    );
   }, [detail, jobId]);
 
   const jobStatus = job?.status ?? null;
@@ -268,6 +273,16 @@ export default function JobLog() {
               <span className="stage-tag">stage: {job.stage}</span>
               {dur && <span className="muted">{dur}</span>}
               {job.environment && <span className="env-tag">{job.environment}</span>}
+              {job.resource_group && (
+                <span className="env-tag" title="At most one job in this group runs at a time">
+                  group: {job.resource_group}
+                </span>
+              )}
+              {job.retry_of && (
+                <Link to={`/jobs/${job.retry_of}?pipeline=${job.pipeline_id}`} className="muted">
+                  retry of job {job.retry_of}
+                </Link>
+              )}
               {job.exit_code !== null && (
                 <span className="mono muted">exit {job.exit_code}</span>
               )}
@@ -277,6 +292,9 @@ export default function JobLog() {
             <StatusBadge status={job.status} />
             {!isTerminalStatus(job.status) && (
               <CancelJobButton jobId={job.id} repo={repo ?? ""} onDone={refreshPipeline} />
+            )}
+            {(job.status === "failed" || job.status === "canceled") && (
+              <RetryJobButton jobId={job.id} pipelineId={job.pipeline_id} repo={repo ?? ""} />
             )}
           </div>
         </div>

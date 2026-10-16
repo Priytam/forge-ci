@@ -98,7 +98,7 @@ func (s *Store) PipelinesPendingStatusPost(ctx context.Context) ([]StatusCandida
 		                  AND rr.github_app_private_key <> '')))
 		        OR (rr.provider = 'codecommit' AND p.mr_iid <> '')
 		      )
-		 LEFT JOIN jobs j ON j.pipeline_id = p.id
+		 LEFT JOIN jobs j ON j.pipeline_id = p.id AND NOT j.superseded
 		 WHERE NOT EXISTS (
 		   SELECT 1 FROM pipeline_status_posts sp
 		   WHERE sp.pipeline_id = p.id AND sp.status IN ('success','failed','canceled'))

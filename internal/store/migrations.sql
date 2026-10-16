@@ -771,3 +771,32 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS status_reason TEXT NOT NULL DEFAULT ''
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS approval_notified_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS jobs_approval_unnotified_idx
     ON jobs (blocked_at) WHERE status = 'blocked' AND NOT manual AND approval_notified_at IS NULL;
+
+-- resource_group: at most one job per (repo, resource_group) runs at a time
+-- (e.g. one production deploy). '' = no group. Enforced at acquire.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS resource_group TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS jobs_resource_group_active_idx
+    ON jobs (resource_group) WHERE resource_group <> '' AND status = 'running';
+
+-- Retry a single job within its pipeline: the retried job (and the downstream
+-- jobs that did not succeed) get NEW rows — fresh log, fresh attempt — and
+-- the old rows stay as history with superseded = TRUE and retry_of linking
+-- new → old. Only live (non-superseded) rows count for a pipeline's jobs, so
+-- the per-pipeline name uniqueness moves to a partial index.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS superseded BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS retry_of BIGINT REFERENCES jobs(id) ON DELETE SET NULL;
+ALTER TABLE jobs DROP CONSTRAINT IF EXISTS jobs_pipeline_id_name_key;
+CREATE UNIQUE INDEX IF NOT EXISTS jobs_pipeline_name_live_idx ON jobs (pipeline_id, name) WHERE NOT superseded;
+
+CREATE OR REPLACE FUNCTION forge_pipeline_status(pid BIGINT) RETURNS TEXT
+LANGUAGE sql STABLE AS $$
+    SELECT CASE
+        WHEN count(*) = 0 THEN 'created'
+        WHEN bool_or(j.status = 'failed' AND NOT j.allow_failure) THEN 'failed'
+        WHEN bool_or(j.status = 'canceled') THEN 'canceled'
+        WHEN bool_or(j.status IN ('running','pending')) THEN 'running'
+        WHEN bool_or(j.status = 'blocked') THEN 'blocked'
+        WHEN bool_or(j.status = 'created') THEN 'running'
+        ELSE 'success' END
+    FROM jobs j WHERE j.pipeline_id = pid AND NOT j.superseded
+$$;

@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -197,6 +198,26 @@ func (k *kubeExecutor) Start(ctx context.Context, job *proto.RunnerJob, workdir 
 		cleanup()
 		return nil, nil, err
 	}
+	// The job's run directory (refreshable OIDC token file) goes to the same
+	// path the docker executor mounts it at; UpdateRunFile keeps it fresh.
+	if job.RunDir != "" {
+		mk := []string{"exec", pod}
+		if container != "" {
+			mk = append(mk, "-c", container)
+		}
+		if err := k.runQuiet(ctx, append(mk, "--", "mkdir", "-p", RunDirMount)...); err != nil {
+			cleanup()
+			return nil, nil, err
+		}
+		runCp := []string{"cp", job.RunDir + "/.", pod + ":" + RunDirMount}
+		if container != "" {
+			runCp = append(runCp, "-c", container)
+		}
+		if err := k.runQuiet(ctx, runCp...); err != nil {
+			cleanup()
+			return nil, nil, err
+		}
+	}
 
 	// 4. Exec the script with env exported inside the pod. kubectl exec
 	//    propagates the remote exit code.
@@ -250,4 +271,22 @@ func (k *kubeExecutor) Start(ctx context.Context, job *proto.RunnerJob, workdir 
 		return code
 	}
 	return pr, waitAndCollect, nil
+}
+
+// UpdateRunFile rewrites file name in the running pod's run directory,
+// atomically (write to a temp file, then rename), from stdin.
+func (k *kubeExecutor) UpdateRunFile(ctx context.Context, job *proto.RunnerJob, name string, data []byte) error {
+	pod := fmt.Sprintf("forge-job-%d", job.ID)
+	args := []string{"exec", "-i", pod}
+	if len(job.Services) > 0 {
+		args = append(args, "-c", "job")
+	}
+	dst := RunDirMount + "/" + name
+	args = append(args, "--", "sh", "-c", "cat > "+posixQuote(dst+".tmp")+" && mv "+posixQuote(dst+".tmp")+" "+posixQuote(dst))
+	cmd := k.kubectl(ctx, args...)
+	cmd.Stdin = bytes.NewReader(data)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("kubectl exec (update %s): %s", name, strings.TrimSpace(string(out)))
+	}
+	return nil
 }

@@ -156,3 +156,29 @@ func (s *Store) mintJobOIDCToken(repo, ref, sha, environment string, pipelineID,
 	}
 	return tok
 }
+
+// ErrJobNotRunning is returned when a running-job-only action targets a job
+// in any other state.
+var ErrJobNotRunning = errors.New("job is not running")
+
+// RefreshJobOIDCToken mints a fresh ID token for a job that is still running,
+// with the same claims as the one it got at acquire. Long builds call this
+// (through the runner) before the 15-minute token expires, so cloud
+// credentials derived from it can keep refreshing. Returns "" when OIDC
+// signing is unavailable.
+func (s *Store) RefreshJobOIDCToken(ctx context.Context, jobID int64) (string, error) {
+	var repo, ref, sha, env string
+	var pipelineID int64
+	err := s.pool.QueryRow(ctx,
+		`SELECT p.repo, p.ref, p.sha, COALESCE(j.environment, ''), j.pipeline_id
+		 FROM jobs j JOIN pipelines p ON p.id = j.pipeline_id
+		 WHERE j.id = $1 AND j.status = 'running'`, jobID).
+		Scan(&repo, &ref, &sha, &env, &pipelineID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrJobNotRunning
+	}
+	if err != nil {
+		return "", err
+	}
+	return s.mintJobOIDCToken(repo, ref, sha, env, pipelineID, jobID), nil
+}

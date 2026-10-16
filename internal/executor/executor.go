@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -63,6 +64,28 @@ func New(kind string) (Executor, error) {
 // mechanism for that (process groups + SIGKILL vs TerminateProcess) is not
 // portable. See those files for the platform-specific cmd.Cancel/SysProcAttr.
 
+// RunDirMount is where a job's run directory (job.RunDir) appears inside a
+// container (docker and kubernetes executors).
+const RunDirMount = "/var/run/forge"
+
+// RunPath returns the path at which the job's script sees file name from the
+// job's run directory: the host path for the shell executor, the mount path
+// for container executors.
+func RunPath(e Executor, job *proto.RunnerJob, name string) string {
+	if e.Name() == "shell" {
+		return filepath.Join(job.RunDir, name)
+	}
+	return RunDirMount + "/" + name
+}
+
+// RunFileUpdater is implemented by executors whose job does not share the
+// runner's filesystem (kubernetes). The runner calls it after rewriting a
+// file in job.RunDir so the running job sees the new content. Shell and
+// docker need nothing: the job reads the host file (docker bind-mounts it).
+type RunFileUpdater interface {
+	UpdateRunFile(ctx context.Context, job *proto.RunnerJob, name string, data []byte) error
+}
+
 func ciEnv(job *proto.RunnerJob) []string {
 	env := []string{
 		"CI=true",
@@ -112,6 +135,9 @@ func (dockerExecutor) Name() string { return "docker" }
 func dockerRunArgs(job *proto.RunnerJob, workdir, image, name, network string, extraEnv ...string) []string {
 	args := []string{"run", "--rm", "--name", name, "--network", network,
 		"-v", workdir + ":/workspace", "-w", "/workspace"}
+	if job.RunDir != "" {
+		args = append(args, "-v", job.RunDir+":"+RunDirMount+":ro")
+	}
 	for _, kv := range ciEnv(job) {
 		args = append(args, "-e", kv)
 	}

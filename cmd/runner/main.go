@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -310,6 +311,11 @@ func runJob(execCtx, drainCtx context.Context, c *client, exec executor.Executor
 	}
 
 	logs.printf("$ %s\n", job.Script)
+	// Refreshable OIDC token: keep the job's token in a file and rewrite it
+	// before it expires, so credentials built on the file outlive it.
+	stopTokens := startTokenRefresh(jobCtx, c, logs, exec, job)
+	defer stopTokens()
+
 	out, wait, err := exec.Start(jobCtx, job, workdir)
 	if err != nil {
 		status, exitCode = resolveInterruption("failed", 1)
@@ -913,4 +919,103 @@ func sleep(ctx context.Context, d time.Duration) {
 	case <-ctx.Done():
 	case <-time.After(d):
 	}
+}
+
+// tokenRefreshEvery re-mints the per-job OIDC token well inside its
+// 15-minute lifetime.
+var tokenRefreshEvery = 5 * time.Minute
+
+const oidcTokenFile = "oidc-token"
+
+// startTokenRefresh writes the job's OIDC token to a file in a per-job run
+// directory, points FORGE_OIDC_TOKEN_FILE (and AWS_WEB_IDENTITY_TOKEN_FILE,
+// unless the job set it) at it, and refreshes it until the job ends. GCP
+// Workload Identity cred-configs (--credential-source-file) and the AWS SDKs
+// re-read the file whenever they refresh, so builds longer than the token's
+// lifetime keep working. Returns a stop function; a no-op when the job has no
+// token (OIDC disabled on the server).
+func startTokenRefresh(ctx context.Context, c *client, logs *logStreamer, ex executor.Executor, job *proto.RunnerJob) func() {
+	tok := job.Env["FORGE_OIDC_TOKEN"]
+	if tok == "" {
+		return func() {}
+	}
+	runDir, err := os.MkdirTemp("", "forge-run-*")
+	if err != nil {
+		logs.printf("warning: could not create the token directory (%v); FORGE_OIDC_TOKEN_FILE is unavailable\n", err)
+		return func() {}
+	}
+	_ = os.Chmod(runDir, 0o755) // readable by a non-root container user
+	write := func(t string) error {
+		tmp := filepath.Join(runDir, oidcTokenFile+".tmp")
+		if err := os.WriteFile(tmp, []byte(t), 0o644); err != nil {
+			return err
+		}
+		return os.Rename(tmp, filepath.Join(runDir, oidcTokenFile))
+	}
+	if err := write(tok); err != nil {
+		logs.printf("warning: could not write the token file (%v)\n", err)
+		os.RemoveAll(runDir)
+		return func() {}
+	}
+	job.RunDir = runDir
+	path := executor.RunPath(ex, job, oidcTokenFile)
+	job.Env["FORGE_OIDC_TOKEN_FILE"] = path
+	if _, set := job.Env["AWS_WEB_IDENTITY_TOKEN_FILE"]; !set {
+		job.Env["AWS_WEB_IDENTITY_TOKEN_FILE"] = path
+	}
+
+	rctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		t := time.NewTicker(tokenRefreshEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-rctx.Done():
+				return
+			case <-t.C:
+			}
+			fresh, err := fetchJobToken(rctx, c, job.ID)
+			if err != nil {
+				slog.Warn("oidc token refresh failed", "job", job.ID, "err", err)
+				continue
+			}
+			logs.redact(fresh)
+			if err := write(fresh); err != nil {
+				slog.Warn("oidc token file write failed", "job", job.ID, "err", err)
+				continue
+			}
+			if u, ok := ex.(executor.RunFileUpdater); ok {
+				if err := u.UpdateRunFile(rctx, job, oidcTokenFile, []byte(fresh)); err != nil {
+					slog.Warn("oidc token push into job failed", "job", job.ID, "err", err)
+				}
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+		os.RemoveAll(runDir)
+	}
+}
+
+// fetchJobToken asks the server to re-mint the running job's OIDC token.
+func fetchJobToken(ctx context.Context, c *client, jobID int64) (string, error) {
+	resp, err := c.postJSON(ctx, fmt.Sprintf("/api/v1/runner/jobs/%d/oidc-token", jobID), nil)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("server returned %d", resp.StatusCode)
+	}
+	var out proto.OIDCTokenResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", err
+	}
+	if out.Token == "" {
+		return "", errors.New("empty token")
+	}
+	return out.Token, nil
 }
