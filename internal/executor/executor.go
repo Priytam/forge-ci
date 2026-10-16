@@ -102,7 +102,8 @@ func ciEnv(job *proto.RunnerJob) []string {
 // shellFlags is how every executor runs a job script: -e (stop at the first
 // failing command), plus -x (echo each command) when the job runs with
 // CI_DEBUG_TRACE=true — a debug rerun. Masked values are still redacted from
-// the log, but anything derived from a secret may show; use it deliberately.
+// the log, including the re-quoted forms traces print (see
+// store.withTraceForms); a value the script derives from a secret may show.
 func shellFlags(job *proto.RunnerJob) string {
 	if debugTrace(job) {
 		return "-cex"

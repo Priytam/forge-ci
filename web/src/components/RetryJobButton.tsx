@@ -41,7 +41,7 @@ export default function RetryJobButton({ jobId, pipelineId, repo }: { jobId: num
         className="btn"
         disabled={busy}
         onClick={() => void retry(true)}
-        title="Retry with CI_DEBUG_TRACE=true: the log shows every command as it runs. Masked secrets stay masked, but values derived from them may show."
+        title="Retry with CI_DEBUG_TRACE=true: the log shows every command as it runs. Masked variables stay masked (including the shell's re-quoted forms); values your script derives from them, such as a base64-encoded token, can show."
       >
         Retry with debug trace
       </button>

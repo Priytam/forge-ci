@@ -875,9 +875,14 @@ variables expanded. Only the job you asked for gets the trace; the jobs after it
 rerun normally. You can also set `CI_DEBUG_TRACE: "true"` in a job's
 `variables:`.
 
-Masked variables are still redacted from the log, but a value *derived* from a
-secret (an encoded token, a URL with a password in it) can appear. Use debug
-reruns deliberately on jobs that handle credentials.
+Masked variables stay masked in traced output. The trace prints a value as
+the shell re-quotes it — bash writes `it's` as `it'\''s`, busybox ash (Alpine)
+as `it'"'"'s`, dash as is — and Forge masks every one of those forms, on the
+shell, docker and kubernetes executors alike (masking happens on the server as
+log chunks arrive, whichever executor produced them). What masking cannot
+catch is a value *derived* from a secret — base64-encoded, URL-encoded, sliced
+— which the trace will show once the script computes it. Use debug reruns
+deliberately on jobs that transform credentials.
 
 ## Validating a config without running it
 
