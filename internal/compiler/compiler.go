@@ -392,9 +392,9 @@ type CompiledJob struct {
 }
 
 // buildContext assembles the base variable context for rules if: expressions.
-// Forge cannot distinguish a tag ref from a branch ref at compile time (a
-// webhook carries only the ref string), so CI_COMMIT_BRANCH is set to the ref
-// and CI_COMMIT_TAG is left undefined — documented in docs/pipeline-dsl.md.
+// A ref is a branch (CI_COMMIT_BRANCH set) unless the trigger says it is a
+// tag by passing CI_COMMIT_TAG in extra; then CI_COMMIT_BRANCH is undefined,
+// as in GitLab. Every git host's push webhook does this.
 //
 // extra carries source-specific context (e.g. the CI_MERGE_REQUEST_* vars for a
 // merge_request pipeline). It is overlaid last so a caller can set/override any
@@ -411,6 +411,11 @@ func buildContext(ref, source string, extra map[string]string) map[string]string
 	}
 	for k, v := range extra {
 		ctx[k] = v
+	}
+	if ctx["CI_COMMIT_TAG"] != "" {
+		if _, set := extra["CI_COMMIT_BRANCH"]; !set {
+			delete(ctx, "CI_COMMIT_BRANCH")
+		}
 	}
 	return ctx
 }
@@ -437,17 +442,32 @@ func Compile(yml, ref, source string, tmpl TemplateFunc, extra ...map[string]str
 // CompileWithChanges is Compile with the pipeline's change set, so
 // rules: changes: can be evaluated (nil = unknown, every changes: matches).
 func CompileWithChanges(yml, ref, source string, tmpl TemplateFunc, changes *ChangeSet, extra ...map[string]string) ([]CompiledJob, error) {
-	var extraCtx map[string]string
+	opts := CompileOpts{Templates: tmpl, Changes: changes}
 	if len(extra) > 0 {
-		extraCtx = extra[0]
+		opts.Extra = extra[0]
 	}
+	return CompileWith(yml, ref, source, opts)
+}
+
+// CompileOpts carries everything a compile may need from outside.
+type CompileOpts struct {
+	Templates TemplateFunc      // repo templates by name (nil: built-ins only)
+	Includes  IncludeFunc       // project/remote/catalog includes (nil: not available)
+	Changes   *ChangeSet        // for rules: changes: (nil: unknown)
+	Extra     map[string]string // source-specific context (CI_MERGE_REQUEST_* etc.)
+}
+
+// CompileWith is the full-featured compile; Compile and CompileWithChanges
+// are shorthands for it.
+func CompileWith(yml, ref, source string, opts CompileOpts) ([]CompiledJob, error) {
+	tmpl, changes, extraCtx := opts.Templates, opts.Changes, opts.Extra
 	var cfg config
 	if err := yaml.Unmarshal([]byte(yml), &cfg); err != nil {
 		return nil, fmt.Errorf("invalid YAML: %w", err)
 	}
 
 	// 1. Compose included templates into the config.
-	cfg, err := resolveIncludes(cfg, tmpl)
+	cfg, err := resolveIncludes(cfg, tmpl, opts.Includes)
 	if err != nil {
 		return nil, err
 	}

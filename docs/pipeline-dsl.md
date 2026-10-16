@@ -101,13 +101,15 @@ The base context exposes:
 | Variable | Value |
 | --- | --- |
 | `CI_COMMIT_REF`, `CI_COMMIT_REF_NAME` | the pipeline ref |
-| `CI_COMMIT_BRANCH` | the pipeline ref (see limitation below) |
-| `CI_PIPELINE_SOURCE` | `api` \| `webhook` \| `schedule` \| `push` |
+| `CI_COMMIT_BRANCH` | the branch — **undefined for a tag push** |
+| `CI_COMMIT_TAG` | the tag — **defined only for a tag push** |
+| `CI_PIPELINE_SOURCE` | `api` \| `webhook` \| `schedule` \| `push` \| `merge_request` |
 
 Plus the job's own `variables:` (and any variables set by an earlier resolved
-rule). **Limitation:** Forge cannot distinguish a tag ref from a branch ref at
-compile time (a webhook carries only the ref string), so `CI_COMMIT_BRANCH` is
-set to the ref and `CI_COMMIT_TAG` is left undefined.
+rule), and on merge-request pipelines the `CI_MERGE_REQUEST_*` set. Every git
+host's push webhook (GitHub, GitLab, Bitbucket, Gitea/Forgejo, CodeCommit) says
+whether a tag or a branch moved, so `rules: - if: $CI_COMMIT_TAG` works the same
+everywhere. A pipeline started from the API or a schedule is a branch pipeline.
 
 ### `when: manual` — the manual gate
 
@@ -130,30 +132,111 @@ canceled like any other dead-ended job.
 
 ## 2. `include:` — reusable templates
 
-Forge does not host a repo file tree, and webhooks carry no file contents, so
-there is no filesystem path to `include: local:` against. Instead, reusable YAML
-fragments are **registered per repo** and referenced by name:
+An include pulls YAML in from somewhere else and merges it **under** the main
+config. Four sources, all through the same list:
+
+```yaml
+include:
+  - template: go-common                 # a template registered for this repo, or a built-in
+  - template: deploy/kubernetes@1.4.0   # the org template catalog, pinned to a version
+  - project: platform/ci-templates      # a file from another connected repo (any git host)
+    ref: v2.1.0                         # tag, branch or commit: required; pin a tag or sha
+    file: templates/lint.yml
+  - remote: https://ci.example.com/audit.yml
+    integrity: sha256-q1w2e3...          # optional: refuse anything but this exact content
+```
+
+Each entry names exactly one of `template:`, `project:` or `remote:`.
+
+### Repo templates
+
+Named fragments registered for one repo:
 
 ```bash
-# Register a template
-curl -X PUT /api/v1/repo-templates -d '{
+curl -X PUT $FORGE/api/v1/repo-templates -d '{
   "repo": "org/app",
   "name": "go-common",
   "yaml": "stages: [lint, build]\njobs:\n  lint:\n    stage: lint\n    script: [golangci-lint run]\n"
 }'
+curl $FORGE/api/v1/repo-templates?repo=org/app
+```
 
-# List a repo's templates
-curl /api/v1/repo-templates?repo=org/app
+### The template catalog — `template: name@version`
+
+Org-wide templates with immutable versions, browsable on the **Template
+catalog** page (admins publish there, or with the API). `name@1.4.0` is that
+exact version; a bare `name` that isn't a repo template or built-in resolves to
+the catalog's newest version (`1.10.0` sorts after `1.9.2`; `1.0.0-rc1` before
+`1.0.0`). Pin a version for anything that deploys.
+
+```bash
+curl -X POST $FORGE/api/v1/template-catalog -H "Authorization: Bearer $FORGE_TOKEN" -d "$(jq -n \
+  --arg y "$(cat deploy.yml)" '{name:"deploy/kubernetes", version:"1.4.0", description:"Rolling deploy", yaml:$y}')"
+curl $FORGE/api/v1/template-catalog                                  # every version
+curl "$FORGE/api/v1/template-catalog?name=deploy/kubernetes&version=1.4.0"
+curl -X DELETE "$FORGE/api/v1/template-catalog?name=deploy/kubernetes&version=1.4.0"   # admin
+```
+
+Republishing an existing version is refused (409): a fix is a new version.
+
+### `project:` — a file from another repo
+
+Reads `file` at `ref` from another **connected** repository, through that
+repo's own connection, so it works on every git host Forge supports (API hosts
+and plain git alike). `ref` is required — pin a tag or a commit sha so a change
+to the template repo can't silently change your pipeline.
+
+Because the read uses Forge's credential for the other repo, a pipeline may
+only include from repos with the **same owner/namespace** (`acme/api` →
+`acme/ci-templates`). To share a template repo across owners, list it in
+`FORGE_INCLUDE_SHARED_PROJECTS` on the server (comma-separated; `platform/*`
+for a whole namespace, `*` for every connected repo).
+
+### `remote:` — a URL
+
+Fetched over **https only**, at compile time, from the server:
+
+- Internal addresses (loopback, private ranges, link-local and cloud metadata,
+  carrier-grade NAT) are refused, checked at connect time so DNS tricks can't
+  get round it. `FORGE_INCLUDE_REMOTE_ALLOW_PRIVATE=true` lifts this for an
+  internal template server.
+- `FORGE_INCLUDE_REMOTE_HOSTS=templates.example.com,*.example.org` restricts
+  remote includes to those hosts.
+- `integrity:` (`sha256-<base64>` as in browser SRI, or `sha256:<hex>`) pins the
+  exact bytes; `FORGE_INCLUDE_REMOTE_REQUIRE_INTEGRITY=true` makes it mandatory.
+- Redirects must stay on https; bodies over 1 MiB are refused; credentials in
+  the URL are refused.
+
+### Template inputs — `spec: inputs:`
+
+A template (from any source) can declare inputs in a header document, then use
+them as `$[[ inputs.name ]]`:
+
+```yaml
+spec:
+  inputs:
+    environment: {default: staging, options: [staging, production]}
+    replicas:    {default: 2}
+    cluster:     {description: "Where to deploy"}    # no default = required
+---
+jobs:
+  deploy:
+    stage: deploy
+    environment: $[[ inputs.environment ]]
+    script:
+      - ./deploy.sh --cluster $[[ inputs.cluster ]] --replicas $[[ inputs.replicas ]]
 ```
 
 ```yaml
 include:
-  - template: go-common          # merged UNDER the main config
-stages: [build, test]
-jobs:
-  build:
-    image: golang:1.23           # overrides any build.image from the template
+  - template: deploy/kubernetes@1.4.0
+    inputs: {cluster: eu-west, environment: production}
 ```
+
+A missing required input, an unknown input, or a value outside `options` is a
+compile error naming the input. A template without a `spec:` header takes no
+inputs. Inputs are substituted into the template text before it is parsed, so
+they can appear anywhere — job names, images, scripts, rules.
 
 ### Merge semantics
 
@@ -166,12 +249,8 @@ then the **main config overrides all includes** on any conflict.
 - **default / auto_cancel / fail_fast** — main wins when it sets them.
 
 Nested includes (a template that itself has `include:`) are supported up to a
-depth bound that guards against include cycles.
-
-**Limitation:** remote/URL includes are intentionally **not** supported — the
-compiler does no network fetch. An `include:` form other than `{template: name}`
-is a clear compile error, as is a template name that is neither registered for
-the repo nor a shipped built-in.
+depth bound that guards against include cycles. Compile errors name the include
+that failed (`include: project platform/ci@v2:lint.yml not found`).
 
 ### Built-in security templates
 
@@ -763,7 +842,7 @@ override them, as in GitLab.
 | `CI_COMMIT_SHA` / `CI_COMMIT_SHORT_SHA` | full / first 8 characters of the commit |
 | `CI_COMMIT_REF_NAME` | branch or tag name (`refs/heads/` / `refs/tags/` stripped) |
 | `CI_COMMIT_BRANCH` | branch name — **unset for tag pipelines** |
-| `CI_COMMIT_TAG` | tag name — **set only for tag pipelines** (ref `refs/tags/…`) |
+| `CI_COMMIT_TAG` | tag name — **set only for tag pushes** (every git host) |
 | `CI_COMMIT_REF_SLUG` | ref name lowercased, non-alphanumerics → `-`, max 63 chars (for image tags, hostnames) |
 | `CI_COMMIT_MESSAGE` / `CI_COMMIT_TITLE` | full message / first line |
 | `CI_COMMIT_AUTHOR` | who wrote the commit, when the provider says |
@@ -772,7 +851,33 @@ override them, as in GitLab.
 | `CI_JOB_ID`, `CI_JOB_NAME` | the job |
 | `CI_PROJECT_PATH`, `CI_PROJECT_NAMESPACE`, `CI_PROJECT_NAME` | `acme/cos`, `acme`, `cos` |
 | `CI_ENVIRONMENT_NAME` | the job's environment (registered name), when it has one |
+| `CI_DEFAULT_BRANCH` | the repo's default branch, when it is connected |
+| `CI_REPOSITORY_URL` | the repo's clone URL as registered — **never carries credentials** (the runner's checkout does its own auth) |
+| `CI_SERVER_URL`, `CI_API_V1_URL` | this Forge server (`EXTERNAL_URL`, else `FRONTEND_URL`) and its API |
+| `CI_PIPELINE_URL`, `CI_JOB_URL` | links to the pipeline / job page (`FRONTEND_URL`, else `EXTERNAL_URL`) |
+| `CI_MERGE_REQUEST_ID`, `CI_MERGE_REQUEST_IID` | the merge/pull request number (hosts without a separate global id use the number for both) |
+| `CI_MERGE_REQUEST_SOURCE_BRANCH`, `CI_MERGE_REQUEST_TARGET_BRANCH`, `CI_MERGE_REQUEST_TITLE` | merge-request pipelines |
+| `CI_MERGE_REQUEST_PROJECT_PATH`, `CI_MERGE_REQUEST_SOURCE_BRANCH_SHA` | the repo and head commit of the merge request |
+| `CI_MERGE_REQUEST_DIFF_BASE_SHA` | the target commit the diff is against, when the host sends it |
+| `CI_DEBUG_TRACE` | `true` on a **debug rerun** (below) |
 | `FORGE_OIDC_TOKEN` (`CI_JOB_JWT`) | per-job OIDC token for keyless cloud auth (docs/oidc.md) |
+
+The URL variables are unset when neither `EXTERNAL_URL` nor `FRONTEND_URL` is
+configured.
+
+## Debug reruns — `CI_DEBUG_TRACE`
+
+**Retry with debug trace** on a failed or canceled job (or
+`POST /api/v1/jobs/{id}/retry {"debug": true}`) reruns that job with
+`CI_DEBUG_TRACE=true`, and every executor (shell, docker, kubernetes) then runs
+the script with `sh -x`, so the log shows each command as it is executed, with
+variables expanded. Only the job you asked for gets the trace; the jobs after it
+rerun normally. You can also set `CI_DEBUG_TRACE: "true"` in a job's
+`variables:`.
+
+Masked variables are still redacted from the log, but a value *derived* from a
+secret (an encoded token, a URL with a password in it) can appear. Use debug
+reruns deliberately on jobs that handle credentials.
 
 ## Validating a config without running it
 

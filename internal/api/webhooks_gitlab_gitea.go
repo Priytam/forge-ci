@@ -131,9 +131,7 @@ func parseGitLabPush(body []byte) (run webhookRun, skip bool, err error) {
 		Repo: p.Project.PathWithNamespace, Ref: ref, SHA: sha, Actor: actor,
 		Source: compiler.SourcePush, CommitAuthor: author, CommitMessage: message,
 	}
-	if isTag {
-		run.ExtraCtx = map[string]string{"CI_COMMIT_TAG": ref}
-	}
+	run.ExtraCtx = tagContext(isTag, ref)
 	return run, false, nil
 }
 
@@ -274,9 +272,7 @@ func parseGiteaPush(body []byte) (webhookRun, bool, error) {
 		}
 		run.CommitMessage = c.Message
 	}
-	if isTag {
-		run.ExtraCtx = map[string]string{"CI_COMMIT_TAG": ref}
-	}
+	run.ExtraCtx = tagContext(isTag, ref)
 	return run, false, nil
 }
 

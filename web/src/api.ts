@@ -1575,8 +1575,9 @@ export function testNotify(): Promise<{ sent: boolean; email_to: string }> {
 
 /** Re-run one failed/canceled job (and its downstream jobs that didn't
  * succeed) inside the same pipeline. Returns the new job's id. */
-export function retryJob(jobId: number | string): Promise<{ pipeline_id: number; job_id: number; retried: number }> {
-  return postJSON<{ pipeline_id: number; job_id: number; retried: number }>(`/jobs/${jobId}/retry`, {});
+/** Retries a job; debug reruns it with CI_DEBUG_TRACE=true (every command echoed). */
+export function retryJob(jobId: number | string, debug = false): Promise<{ pipeline_id: number; job_id: number; retried: number }> {
+  return postJSON<{ pipeline_id: number; job_id: number; retried: number }>(`/jobs/${jobId}/retry`, debug ? { debug: true } : {});
 }
 
 // --- Approver groups (admin) ---
@@ -1696,4 +1697,37 @@ export interface RunnerLoad {
 
 export function getRunnerLoad(): Promise<RunnerLoad> {
   return getJSON<RunnerLoad>("/runner-load");
+}
+
+// ---- template catalog ----
+
+export interface TemplateInput {
+  name: string;
+  default?: string;
+  required: boolean;
+  description?: string;
+  options?: string[];
+}
+
+export interface CatalogTemplate {
+  name: string;
+  version: string;
+  yaml: string;
+  description: string;
+  published_by: string;
+  created_at: string;
+  inputs: TemplateInput[];
+}
+
+/** Every published version, newest version first within each name. */
+export function listCatalog(): Promise<CatalogTemplate[]> {
+  return getJSON<{ templates: CatalogTemplate[] }>("/template-catalog").then((r) => r.templates ?? []);
+}
+
+export function publishCatalogTemplate(t: { name: string; version: string; yaml: string; description: string }): Promise<CatalogTemplate> {
+  return postJSON<CatalogTemplate>("/template-catalog", t);
+}
+
+export function deleteCatalogTemplate(name: string, version: string): Promise<void> {
+  return requestVoid("DELETE", `/template-catalog?name=${encodeURIComponent(name)}&version=${encodeURIComponent(version)}`);
 }

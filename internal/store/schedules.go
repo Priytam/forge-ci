@@ -170,7 +170,7 @@ func (s *Store) BuildScheduledPipeline(ctx context.Context, repo, ref string) (*
 	if err != nil {
 		return nil, err // ErrNotFound when neither in-repo nor registered config exists
 	}
-	jobs, err := compiler.Compile(config, ref, compiler.SourceSchedule, s.TemplateResolver(ctx, repo))
+	jobs, err := compiler.CompileWith(config, ref, compiler.SourceSchedule, s.CompileOpts(ctx, repo))
 	if err != nil {
 		return nil, err
 	}

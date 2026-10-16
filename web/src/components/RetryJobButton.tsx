@@ -14,11 +14,11 @@ export default function RetryJobButton({ jobId, pipelineId, repo }: { jobId: num
   }, [repo]);
   if (!canRun) return null;
 
-  const retry = async () => {
+  const retry = async (debug = false) => {
     setBusy(true);
     setError(null);
     try {
-      const r = await retryJob(jobId);
+      const r = await retryJob(jobId, debug);
       navigate(`/jobs/${r.job_id}?pipeline=${pipelineId}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -35,6 +35,15 @@ export default function RetryJobButton({ jobId, pipelineId, repo }: { jobId: num
         title="Run this job again in the same pipeline, with the jobs after it that didn't succeed"
       >
         ↻ Retry job
+      </button>
+      <button
+        type="button"
+        className="btn"
+        disabled={busy}
+        onClick={() => void retry(true)}
+        title="Retry with CI_DEBUG_TRACE=true: the log shows every command as it runs. Masked secrets stay masked, but values derived from them may show."
+      >
+        Retry with debug trace
       </button>
       {error && <div className="approval-error">{error}</div>}
     </div>

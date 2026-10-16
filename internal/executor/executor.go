@@ -99,6 +99,19 @@ func ciEnv(job *proto.RunnerJob) []string {
 	return env
 }
 
+// shellFlags is how every executor runs a job script: -e (stop at the first
+// failing command), plus -x (echo each command) when the job runs with
+// CI_DEBUG_TRACE=true — a debug rerun. Masked values are still redacted from
+// the log, but anything derived from a secret may show; use it deliberately.
+func shellFlags(job *proto.RunnerJob) string {
+	if debugTrace(job) {
+		return "-cex"
+	}
+	return "-ce"
+}
+
+func debugTrace(job *proto.RunnerJob) bool { return job.Env["CI_DEBUG_TRACE"] == "true" }
+
 type shellExecutor struct{}
 
 func (shellExecutor) Name() string { return "shell" }
@@ -110,7 +123,7 @@ func (shellExecutor) Start(ctx context.Context, job *proto.RunnerJob, workdir st
 		return nil, nil, fmt.Errorf("shell executor cannot run service containers: "+
 			"this job declares %d service(s); route it to a docker or kubernetes runner (add matching runner tags)", len(job.Services))
 	}
-	cmd := exec.CommandContext(ctx, "sh", "-ce", job.Script)
+	cmd := exec.CommandContext(ctx, "sh", shellFlags(job), job.Script)
 	cmd.Dir = workdir
 	cmd.Env = append(os.Environ(), ciEnv(job)...)
 	return start(cmd)
@@ -144,7 +157,7 @@ func dockerRunArgs(job *proto.RunnerJob, workdir, image, name, network string, e
 	for _, kv := range extraEnv {
 		args = append(args, "-e", kv)
 	}
-	args = append(args, "--entrypoint", "sh", image, "-ce", job.Script)
+	args = append(args, "--entrypoint", "sh", image, shellFlags(job), job.Script)
 	return args
 }
 

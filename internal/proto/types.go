@@ -478,3 +478,24 @@ type OIDCTokenResponse struct {
 	Token     string    `json:"token"`
 	ExpiresAt time.Time `json:"expires_at"`
 }
+
+// CatalogTemplate is one published version of an org-wide pipeline template,
+// included as `template: name@version`.
+type CatalogTemplate struct {
+	Name        string          `json:"name"`
+	Version     string          `json:"version"`
+	YAML        string          `json:"yaml"`
+	Description string          `json:"description"`
+	PublishedBy string          `json:"published_by"`
+	CreatedAt   time.Time       `json:"created_at"`
+	Inputs      []TemplateInput `json:"inputs"`
+}
+
+// TemplateInput is an input a template declares under spec: inputs:.
+type TemplateInput struct {
+	Name        string   `json:"name"`
+	Default     string   `json:"default,omitempty"`
+	Required    bool     `json:"required"`
+	Description string   `json:"description,omitempty"`
+	Options     []string `json:"options,omitempty"`
+}

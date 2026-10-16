@@ -717,6 +717,71 @@ function RunnerGroups() {
 
 /* ================= Pipelines ================= */
 
+function ReusingConfig() {
+  return (
+    <>
+      <p>
+        Keep shared pipeline steps in one place and include them everywhere. An{" "}
+        <code>include:</code> entry names one source; its YAML is merged under your config, and your
+        config wins on any conflict.
+      </p>
+      <DocTable
+        head={["Source", "Write", "Use it for"]}
+        rows={[
+          [<>Repo template</>, <code>template: go-common</code>, "fragments only this repo uses"],
+          [
+            <Link to="/templates">Template catalog</Link>,
+            <code>template: deploy/kubernetes@1.4.0</code>,
+            "org-wide templates with immutable versions",
+          ],
+          [
+            "Another repo",
+            <code>project: acme/ci-templates · ref: v2 · file: lint.yml</code>,
+            "templates kept in git, on any git host",
+          ],
+          ["A URL", <code>remote: https://… · integrity: sha256-…</code>, "templates published elsewhere"],
+        ]}
+      />
+      <h3>Inputs</h3>
+      <p>
+        A template can declare inputs in a <code>spec:</code> header and use them as{" "}
+        <code>{"$[[ inputs.name ]]"}</code>. Callers pass values with <code>inputs:</code>; a missing
+        required input or a value outside <code>options</code> fails the compile with the input's name.
+      </p>
+      <CodeBlock
+        code={`# the template (catalog: deploy/kubernetes@1.4.0)
+spec:
+  inputs:
+    environment: {default: staging, options: [staging, production]}
+    cluster: {}          # required
+---
+jobs:
+  deploy:
+    stage: deploy
+    environment: $[[ inputs.environment ]]
+    script: [./deploy.sh --cluster $[[ inputs.cluster ]]]
+
+# your .forge-ci.yml
+stages: [build, deploy]
+include:
+  - template: deploy/kubernetes@1.4.0
+    inputs: {cluster: eu-west, environment: production}`}
+      />
+      <Note tone="warn" title="Pin what deploys">
+        Use a catalog version (<code>@1.4.0</code>), a tag or a commit sha for <code>ref:</code>, and{" "}
+        <code>integrity:</code> on remote includes, so a change somewhere else can't silently change
+        what your pipeline runs.
+      </Note>
+      <p>
+        <code>project:</code> includes work within one owner/namespace by default (an admin can share a
+        template repo more widely with <code>FORGE_INCLUDE_SHARED_PROJECTS</code>). Remote includes
+        are https-only and can't reach internal addresses. Full reference:{" "}
+        <code>docs/pipeline-dsl.md</code> § include.
+      </p>
+    </>
+  );
+}
+
 function WritingYaml() {
   return (
     <>
@@ -1677,6 +1742,12 @@ export const GUIDES: Guide[] = [
     group: "Pipelines",
     title: "Writing pipeline YAML",
     render: WritingYaml,
+  },
+  {
+    slug: "reusing-config",
+    group: "Pipelines",
+    title: "Reusing pipeline config",
+    render: ReusingConfig,
   },
   {
     slug: "artifacts",

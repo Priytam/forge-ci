@@ -64,6 +64,12 @@ func TestGitLabWebhook(t *testing.T) {
 	if mrIID != "7" || ref != "promo" {
 		t.Errorf("MR pipeline = iid %s ref %s", mrIID, ref)
 	}
+	var mrID, mrPath string
+	_ = db.QueryRow(ctx, `SELECT j.env->>'CI_MERGE_REQUEST_ID', j.env->>'CI_MERGE_REQUEST_PROJECT_PATH'
+	  FROM jobs j JOIN pipelines p ON p.id = j.pipeline_id WHERE p.source='merge_request' LIMIT 1`).Scan(&mrID, &mrPath)
+	if mrID != "7" || mrPath != repo {
+		t.Errorf("MR job vars = id %q path %q", mrID, mrPath)
+	}
 	edit := []byte(`{"object_kind":"merge_request","project":{"path_with_namespace":"acme/platform/cos"},
 	  "object_attributes":{"iid":7,"action":"update","last_commit":{"id":"bbbb2222"}}}`)
 	if rec := postHook(srv, "/api/v1/webhooks/gitlab", edit, map[string]string{"X-Gitlab-Event": "Merge Request Hook", "X-Gitlab-Token": "s3cret"}); rec.Code != 202 {
@@ -126,5 +132,23 @@ func TestRegisterAnyGitHost(t *testing.T) {
 		if (c.provider == "gitea" || c.provider == "git") && !bytes.Contains(rec.Body.Bytes(), []byte("requires clone_url")) {
 			t.Errorf("%s without clone_url: %s", c.provider, rec.Body.String())
 		}
+	}
+}
+
+func TestTagPushOnEveryHost(t *testing.T) {
+	gh, err := parseGitHubPush([]byte(`{"ref":"refs/tags/v2.0.0","after":"abc","repository":{"full_name":"acme/x"}}`))
+	if err != nil || gh.Ref != "v2.0.0" || gh.ExtraCtx["CI_COMMIT_TAG"] != "v2.0.0" {
+		t.Errorf("github tag = %+v %v", gh, err)
+	}
+	if br, _ := parseGitHubPush([]byte(`{"ref":"refs/heads/main","after":"abc"}`)); br.ExtraCtx != nil {
+		t.Errorf("github branch push must not be a tag: %v", br.ExtraCtx)
+	}
+	bb, ok, err := parseBitbucketPush([]byte(`{"repository":{"full_name":"acme/x"},"push":{"changes":[{"new":{"name":"v3","type":"tag","target":{"hash":"def"}}}]}}`))
+	if err != nil || !ok || bb.ExtraCtx["CI_COMMIT_TAG"] != "v3" {
+		t.Errorf("bitbucket tag = %+v %v", bb, err)
+	}
+	gl, _, _ := parseGitLabPush([]byte(`{"object_kind":"tag_push","ref":"refs/tags/v4","checkout_sha":"aaa","project":{"path_with_namespace":"g/x"}}`))
+	if gl.ExtraCtx["CI_COMMIT_TAG"] != "v4" {
+		t.Errorf("gitlab tag = %+v", gl)
 	}
 }

@@ -392,6 +392,18 @@ func (s *Server) triggerFromWebhook(w http.ResponseWriter, r *http.Request, run 
 		writeErr(w, http.StatusInternalServerError, "failed to load repo config")
 		return false
 	}
+	if source == compiler.SourceMergeRequest && extraCtx != nil {
+		// The same MR variables on every host. Hosts without a separate global
+		// MR id use the per-repo number for both.
+		if extraCtx["CI_MERGE_REQUEST_ID"] == "" {
+			extraCtx["CI_MERGE_REQUEST_ID"] = extraCtx["CI_MERGE_REQUEST_IID"]
+		}
+		extraCtx["CI_MERGE_REQUEST_PROJECT_PATH"] = repo
+		extraCtx["CI_MERGE_REQUEST_SOURCE_BRANCH_SHA"] = sha
+		if pr != nil && pr.BaseSHA != "" {
+			extraCtx["CI_MERGE_REQUEST_DIFF_BASE_SHA"] = pr.BaseSHA
+		}
+	}
 	mrBase := ""
 	if pr != nil {
 		mrBase = pr.BaseSHA
@@ -400,7 +412,9 @@ func (s *Server) triggerFromWebhook(w http.ResponseWriter, r *http.Request, run 
 		}
 	}
 	changes := s.store.PipelineChangeSet(r.Context(), repo, ref, sha, source, mrBase)
-	jobs, err := compiler.CompileWithChanges(config, ref, source, s.store.TemplateResolver(r.Context(), repo), changes, extraCtx)
+	copts := s.store.CompileOpts(r.Context(), repo)
+	copts.Changes, copts.Extra = changes, extraCtx
+	jobs, err := compiler.CompileWith(config, ref, source, copts)
 	if err != nil {
 		writeErr(w, http.StatusUnprocessableEntity, "pipeline config error: "+err.Error())
 		return false
@@ -531,6 +545,7 @@ func parseGitHubPush(body []byte) (webhookRun, error) {
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return webhookRun{}, err
 	}
+	isTag := strings.HasPrefix(payload.Ref, "refs/tags/")
 	ref := strings.TrimPrefix(payload.Ref, "refs/heads/")
 	ref = strings.TrimPrefix(ref, "refs/tags/")
 	var commitAuthor, commitMessage string
@@ -547,6 +562,7 @@ func parseGitHubPush(body []byte) (webhookRun, error) {
 		Repo: payload.Repository.FullName, Ref: ref, SHA: payload.After,
 		Actor: payload.Pusher.Name, Source: compiler.SourceWebhook,
 		CommitAuthor: commitAuthor, CommitMessage: commitMessage,
+		ExtraCtx: tagContext(isTag, ref),
 	}, nil
 }
 
@@ -687,6 +703,15 @@ func prActionTriggers(action string) bool {
 	return false
 }
 
+// tagContext marks a tag push: CI_COMMIT_TAG is set and CI_COMMIT_BRANCH is
+// left undefined, the same on every git host.
+func tagContext(isTag bool, name string) map[string]string {
+	if !isTag {
+		return nil
+	}
+	return map[string]string{"CI_COMMIT_TAG": name}
+}
+
 // mergeRequestContext builds the CI_MERGE_REQUEST_* context for a PR/MR pipeline.
 // It also pins CI_PIPELINE_SOURCE=merge_request so the value is present in job env
 // (Compile already sets it in the rules context from the source argument).
@@ -739,6 +764,7 @@ func parseBitbucketPush(body []byte) (webhookRun, bool, error) {
 			Changes []struct {
 				New struct {
 					Name   string `json:"name"`
+					Type   string `json:"type"` // branch | tag | named_branch | bookmark
 					Target struct {
 						Hash    string `json:"hash"`
 						Message string `json:"message"`
@@ -777,6 +803,7 @@ func parseBitbucketPush(body []byte) (webhookRun, bool, error) {
 		Repo: payload.Repository.FullName, Ref: change.Name, SHA: change.Target.Hash,
 		Actor: author, Source: compiler.SourceWebhook,
 		CommitAuthor: commitAuthor, CommitMessage: change.Target.Message,
+		ExtraCtx: tagContext(change.Type == "tag", change.Name),
 	}, true, nil
 }
 
@@ -923,7 +950,7 @@ func (s *Server) putRepoConfig(w http.ResponseWriter, r *http.Request) {
 	// Validate against a representative ref so broken YAML is rejected early.
 	// Templates referenced via include: are resolved against this repo's
 	// registered templates so an include of a missing template is caught here.
-	if _, err := compiler.Compile(req.Config, "main", compiler.SourcePush, s.store.TemplateResolver(r.Context(), req.Repo)); err != nil {
+	if _, err := compiler.CompileWith(req.Config, "main", compiler.SourcePush, s.store.CompileOpts(r.Context(), req.Repo)); err != nil {
 		writeErr(w, http.StatusBadRequest, "config error: "+err.Error())
 		return
 	}

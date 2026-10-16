@@ -2,6 +2,7 @@ package compiler
 
 import (
 	"fmt"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -15,15 +16,112 @@ import (
 // Forge does not host repo file trees and webhooks carry no file contents, so
 // there is nothing to resolve a filesystem-style `include: local:` against.
 // Instead templates are registered per repo (repo_templates table) and referred
-// to by name — see docs/pipeline-dsl.md. This is the honest design for Forge;
-// remote/URL includes are intentionally NOT supported (no network fetch at
-// compile time).
+// to by name — see docs/pipeline-dsl.md. Includes from other repos, URLs and
+// the template catalog go through an IncludeFunc supplied by the server (the
+// compiler itself never touches the network).
 type TemplateFunc func(name string) (yaml string, found bool, err error)
 
-// includeSpec is one entry of the top-level include: list. Only the template
-// form is supported.
+// includeSpec is one entry of the top-level include: list:
+//
+//   - template: security/sast          # repo template or built-in by name
+//   - template: deploy/k8s@1.4.0        # template catalog, pinned version
+//   - project: platform/ci-templates    # a file from another connected repo
+//     ref: v2.1.0                       # tag, branch or commit (pin it)
+//     file: deploy.yml
+//   - remote: https://example.com/ci/lint.yml
+//     integrity: sha256-<base64 digest>  # optional pin of the exact content
+//
+// Any form may pass inputs: to a template that declares spec: inputs:.
 type includeSpec struct {
-	Template string `yaml:"template"`
+	Template  string         `yaml:"template"`
+	Project   string         `yaml:"project"`
+	Ref       string         `yaml:"ref"`
+	File      string         `yaml:"file"`
+	Remote    string         `yaml:"remote"`
+	Integrity string         `yaml:"integrity"`
+	Inputs    map[string]any `yaml:"inputs"`
+}
+
+// IncludeRef is an include that needs the outside world (another repo, a URL
+// or the template catalog), handed to an IncludeFunc.
+type IncludeRef struct {
+	Kind      string // "project" | "remote" | "catalog"
+	Project   string
+	Ref       string
+	File      string
+	URL       string
+	Integrity string
+	Name      string // catalog template name
+	Version   string // catalog version ("" or "latest" = newest)
+}
+
+// IncludeFunc resolves an external include. found=false means it doesn't
+// exist; err is reserved for lookup failures (network, auth, integrity).
+type IncludeFunc func(ref IncludeRef) (yaml string, found bool, err error)
+
+// describe names an include for error messages.
+func (inc includeSpec) describe() string {
+	switch {
+	case inc.Project != "":
+		return fmt.Sprintf("project %s@%s:%s", inc.Project, inc.Ref, inc.File)
+	case inc.Remote != "":
+		return "remote " + inc.Remote
+	default:
+		return "template " + inc.Template
+	}
+}
+
+// loadInclude returns the YAML body of one include.
+func loadInclude(inc includeSpec, tmpl TemplateFunc, ext IncludeFunc) (string, error) {
+	set := 0
+	for _, v := range []string{inc.Template, inc.Project, inc.Remote} {
+		if v != "" {
+			set++
+		}
+	}
+	if set != 1 {
+		return "", fmt.Errorf("include: each entry needs exactly one of template:, project: or remote:")
+	}
+	external := func(ref IncludeRef) (string, error) {
+		if ext == nil {
+			return "", fmt.Errorf("include: %s is not available here (no external include resolver)", inc.describe())
+		}
+		body, found, err := ext(ref)
+		if err != nil {
+			return "", fmt.Errorf("include: loading %s: %w", inc.describe(), err)
+		}
+		if !found {
+			return "", fmt.Errorf("include: %s not found", inc.describe())
+		}
+		return body, nil
+	}
+	switch {
+	case inc.Project != "":
+		if inc.File == "" {
+			return "", fmt.Errorf("include: project %s needs file:", inc.Project)
+		}
+		return external(IncludeRef{Kind: "project", Project: inc.Project, Ref: inc.Ref, File: inc.File})
+	case inc.Remote != "":
+		return external(IncludeRef{Kind: "remote", URL: inc.Remote, Integrity: inc.Integrity})
+	}
+	name, version, versioned := strings.Cut(inc.Template, "@")
+	if versioned {
+		return external(IncludeRef{Kind: "catalog", Name: name, Version: version})
+	}
+	body, found, err := resolveTemplateBody(inc.Template, tmpl)
+	if err != nil {
+		return "", fmt.Errorf("include: loading template %q: %w", inc.Template, err)
+	}
+	if found {
+		return body, nil
+	}
+	// Not a repo template or built-in: the catalog's newest version, if any.
+	if ext != nil {
+		if b, ok, err := ext(IncludeRef{Kind: "catalog", Name: inc.Template}); err == nil && ok {
+			return b, nil
+		}
+	}
+	return "", fmt.Errorf("include: template %q is not registered for this repo and is not a built-in", inc.Template)
 }
 
 // resolveTemplateBody resolves a template name to its YAML body, checking the
@@ -60,13 +158,13 @@ func resolveTemplateBody(name string, tmpl TemplateFunc) (string, bool, error) {
 //
 // Include recursion (an included template that itself has include:) is
 // supported up to a small depth bound to prevent runaway/cyclic includes.
-func resolveIncludes(main config, tmpl TemplateFunc) (config, error) {
-	return resolveIncludesDepth(main, tmpl, 0)
+func resolveIncludes(main config, tmpl TemplateFunc, ext IncludeFunc) (config, error) {
+	return resolveIncludesDepth(main, tmpl, ext, 0)
 }
 
 const maxIncludeDepth = 10
 
-func resolveIncludesDepth(main config, tmpl TemplateFunc, depth int) (config, error) {
+func resolveIncludesDepth(main config, tmpl TemplateFunc, ext IncludeFunc, depth int) (config, error) {
 	if len(main.Include) == 0 {
 		return main, nil
 	}
@@ -77,22 +175,20 @@ func resolveIncludesDepth(main config, tmpl TemplateFunc, depth int) (config, er
 	// Accumulate merged fragments, in order, starting from empty.
 	merged := config{}
 	for _, inc := range main.Include {
-		if inc.Template == "" {
-			return config{}, fmt.Errorf("include: only the {template: <name>} form is supported")
-		}
-		body, found, err := resolveTemplateBody(inc.Template, tmpl)
+		raw, err := loadInclude(inc, tmpl, ext)
 		if err != nil {
-			return config{}, fmt.Errorf("include: loading template %q: %w", inc.Template, err)
+			return config{}, err
 		}
-		if !found {
-			return config{}, fmt.Errorf("include: template %q is not registered for this repo and is not a built-in", inc.Template)
+		body, err := applyInputs(raw, inc.Inputs)
+		if err != nil {
+			return config{}, fmt.Errorf("include: %s: %w", inc.describe(), err)
 		}
 		var frag config
 		if err := yaml.Unmarshal([]byte(body), &frag); err != nil {
-			return config{}, fmt.Errorf("include: template %q has invalid YAML: %w", inc.Template, err)
+			return config{}, fmt.Errorf("include: %s has invalid YAML: %w", inc.describe(), err)
 		}
 		// Resolve the fragment's own includes first (depth-bounded).
-		frag, err = resolveIncludesDepth(frag, tmpl, depth+1)
+		frag, err = resolveIncludesDepth(frag, tmpl, ext, depth+1)
 		if err != nil {
 			return config{}, err
 		}

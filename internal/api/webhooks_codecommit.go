@@ -50,6 +50,7 @@ type ccPush struct {
 	Ref    string // branch/tag short name (refs/heads/ and refs/tags/ stripped)
 	SHA    string // the commit the reference now points at
 	Author string // IAM principal that pushed, when the event carries one
+	Tag    bool   // a tag (not a branch) moved
 }
 
 // codeCommitEventID returns the EventBridge envelope id used to dedup
@@ -134,6 +135,7 @@ func parseCodeCommitPush(body []byte) (ccPush, error) {
 		Ref:    shortRefName(detail.ReferenceName),
 		SHA:    sha,
 		Author: arnPrincipal(detail.CallerUserARN),
+		Tag:    detail.ReferenceType == "tag" || strings.HasPrefix(detail.ReferenceName, "refs/tags/"),
 	}, nil
 }
 
@@ -276,6 +278,7 @@ func (s *Server) codecommitPush(w http.ResponseWriter, r *http.Request, body []b
 	*created = s.triggerFromWebhook(w, r, webhookRun{
 		Repo: push.Repo, Ref: push.Ref, SHA: push.SHA,
 		Actor: push.Author, Source: compiler.SourceWebhook,
+		ExtraCtx: tagContext(push.Tag, push.Ref),
 	})
 }
 

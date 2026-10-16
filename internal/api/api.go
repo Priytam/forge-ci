@@ -109,6 +109,7 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 	srv.registerOIDCRoutes()
 	srv.registerTestHistoryRoutes()
 	srv.registerDownloadRoutes()
+	srv.registerCatalogRoutes()
 
 	return srv
 }
@@ -183,7 +184,7 @@ func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
 		}
 		req.SHA = sha
 	}
-	jobs, err := compiler.Compile(req.Config, req.Ref, compiler.SourceAPI, s.store.TemplateResolver(r.Context(), req.Repo))
+	jobs, err := compiler.CompileWith(req.Config, req.Ref, compiler.SourceAPI, s.store.CompileOpts(r.Context(), req.Repo))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -597,7 +598,7 @@ func (s *Server) retryPipeline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jobs, err := compiler.Compile(src.Config, src.Ref, compiler.SourceAPI, s.store.TemplateResolver(r.Context(), src.Repo))
+	jobs, err := compiler.CompileWith(src.Config, src.Ref, compiler.SourceAPI, s.store.CompileOpts(r.Context(), src.Repo))
 	if err != nil {
 		writeErr(w, http.StatusUnprocessableEntity, "stored config no longer compiles: "+err.Error())
 		return
@@ -729,7 +730,12 @@ func (s *Server) retryJob(w http.ResponseWriter, r *http.Request) {
 	if !s.requireOperate(w, r, repo) {
 		return
 	}
-	res, err := s.store.RetryJob(r.Context(), id)
+	var body struct {
+		Debug bool `json:"debug"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body) // optional body
+	debug := body.Debug || r.URL.Query().Get("debug") == "true"
+	res, err := s.store.RetryJobWith(r.Context(), id, store.RetryOpts{Debug: debug})
 	switch {
 	case errors.Is(err, store.ErrNotRetryable):
 		writeErr(w, http.StatusConflict, err.Error())
@@ -743,7 +749,7 @@ func (s *Server) retryJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, "job.retry", strconv.FormatInt(id, 10), repo, "ok", map[string]any{
-		"pipeline_id": res.PipelineID, "new_job_id": res.Retried[id], "jobs_requeued": len(res.Retried),
+		"pipeline_id": res.PipelineID, "new_job_id": res.Retried[id], "jobs_requeued": len(res.Retried), "debug": debug,
 	})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"pipeline_id": res.PipelineID, "job_id": res.Retried[id], "retried": len(res.Retried),

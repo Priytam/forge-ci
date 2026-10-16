@@ -66,7 +66,9 @@ func (s *Server) lint(w http.ResponseWriter, r *http.Request) {
 	if req.ChangedFiles != nil {
 		changes = &compiler.ChangeSet{Files: req.ChangedFiles}
 	}
-	jobs, err := compiler.CompileWithChanges(req.Config, req.Ref, source, s.store.TemplateResolver(r.Context(), req.Repo), changes)
+	copts := s.store.CompileOpts(r.Context(), req.Repo)
+	copts.Changes = changes
+	jobs, err := compiler.CompileWith(req.Config, req.Ref, source, copts)
 	if err == nil {
 		_, err = compiler.Options(req.Config)
 	}

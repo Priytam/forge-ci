@@ -22,6 +22,7 @@ import AdminEnvironments from "./pages/AdminEnvironments";
 import AdminNotifications from "./pages/AdminNotifications";
 import AdminApproverGroups from "./pages/AdminApproverGroups";
 import AdminServiceAccounts from "./pages/AdminServiceAccounts";
+import TemplateCatalog from "./pages/TemplateCatalog";
 import Environments from "./pages/Environments";
 import TestHistory from "./pages/TestHistory";
 import Shell from "./components/Shell";
@@ -47,6 +48,7 @@ export default function App() {
           <Route path="/runners" element={<Runners />} />
           <Route path="/docs" element={<Docs />} />
           <Route path="/docs/:guide" element={<Docs />} />
+          <Route path="/templates" element={<TemplateCatalog />} />
           <Route path="/recipes" element={<Recipes />} />
           <Route path="/recipes/:slug" element={<Recipes />} />
           <Route path="/login" element={<Login />} />

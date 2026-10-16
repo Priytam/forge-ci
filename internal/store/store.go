@@ -1289,12 +1289,16 @@ func (s *Store) AcquireJob(ctx context.Context, req proto.AcquireRequest) (*prot
 	if err != nil {
 		return nil, err
 	}
+	var defaultBranch, registeredCloneURL string
+	_ = s.pool.QueryRow(ctx, `SELECT default_branch, clone_url FROM repo_registry WHERE repo=$1`, repo).
+		Scan(&defaultBranch, &registeredCloneURL)
 	// Predefined CI_* variables first; repo variables, then the job's own
 	// YAML variables, override them (GitLab precedence).
 	merged := PredefinedVars(JobContext{
 		Repo: repo, Ref: ref, SHA: sha, Source: source, TriggeredBy: triggeredBy,
 		CommitAuthor: commitAuthor, CommitMessage: commitMessage, Environment: env,
 		PipelineID: j.PipelineID, JobID: j.ID, JobName: j.Name,
+		DefaultBranch: defaultBranch, CloneURL: registeredCloneURL,
 	})
 	for k, v := range resolved {
 		merged[k] = v
@@ -1303,6 +1307,11 @@ func (s *Store) AcquireJob(ctx context.Context, req proto.AcquireRequest) (*prot
 	_ = json.Unmarshal(envRaw, &jobEnv)
 	for k, v := range jobEnv { // job-level YAML variables win
 		merged[k] = v
+	}
+	if jobEnv["CI_COMMIT_TAG"] != "" { // a tag pipeline (the trigger said so) has no branch
+		if _, set := jobEnv["CI_COMMIT_BRANCH"]; !set {
+			delete(merged, "CI_COMMIT_BRANCH")
+		}
 	}
 	j.Env = merged
 

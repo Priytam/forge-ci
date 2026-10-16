@@ -234,6 +234,9 @@ func (k *kubeExecutor) Start(ctx context.Context, job *proto.RunnerJob, workdir 
 	fmt.Fprintf(&sb, "export CI=true CI_PIPELINE_ID=%d CI_JOB_ID=%d CI_JOB_NAME=%s\n",
 		job.PipelineID, job.ID, posixQuote(job.Name))
 	sb.WriteString("cd /workspace\n")
+	if debugTrace(job) {
+		sb.WriteString("set -x\n") // after the exports, so they aren't echoed
+	}
 	sb.WriteString(job.Script)
 
 	execArgs := []string{"exec", "-i", pod}

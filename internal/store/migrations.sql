@@ -857,3 +857,16 @@ CREATE TABLE IF NOT EXISTS runner_affinity (
     runner_id  TEXT        NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Template catalog: org-wide, versioned pipeline templates any repo can
+-- include as `template: name@version` (or `template: name` for the newest).
+-- Versions are immutable once published; a fix is a new version.
+CREATE TABLE IF NOT EXISTS template_catalog (
+    name         TEXT        NOT NULL,
+    version      TEXT        NOT NULL,
+    yaml         TEXT        NOT NULL,
+    description  TEXT        NOT NULL DEFAULT '',
+    published_by TEXT        NOT NULL DEFAULT '',
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (name, version)
+);

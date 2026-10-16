@@ -182,7 +182,7 @@ func (s *Server) rollback(w http.ResponseWriter, r *http.Request, repo, env stri
 		return
 	}
 
-	jobs, err := compiler.Compile(config, targetRef, compiler.SourceAPI, s.store.TemplateResolver(r.Context(), repo))
+	jobs, err := compiler.CompileWith(config, targetRef, compiler.SourceAPI, s.store.CompileOpts(r.Context(), repo))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "registered config no longer compiles: "+err.Error())
 		return

@@ -19,7 +19,7 @@ Legend: ✅ shipped · 🟡 partial · ❌ not yet (roadmap).
 | `variables` at job level | ✅ | ✅ | |
 | Artifacts (`paths`) | ✅ + expiry, reports | ✅ `paths` + `expire_in` + `reports.junit` | per-artifact TTL (server-side GC, independent of `RETENTION_DAYS`); JUnit XML parsed into a per-job pass/fail summary at `GET /jobs/{id}/report` — see docs/pipeline-dsl.md |
 | Caching (keyed, per-lockfile) | ✅ | ✅ | `cache: {key, paths, policy}`, literal or content-addressed `key.files`, shared across pipelines — see docs/pipeline-dsl.md |
-| Templates: `include`, `extends`, anchors | ✅ | 🟡 `include` (per-repo templates) + `extends` | anchors N/A; remote/URL includes out of scope (no network fetch) — see docs/pipeline-dsl.md |
+| Templates: `include`, `extends`, anchors | ✅ | ✅ `include` from repo templates, the versioned template catalog (`name@version`), another repo (`project:`/`ref:`/`file:`, any git host) and `remote:` https URLs (SSRF-guarded, `integrity:` pin), with typed `spec: inputs:`; `extends` | YAML anchors work as plain YAML — see docs/pipeline-dsl.md |
 | Matrix builds (`parallel:`) | ✅ | ✅ | `parallel: N` and `parallel: {matrix}` with `needs` fan-in |
 | Manual jobs (`when: manual`) | ✅ | ✅ | `rules`/job `when: manual` → gated `blocked`; `POST /jobs/{id}/play` releases; composes with env approval |
 | Allowed failures (`allow_failure`) | ✅ | ✅ | job-level or per-rule; dependents proceed, pipeline not failed |

@@ -41,6 +41,17 @@ type RetryResult struct {
 // then runs them normally — approvals, freezes and resource groups apply
 // again — and the pipeline's status follows the new jobs.
 func (s *Store) RetryJob(ctx context.Context, jobID int64) (*RetryResult, error) {
+	return s.RetryJobWith(ctx, jobID, RetryOpts{})
+}
+
+// RetryOpts tunes a retry.
+type RetryOpts struct {
+	// Debug reruns the job (only the one asked for, not its dependents) with
+	// CI_DEBUG_TRACE=true, so the runner echoes every command it executes.
+	Debug bool
+}
+
+func (s *Store) RetryJobWith(ctx context.Context, jobID int64, opts RetryOpts) (*RetryResult, error) {
 	policy, err := s.GetEnvPolicy(ctx)
 	if err != nil {
 		return nil, err
@@ -160,6 +171,12 @@ func (s *Store) RetryJob(ctx context.Context, jobID int64) (*RetryResult, error)
 			return nil, err
 		}
 		res.Retried[id] = nid
+		if opts.Debug && id == jobID {
+			if _, err := tx.Exec(ctx,
+				`UPDATE jobs SET env = env || '{"CI_DEBUG_TRACE":"true"}'::jsonb WHERE id = $1`, nid); err != nil {
+				return nil, err
+			}
+		}
 	}
 	for _, id := range ids {
 		for _, need := range needs[id] {

@@ -163,3 +163,15 @@ func TestDockerMountsRunDirReadOnly(t *testing.T) {
 		t.Errorf("mounted a run dir that does not exist: %s", args)
 	}
 }
+
+func TestDebugTraceFlags(t *testing.T) {
+	job := &proto.RunnerJob{Script: "make"}
+	if f := shellFlags(job); f != "-ce" {
+		t.Errorf("default flags = %s", f)
+	}
+	job.Env = map[string]string{"CI_DEBUG_TRACE": "true"}
+	args := dockerRunArgs(job, "/tmp/ws", "alpine", "n", "bridge")
+	if args[len(args)-2] != "-cex" {
+		t.Errorf("debug docker args = %v", args)
+	}
+}

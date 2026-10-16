@@ -35,6 +35,7 @@ export const NAV: NavSection[] = [
   {
     title: "Learn",
     items: [
+      { to: "/templates", label: "Template catalog", icon: "recipes", keywords: "include reuse shared versioned inputs" },
       { to: "/recipes", label: "Recipes", icon: "recipes", keywords: "examples templates" },
       { to: "/docs", label: "Docs", icon: "docs", keywords: "help guide" },
     ],
@@ -106,6 +107,8 @@ export function crumbsFor(pathname: string, search: string): Crumb[] {
       return [{ label: "Admin" }, { label: ADMIN_TITLES[b ?? ""] ?? b ?? "" }];
     case "tokens":
       return [{ label: "API tokens" }];
+    case "templates":
+      return [{ label: "Template catalog" }];
     case "new":
       return [{ label: "Run pipeline" }];
     case "docs":

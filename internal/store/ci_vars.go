@@ -1,6 +1,8 @@
 package store
 
 import (
+	"net/url"
+	"os"
 	"strconv"
 	"strings"
 )
@@ -19,6 +21,34 @@ type JobContext struct {
 	PipelineID    int64
 	JobID         int64
 	JobName       string
+	DefaultBranch string // the repo's default branch ("" = unknown)
+	CloneURL      string // as registered; never carries credentials
+}
+
+// webURL is where Forge's pages live (FRONTEND_URL, else EXTERNAL_URL);
+// serverURL is the API (EXTERNAL_URL, else FRONTEND_URL). Both are "" when
+// neither is configured, and then the URL variables are left unset.
+func webURL() string {
+	if v := os.Getenv("FRONTEND_URL"); v != "" {
+		return strings.TrimSuffix(v, "/")
+	}
+	return strings.TrimSuffix(os.Getenv("EXTERNAL_URL"), "/")
+}
+
+func serverURL() string {
+	if v := os.Getenv("EXTERNAL_URL"); v != "" {
+		return strings.TrimSuffix(v, "/")
+	}
+	return strings.TrimSuffix(os.Getenv("FRONTEND_URL"), "/")
+}
+
+// credentialFree strips any user:password from a URL-form clone URL.
+func credentialFree(cloneURL string) string {
+	if u, err := url.Parse(cloneURL); err == nil && u.User != nil && u.Host != "" {
+		u.User = nil
+		return u.String()
+	}
+	return cloneURL
 }
 
 // PredefinedVars returns the GitLab-compatible CI_* variables for a job. A
@@ -73,6 +103,20 @@ func PredefinedVars(c JobContext) map[string]string {
 	}
 	if c.Environment != "" {
 		v["CI_ENVIRONMENT_NAME"] = c.Environment
+	}
+	if c.DefaultBranch != "" {
+		v["CI_DEFAULT_BRANCH"] = c.DefaultBranch
+	}
+	if c.CloneURL != "" {
+		v["CI_REPOSITORY_URL"] = credentialFree(c.CloneURL)
+	}
+	if u := serverURL(); u != "" {
+		v["CI_SERVER_URL"] = u
+		v["CI_API_V1_URL"] = u + "/api/v1"
+	}
+	if u := webURL(); u != "" {
+		v["CI_PIPELINE_URL"] = u + "/pipelines/" + strconv.FormatInt(c.PipelineID, 10)
+		v["CI_JOB_URL"] = u + "/jobs/" + strconv.FormatInt(c.JobID, 10)
 	}
 	return v
 }
