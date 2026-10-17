@@ -942,9 +942,27 @@ export interface AuthUser {
   is_admin?: boolean;
 }
 
+export interface AuthProviderInfo {
+  name: string;
+  label: string;
+  /** redirect: a button to the IdP; password: a username/password form (LDAP) */
+  kind: "redirect" | "password";
+}
+
 export interface AuthProviders {
   providers: string[];
+  provider_info?: AuthProviderInfo[];
   enforced: boolean;
+}
+
+/** Signs in with a directory (LDAP / Active Directory) account. */
+export async function ldapLogin(username: string, password: string): Promise<void> {
+  const res = await fetch(`${BASE}/auth/ldap/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+  if (!res.ok) throw await parseError(res);
 }
 
 /** Public endpoint; bypasses the central 401 redirect. */
@@ -1017,6 +1035,7 @@ export interface SsoProviderConfig {
   has_secret: boolean;
   tenant: string;
   allowed_domain: string;
+  settings?: Record<string, string>;
 }
 
 export interface SsoConfig {
@@ -1036,6 +1055,47 @@ export interface SsoProviderInput {
   client_secret?: string;
   tenant?: string;
   allowed_domain?: string;
+  settings?: Record<string, string>;
+}
+
+export interface GroupMapping {
+  id: number;
+  provider: string;
+  group: string;
+  platform_admin: boolean;
+  repo_pattern: string;
+  role: string;
+  created_at: string;
+}
+
+export function listGroupMappings(): Promise<GroupMapping[]> {
+  return getJSON<{ mappings: GroupMapping[] }>("/identity/group-mappings").then((r) => r.mappings ?? []);
+}
+
+export function createGroupMapping(m: Omit<GroupMapping, "id" | "created_at">): Promise<GroupMapping> {
+  return postJSON<GroupMapping>("/identity/group-mappings", m);
+}
+
+export function deleteGroupMapping(id: number): Promise<void> {
+  return requestVoid("DELETE", `/identity/group-mappings/${id}`);
+}
+
+export interface SessionSettings {
+  lifetime_hours: number;
+  min_hours: number;
+  max_hours: number;
+}
+
+export function getSessionSettings(): Promise<SessionSettings> {
+  return getJSON<SessionSettings>("/identity/session-settings");
+}
+
+export function putSessionSettings(lifetime_hours: number): Promise<SessionSettings> {
+  return putJSON<SessionSettings>("/identity/session-settings", { lifetime_hours });
+}
+
+export function deleteProtectedEnvironment(id: number): Promise<void> {
+  return requestVoid("DELETE", `/protected-environments/${id}`);
 }
 
 export function putSsoProvider(input: SsoProviderInput): Promise<void> {

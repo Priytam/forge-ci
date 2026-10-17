@@ -20,6 +20,10 @@ type SSOProvider struct {
 	HasSecret     bool   `json:"has_secret"`
 	Tenant        string `json:"tenant"`
 	AllowedDomain string `json:"allowed_domain"`
+	// Settings is provider-specific, non-secret config: for "oidc" issuer,
+	// display_name, scopes, groups_claim; for "ldap" url, bind_dn, base_dn,
+	// user_filter, email_attribute, name_attribute, group_attribute, start_tls.
+	Settings map[string]string `json:"settings,omitempty"`
 }
 
 // UpsertSSOProvider saves provider config; empty secret keeps the stored one.
@@ -34,8 +38,8 @@ func (s *Store) UpsertSSOProvider(ctx context.Context, p SSOProvider) error {
 		return err
 	}
 	_, err = s.pool.Exec(ctx,
-		`INSERT INTO sso_providers (provider, enabled, client_id, client_secret, tenant, allowed_domain)
-		 VALUES ($1,$2,$3,$4,$5,$6)
+		`INSERT INTO sso_providers (provider, enabled, client_id, client_secret, tenant, allowed_domain, settings)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7)
 		 ON CONFLICT (provider) DO UPDATE SET
 		   enabled = EXCLUDED.enabled,
 		   client_id = EXCLUDED.client_id,
@@ -44,15 +48,16 @@ func (s *Store) UpsertSSOProvider(ctx context.Context, p SSOProvider) error {
 		                        ELSE EXCLUDED.client_secret END,
 		   tenant = EXCLUDED.tenant,
 		   allowed_domain = EXCLUDED.allowed_domain,
+		   settings = EXCLUDED.settings,
 		   updated_at = now()`,
-		p.Provider, p.Enabled, p.ClientID, encSecret, p.Tenant, p.AllowedDomain)
+		p.Provider, p.Enabled, p.ClientID, encSecret, p.Tenant, p.AllowedDomain, settingsJSON(p.Settings))
 	return err
 }
 
 // ListSSOProviders returns all provider configs with secrets masked.
 func (s *Store) ListSSOProviders(ctx context.Context) ([]SSOProvider, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT provider, enabled, client_id, client_secret <> '', tenant, allowed_domain
+		`SELECT provider, enabled, client_id, client_secret <> '', tenant, allowed_domain, settings
 		 FROM sso_providers ORDER BY provider`)
 	if err != nil {
 		return nil, err
@@ -62,7 +67,7 @@ func (s *Store) ListSSOProviders(ctx context.Context) ([]SSOProvider, error) {
 	for rows.Next() {
 		var p SSOProvider
 		if err := rows.Scan(&p.Provider, &p.Enabled, &p.ClientID, &p.HasSecret,
-			&p.Tenant, &p.AllowedDomain); err != nil {
+			&p.Tenant, &p.AllowedDomain, &p.Settings); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -74,9 +79,9 @@ func (s *Store) ListSSOProviders(ctx context.Context) ([]SSOProvider, error) {
 func (s *Store) GetEnabledSSOProvider(ctx context.Context, provider string) (*SSOProvider, error) {
 	var p SSOProvider
 	err := s.pool.QueryRow(ctx,
-		`SELECT provider, enabled, client_id, client_secret, tenant, allowed_domain
+		`SELECT provider, enabled, client_id, client_secret, tenant, allowed_domain, settings
 		 FROM sso_providers WHERE provider=$1 AND enabled`, provider).
-		Scan(&p.Provider, &p.Enabled, &p.ClientID, &p.ClientSecret, &p.Tenant, &p.AllowedDomain)
+		Scan(&p.Provider, &p.Enabled, &p.ClientID, &p.ClientSecret, &p.Tenant, &p.AllowedDomain, &p.Settings)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}

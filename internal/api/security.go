@@ -137,7 +137,16 @@ func (s *Server) isAdmin(r *http.Request) bool {
 	if sess.Provider == serviceAccountProvider {
 		return sess.ServiceAdmin
 	}
-	return adminEmails()[strings.ToLower(sess.Email)]
+	if adminEmails()[strings.ToLower(sess.Email)] {
+		return true
+	}
+	// An IdP group mapped to platform admin. API tokens act as their owner,
+	// so the owner's groups apply to them too.
+	ok, err := s.store.IsGroupAdmin(r.Context(), sess.Email)
+	if err != nil {
+		slog.Error("group admin lookup", "err", err)
+	}
+	return ok
 }
 
 // requireAdmin gates a mutating admin endpoint. On denial it records a "denied"

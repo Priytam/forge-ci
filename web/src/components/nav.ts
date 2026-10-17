@@ -49,7 +49,7 @@ export const NAV: NavSection[] = [
       { to: "/admin/approver-groups", label: "Approver groups", icon: "shield", keywords: "release managers approval group" },
       { to: "/admin/service-accounts", label: "Service accounts", icon: "key", keywords: "robot bot automation token" },
       { to: "/admin/runner-tokens", label: "Runner tokens", icon: "key", keywords: "register runner" },
-      { to: "/admin/sso", label: "SSO", icon: "lock", keywords: "login google microsoft github" },
+      { to: "/admin/sso", label: "Sign-in & identity", icon: "lock", keywords: "sso login oidc okta keycloak ldap active directory groups roles session google microsoft github" },
       { to: "/admin/audit", label: "Audit log", icon: "audit", keywords: "history who" },
       { to: "/tokens#policy", label: "API token policy", icon: "shield", keywords: "expiry" },
     ],
@@ -64,7 +64,7 @@ export const EXTRA_PAGES: NavItem[] = [
 ];
 
 const ADMIN_TITLES: Record<string, string> = {
-  sso: "SSO",
+  sso: "Sign-in & identity",
   audit: "Audit log",
   "runner-tokens": "Runner tokens",
   environments: "Environments & branches",

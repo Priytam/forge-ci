@@ -212,6 +212,14 @@ func (s *Store) fillApprovers(ctx context.Context, n *ApprovalNotice, admins []s
 		if err := rows.Err(); err != nil {
 			return err
 		}
+		// People whose IdP groups grant an approver role on this repo.
+		viaGroups, err := s.usersWithGroupRole(ctx, n.Repo, n.ApproverRoles)
+		if err != nil {
+			return err
+		}
+		for _, u := range viaGroups {
+			set[u] = true
+		}
 	}
 	group, err := s.groupMembers(ctx, s.pool, n.RequiredGroup)
 	if err != nil {

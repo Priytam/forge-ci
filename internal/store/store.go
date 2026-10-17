@@ -92,6 +92,9 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 	return nil
 }
 
+// Migrate re-runs the (idempotent) migrations — what every server start does.
+func (s *Store) Migrate(ctx context.Context) error { return runMigrations(ctx, s.pool) }
+
 func New(ctx context.Context, dsn string) (*Store, error) {
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {

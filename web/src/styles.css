@@ -2352,6 +2352,12 @@ select:focus {
   gap: 14px;
 }
 
+/* Fields stacked directly in the card's column must not stretch vertically. */
+.sso-card > .field,
+.sso-card > .check-row {
+  flex: none;
+}
+
 .sso-card-head {
   display: flex;
   align-items: center;
@@ -4219,3 +4225,20 @@ h2.section-title {
   vector-effect: non-scaling-stroke;
 }
 .coverage-spark circle { fill: var(--accent); }
+
+/* Directory (LDAP) sign-in form */
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  text-align: left;
+}
+.login-form .field {
+  flex: none;
+}
+.login-form-title { font-size: 13px; }
+.login-or {
+  text-align: center;
+  font-size: 12px;
+  margin: 12px 0;
+}

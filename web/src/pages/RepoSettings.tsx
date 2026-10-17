@@ -26,6 +26,7 @@ import {
   getRepoTemplate,
   listMembers,
   listProtectedEnvironments,
+  deleteProtectedEnvironment,
   listRepoTemplates,
   listRunners,
   listSchedules,
@@ -548,6 +549,19 @@ function MembersSection({ repo }: { repo: string }) {
     }
   };
 
+  const onDeleteRule = async (id: number, name: string, global: boolean) => {
+    const what = global
+      ? `Delete the GLOBAL approval rule for ${name}? Every repo without its own rule stops requiring approval for ${name}.`
+      : `Delete this repo's approval rule for ${name}? The global rule for ${name}, if any, applies instead.`;
+    if (!window.confirm(what)) return;
+    try {
+      await deleteProtectedEnvironment(id);
+      refreshEnvs();
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : String(err));
+    }
+  };
+
   const onDeleteMember = async (id: number, name: string) => {
     if (!window.confirm(`Remove member "${name}"?`)) return;
     setMemberError(null);
@@ -687,6 +701,7 @@ function MembersSection({ repo }: { repo: string }) {
                 <th>Approver roles</th>
                 <th>Self-approval</th>
                 <th>From group</th>
+                <th></th>
               </tr>
             </thead>
             <tbody>
@@ -720,6 +735,15 @@ function MembersSection({ repo }: { repo: string }) {
                     ) : (
                       <span className="muted">—</span>
                     )}
+                  </td>
+                  <td style={{ textAlign: "right" }}>
+                    <button
+                      type="button"
+                      className="btn btn-icon"
+                      onClick={() => void onDeleteRule(env.id, env.name, env.repo === "")}
+                    >
+                      Delete
+                    </button>
                   </td>
                 </tr>
               ))}

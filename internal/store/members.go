@@ -228,14 +228,19 @@ func (s *Store) RemoveMember(ctx context.Context, id int64) error {
 }
 
 // memberRole returns the user's role on a repo, or "" if not a member.
+// It includes roles granted through the user's IdP groups.
 func (s *Store) memberRole(ctx context.Context, repo, username string) (string, error) {
 	var role string
 	err := s.pool.QueryRow(ctx,
-		`SELECT role FROM repo_members WHERE repo=$1 AND username=$2`, repo, username).Scan(&role)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", nil
+		`SELECT role FROM repo_members WHERE repo=$1 AND lower(username)=lower($2)`, repo, username).Scan(&role)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return "", err
 	}
-	return role, err
+	g, err := s.groupRole(ctx, repo, username)
+	if err != nil {
+		return "", err
+	}
+	return higherRole(role, g), nil
 }
 
 // repoHasMembers reports whether any membership exists for the repo. Repos
@@ -244,7 +249,10 @@ func (s *Store) repoHasMembers(ctx context.Context, repo string) (bool, error) {
 	var exists bool
 	err := s.pool.QueryRow(ctx,
 		`SELECT EXISTS (SELECT 1 FROM repo_members WHERE repo=$1)`, repo).Scan(&exists)
-	return exists, err
+	if err != nil || exists {
+		return exists, err
+	}
+	return s.repoHasGroupGrants(ctx, repo)
 }
 
 // resolveProtectedEnv returns the approval rule for (repo, env): the
@@ -323,7 +331,21 @@ func (s *Store) RepoAccess(ctx context.Context, repo, username string) (role str
 		                  WHERE repo=$1 AND lower(username)=lower($2) LIMIT 1), ''),
 		        EXISTS (SELECT 1 FROM repo_members WHERE repo=$1)`,
 		repo, username).Scan(&role, &hasMembers)
-	return role, hasMembers, err
+	if err != nil {
+		return "", false, err
+	}
+	// Roles granted through IdP group mappings count like direct membership.
+	g, err := s.groupRole(ctx, repo, username)
+	if err != nil {
+		return "", false, err
+	}
+	role = higherRole(role, g)
+	if !hasMembers {
+		if hasMembers, err = s.repoHasGroupGrants(ctx, repo); err != nil {
+			return "", false, err
+		}
+	}
+	return role, hasMembers, nil
 }
 
 // JobRepo returns the repo of the pipeline a job belongs to.
@@ -346,4 +368,24 @@ func (s *Store) PipelineRepo(ctx context.Context, pipelineID int64) (string, err
 		return "", ErrNotFound
 	}
 	return repo, err
+}
+
+// DeleteProtectedEnv removes an approval rule. Deleting the global default
+// production rule is remembered, so startup doesn't re-create it.
+func (s *Store) DeleteProtectedEnv(ctx context.Context, id int64) (*proto.ProtectedEnvironment, error) {
+	var pe proto.ProtectedEnvironment
+	err := s.pool.QueryRow(ctx,
+		`DELETE FROM protected_environments WHERE id=$1 RETURNING id, repo, name`, id).Scan(&pe.ID, &pe.Repo, &pe.Name)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if pe.Repo == "" && pe.Name == "production" {
+		_, err = s.pool.Exec(ctx,
+			`INSERT INTO platform_settings (key, value) VALUES ('default_production_rule_removed', 'true')
+			 ON CONFLICT (key) DO NOTHING`)
+	}
+	return &pe, err
 }

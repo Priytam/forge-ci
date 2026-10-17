@@ -110,6 +110,7 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 	srv.registerTestHistoryRoutes()
 	srv.registerDownloadRoutes()
 	srv.registerCatalogRoutes()
+	srv.registerIdentityRoutes()
 
 	return srv
 }

@@ -1356,6 +1356,104 @@ function SsoMicrosoft() {
   );
 }
 
+function SsoOidc() {
+  return (
+    <>
+      <p>
+        Sign in with any OpenID Connect identity provider — Okta, Keycloak, Auth0, Entra ID, Authentik, Dex,
+        Zitadel, Google Workspace. Configure it on{" "}
+        <Link to="/admin/sso">Admin → Sign-in &amp; identity</Link>.
+      </p>
+      <Steps>
+        <li>
+          In the IdP, create a confidential <strong>web application</strong> (authorization code). Redirect URI:{" "}
+          <code>https://&lt;forge-host&gt;/api/v1/auth/callback/oidc</code> (shown on the form).
+        </li>
+        <li>
+          Enter the <strong>issuer URL</strong> (Forge reads <code>/.well-known/openid-configuration</code>), client ID
+          and secret, and a button label.
+        </li>
+        <li>
+          For groups: add the IdP's group scope to <strong>Scopes</strong> and set <strong>Groups claim</strong> if it
+          isn't <code>groups</code> (Keycloak realm roles: <code>realm_access.roles</code>).
+        </li>
+        <li>Enable, sign in from a private window, then map groups to roles.</li>
+      </Steps>
+      <DocTable
+        head={["IdP", "Issuer"]}
+        rows={[
+          ["Okta", <code>https://&lt;org&gt;.okta.com/oauth2/default</code>],
+          ["Keycloak", <code>https://&lt;host&gt;/realms/&lt;realm&gt;</code>],
+          ["Auth0", <code>https://&lt;tenant&gt;.auth0.com/</code>],
+          ["Entra ID", <code>https://login.microsoftonline.com/&lt;tenant-id&gt;/v2.0</code>],
+          ["Authentik", <code>https://&lt;host&gt;/application/o/&lt;slug&gt;/</code>],
+        ]}
+      />
+      <Note title="SAML-only IdP?">
+        Put it behind an OIDC bridge (Keycloak, Dex, Authentik) and use this provider; group attributes come
+        through as a groups claim.
+      </Note>
+    </>
+  );
+}
+
+function SsoLdap() {
+  return (
+    <>
+      <p>
+        Let people sign in with their directory account (OpenLDAP, Active Directory, FreeIPA, JumpCloud LDAP…).
+        Configure it on <Link to="/admin/sso">Admin → Sign-in &amp; identity → LDAP</Link>.
+      </p>
+      <Steps>
+        <li>
+          Server URL <code>ldaps://host:636</code>, or <code>ldap://host:389</code> with <strong>StartTLS</strong>.
+          Plain LDAP is refused — passwords would cross the network in the clear.
+        </li>
+        <li>A read-only service account (bind DN + password) and the user search base.</li>
+        <li>
+          The user filter, default{" "}
+          <code>{"(|(uid={username})(sAMAccountName={username})(mail={username}))"}</code>.
+        </li>
+        <li>
+          Groups: <code>memberOf</code> on the user (AD, OpenLDAP memberof overlay), or a group search base for
+          directories that list members on the group.
+        </li>
+        <li>Enable — the login page shows a username/password form.</li>
+      </Steps>
+      <Note tone="warn" title="Failed sign-ins">
+        Every credential problem shows the same message, empty passwords are refused, and five failures in five
+        minutes lock sign-in for that username or address for a while.
+      </Note>
+    </>
+  );
+}
+
+function SsoGroups() {
+  return (
+    <>
+      <p>
+        Map identity-provider groups to Forge roles on{" "}
+        <Link to="/admin/sso">Admin → Sign-in &amp; identity</Link>, so access follows your directory instead
+        of hand-kept member lists.
+      </p>
+      <DocTable
+        head={["Mapping", "Effect"]}
+        rows={[
+          [<code>platform-admins → platform admin</code>, "admin pages and settings, like ADMIN_EMAILS"],
+          [<code>shop-devs → developer on acme/*</code>, "run, retry and cancel on every acme/ repo"],
+          [<code>release-managers → owner on *</code>, "approve deploys where the rule allows owners"],
+        ]}
+      />
+      <p>
+        Patterns: <code>*</code> every repo, <code>acme/*</code> one namespace level, <code>acme/**</code> any
+        depth, or a single repo. Groups are refreshed at every sign-in — leaving a group removes its roles from
+        the next sign-in; deleting a mapping applies at once. Group roles count everywhere a repo membership
+        does, including approvals and approval notifications.
+      </p>
+    </>
+  );
+}
+
 function SsoGithub() {
   return (
     <>
@@ -1790,5 +1888,23 @@ export const GUIDES: Guide[] = [
     group: "Security",
     title: "SSO: GitHub",
     render: SsoGithub,
+  },
+  {
+    slug: "sso-oidc",
+    group: "Security",
+    title: "Sign-in: any OpenID Connect IdP",
+    render: SsoOidc,
+  },
+  {
+    slug: "sso-ldap",
+    group: "Security",
+    title: "Sign-in: LDAP / Active Directory",
+    render: SsoLdap,
+  },
+  {
+    slug: "sso-groups",
+    group: "Security",
+    title: "Groups → roles",
+    render: SsoGroups,
   },
 ];

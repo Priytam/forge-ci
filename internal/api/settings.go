@@ -57,6 +57,7 @@ func (s *Server) registerSettingsRoutes() {
 	m.HandleFunc("DELETE /api/v1/members/{id}", s.removeMember)
 	m.HandleFunc("GET /api/v1/protected-environments", s.listProtectedEnvs)
 	m.HandleFunc("POST /api/v1/protected-environments", s.upsertProtectedEnv)
+	m.HandleFunc("DELETE /api/v1/protected-environments/{id}", s.deleteProtectedEnv)
 	m.HandleFunc("GET /api/v1/approver-groups", s.listApproverGroups)
 	m.HandleFunc("PUT /api/v1/approver-groups/{name}", s.putApproverGroup)
 	m.HandleFunc("DELETE /api/v1/approver-groups/{name}", s.deleteApproverGroup)
@@ -822,4 +823,29 @@ func (s *Server) uploadCoverage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"coverage": pct})
+}
+
+// deleteProtectedEnv removes an approval rule. A repo-specific rule falls
+// back to the global one for that environment, if any; removing the global
+// rule leaves the environment unprotected.
+func (s *Server) deleteProtectedEnv(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	pe, err := s.store.DeleteProtectedEnv(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "approval rule not found")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to delete approval rule")
+		return
+	}
+	s.audit(r, "protected-environment.delete", pe.Name, pe.Repo, "ok", map[string]any{"id": id})
+	w.WriteHeader(http.StatusNoContent)
 }

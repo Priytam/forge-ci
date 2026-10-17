@@ -53,7 +53,10 @@ Legend: ✅ shipped · 🟡 partial · ❌ not yet (roadmap).
 | Separation of duties (no self-approval) | ✅ | ✅ | pinned to `triggered_by` |
 | Approval audit trail | ✅ | ✅ | append-only `job_approvals` |
 | Built-in security scan templates (SAST/dependency/container/secrets) | ✅ (CI templates) | ✅ | one-line `include: [{template: security/sast}]` — semgrep/trivy/gitleaks, `allow_failure` by default; built-ins resolve as a fallback after per-repo templates — see docs/pipeline-dsl.md |
-| AuthN (SSO/OIDC) + real RBAC identity | ✅ | ✅ | SSO (Google/Microsoft/GitHub) enforces session identity; RBAC maps to it — see docs/sso.md |
+| AuthN (SSO/OIDC) + real RBAC identity | ✅ | ✅ | any OpenID Connect IdP (Okta, Keycloak, Auth0, Entra, Authentik, Dex…), LDAP/AD, Google/Microsoft/GitHub — see docs/sso.md |
+| IdP group → role sync | ✅ (SAML/OIDC group sync, Premium) | ✅ | groups refreshed each sign-in; platform admin or roles on repo patterns; used for approvals too |
+| SAML SSO | ✅ | 🟡 | via an OIDC bridge today; native SP designed in docs/design/saml.md |
+| Configurable session lifetime | ✅ | ✅ | 1h–30d, admin setting or SESSION_TTL |
 | OIDC / keyless cloud auth (AWS STS, GCP WIF) | ✅ (ID tokens) | ✅ | short-lived per-job ID token (`FORGE_OIDC_TOKEN`/`CI_JOB_JWT`), public discovery+JWKS, no static cloud keys — see [oidc.md](oidc.md) |
 | Audit log (all setting changes) | ✅ | ✅ | append-only `audit_log` of every mutating admin action + denials; `GET /api/v1/audit-log` — see docs/sso.md |
 

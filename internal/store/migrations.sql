@@ -63,9 +63,18 @@ ALTER TABLE protected_environments
 ALTER TABLE protected_environments DROP CONSTRAINT IF EXISTS protected_environments_name_key;
 CREATE UNIQUE INDEX IF NOT EXISTS protected_env_repo_name_idx
     ON protected_environments (repo, name);
+-- platform_settings is defined here as well as below (same idempotent
+-- definition) so this seed can honour an admin having deleted the default
+-- rule: deleting it records 'default_production_rule_removed'.
+CREATE TABLE IF NOT EXISTS platform_settings (
+    key        TEXT        PRIMARY KEY,
+    value      JSONB       NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 INSERT INTO protected_environments (repo, name, required_approvals)
 SELECT '', 'production', 1
-WHERE NOT EXISTS (SELECT 1 FROM protected_environments WHERE repo='' AND name='production');
+WHERE NOT EXISTS (SELECT 1 FROM protected_environments WHERE repo='' AND name='production')
+  AND NOT EXISTS (SELECT 1 FROM platform_settings WHERE key='default_production_rule_removed');
 
 -- Repo membership: who is what on a repo. Enforced at the approval endpoint.
 -- When SSO is enforced the approver identity comes from the session (see
@@ -94,7 +103,7 @@ CREATE TABLE IF NOT EXISTS repo_configs (
 -- write-only through the API. While NO provider is enabled the API runs in
 -- open bootstrap mode; enabling any provider turns on session enforcement.
 CREATE TABLE IF NOT EXISTS sso_providers (
-    provider       TEXT PRIMARY KEY CHECK (provider IN ('google','microsoft','github')),
+    provider       TEXT PRIMARY KEY CHECK (provider IN ('google','microsoft','github','oidc','ldap')),
     enabled        BOOLEAN     NOT NULL DEFAULT FALSE,
     client_id      TEXT        NOT NULL DEFAULT '',
     client_secret  TEXT        NOT NULL DEFAULT '',
@@ -894,3 +903,40 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS coverage        NUMERIC(6,2);
 -- Per environment: cancel a waiting deploy once a newer pipeline has started
 -- or finished deploying there (opt-in; see Store.CancelSupersededDeploys).
 ALTER TABLE environment_registry ADD COLUMN IF NOT EXISTS cancel_superseded BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- Identity: any OpenID Connect IdP ('oidc') and LDAP / Active Directory
+-- ('ldap') next to the built-in Google/Microsoft/GitHub buttons. The provider
+-- CHECK only WIDENS (existing rows stay valid); it is re-stated on every start
+-- so a database created before this change accepts the new providers.
+-- settings holds provider-specific, non-secret config (OIDC issuer, groups
+-- claim; LDAP URL, base DN, filters); client_secret holds the OIDC client
+-- secret or the LDAP bind password, encrypted.
+ALTER TABLE sso_providers DROP CONSTRAINT IF EXISTS sso_providers_provider_check;
+ALTER TABLE sso_providers ADD CONSTRAINT sso_providers_provider_check
+    CHECK (provider IN ('google','microsoft','github','oidc','ldap'));
+ALTER TABLE sso_providers ADD COLUMN IF NOT EXISTS settings JSONB NOT NULL DEFAULT '{}';
+
+-- The groups an identity provider last reported for a user, refreshed at
+-- every sign-in. Role resolution reads it by email, so group-granted roles
+-- apply to approvals and notifications too, not only to the signed-in request.
+CREATE TABLE IF NOT EXISTS user_groups (
+    email      TEXT        PRIMARY KEY,   -- lower-cased
+    provider   TEXT        NOT NULL,
+    groups     TEXT[]      NOT NULL DEFAULT '{}',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- IdP group → Forge role. A mapping either makes the group's members platform
+-- admins, or gives them a role on every repo matching repo_pattern ('*' = all,
+-- 'acme/*' = a namespace). provider '' matches a group from any provider.
+CREATE TABLE IF NOT EXISTS idp_group_mappings (
+    id             BIGSERIAL   PRIMARY KEY,
+    provider       TEXT        NOT NULL DEFAULT '',
+    idp_group      TEXT        NOT NULL,
+    platform_admin BOOLEAN     NOT NULL DEFAULT FALSE,
+    repo_pattern   TEXT        NOT NULL DEFAULT '',
+    role           TEXT        NOT NULL DEFAULT '',
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (platform_admin OR (repo_pattern <> '' AND role IN ('admin','owner','developer'))),
+    UNIQUE (provider, idp_group, platform_admin, repo_pattern)
+);
