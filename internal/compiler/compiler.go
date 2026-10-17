@@ -116,6 +116,33 @@ type jobSpec struct {
 	// Coverage is a /regex/ whose first match in the job log (first capture
 	// group, else the whole match) is the job's coverage percentage.
 	Coverage string `yaml:"coverage"`
+	// Secrets are fetched by the runner from an external secret manager
+	// just before the script runs, using the job's OIDC token (or the
+	// runner's own cloud identity), and exposed as variables:
+	//
+	//	secrets:
+	//	  DB_PASSWORD: {vault: "ci/prod/db#password"}      # KV v2 path#field (@mount, default "secret")
+	//	  API_KEY:     {aws: "prod/api#key"}                # Secrets Manager name/ARN, optional #json-key
+	//	  SA_JSON:     {gcp: "projects/p/secrets/sa", file: true}
+	//	  CERT:        {azure: "https://v.vault.azure.net/secrets/cert"}
+	Secrets map[string]secretSpec `yaml:"secrets"`
+	// RegistryLogin lists OCI registries the runner logs the job into before
+	// it runs — cloud registries by the job's OIDC identity (ECR, Artifact
+	// Registry/GCR, ACR); any other registry from the DOCKER_AUTH_CONFIG
+	// variable. The resulting Docker config is used to pull the job image
+	// (docker executor) and exposed to the job as DOCKER_CONFIG.
+	RegistryLogin []string `yaml:"registry_login"`
+}
+
+// secretSpec names one external secret; exactly one provider field is set.
+type secretSpec struct {
+	Vault string `yaml:"vault"`
+	AWS   string `yaml:"aws"`
+	GCP   string `yaml:"gcp"`
+	Azure string `yaml:"azure"`
+	// File writes the value to a file in the job's run directory and sets
+	// the variable to its path (for multi-line material: keys, JSON creds).
+	File bool `yaml:"file"`
 }
 
 // envSpec is a job's environment: a bare name, or GitLab's long form with
@@ -410,6 +437,10 @@ type CompiledJob struct {
 	EnvironmentURL string
 	// ReportDotenv is the workspace path of the job's dotenv report ("" = none).
 	ReportDotenv string
+	// Secrets the runner fetches before the script; RegistryLogins the
+	// registries it logs into.
+	Secrets        map[string]proto.SecretSpec
+	RegistryLogins []string
 	// CoverageRegex extracts coverage from the log (Go regexp, "" = none);
 	// CoverageReportPath is a Cobertura file to read it from instead.
 	CoverageRegex      string
@@ -742,6 +773,15 @@ func CompileWith(yml, ref, source string, opts CompileOpts) ([]CompiledJob, erro
 			return nil, err
 		}
 
+		secrets, err := compileSecrets(inst.orig, spec.Secrets)
+		if err != nil {
+			return nil, err
+		}
+		for _, host := range spec.RegistryLogin {
+			if host == "" || strings.ContainsAny(host, " /@") {
+				return nil, fmt.Errorf("job %q: registry_login entries are registry host names (e.g. 123.dkr.ecr.eu-west-1.amazonaws.com), got %q", inst.orig, host)
+			}
+		}
 		coverageRegex, err := validateCoverageRegex(inst.orig, spec.Coverage)
 		if err != nil {
 			return nil, err
@@ -829,6 +869,8 @@ func CompileWith(yml, ref, source string, opts CompileOpts) ([]CompiledJob, erro
 			ResourceGroup:         resourceGroup,
 			RunnerAffinity:        spec.RunnerAffinity,
 			ReportDotenv:          spec.Artifacts.Reports.Dotenv,
+			Secrets:               secrets,
+			RegistryLogins:        spec.RegistryLogin,
 			CoverageRegex:         coverageRegex,
 			CoverageReportPath:    coveragePath,
 		})

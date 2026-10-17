@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -29,6 +30,7 @@ import (
 
 	"github.com/priytamjeepandey/forge-ci/internal/executor"
 	"github.com/priytamjeepandey/forge-ci/internal/proto"
+	"github.com/priytamjeepandey/forge-ci/internal/secrets"
 	"github.com/priytamjeepandey/forge-ci/internal/vcs"
 )
 
@@ -283,6 +285,15 @@ func runJob(execCtx, drainCtx context.Context, c *client, exec executor.Executor
 	} else {
 		defer os.RemoveAll(workdir)
 	}
+	// Per-job run directory: the OIDC token file, fetched secrets and the
+	// Docker config live here. Mounted read-only into containers.
+	if runDir, err := os.MkdirTemp("", "forge-run-*"); err == nil {
+		_ = os.Chmod(runDir, 0o755) // readable by a non-root container user
+		job.RunDir = runDir
+		defer os.RemoveAll(runDir)
+	} else {
+		logs.printf("warning: could not create the run directory (%v)\n", err)
+	}
 
 	if job.CloneURL != "" {
 		if err := cloneSource(jobCtx, logs, job, workdir); err != nil {
@@ -309,6 +320,22 @@ func runJob(execCtx, drainCtx context.Context, c *client, exec executor.Executor
 	primaryCacheKey, restoreCacheKeys := resolveCacheKey(logs, job, workdir)
 	if len(job.CachePaths) > 0 && cachePolicyRestores(job.CachePolicy) {
 		restoreCache(jobCtx, c, logs, job, workdir, restoreCacheKeys)
+	}
+
+	// Registry logins (registry_login: + DOCKER_AUTH_CONFIG) and external
+	// secrets (secrets:) come before the script, from the job's identity. A
+	// failure here fails the job: it must not run with half its secrets.
+	if err := prepareRegistryAuth(jobCtx, logs, exec, job); err != nil {
+		logs.printf("registry login failed: %v\n", err)
+		st, code := resolveInterruption("failed", 1)
+		finish(st, code)
+		return
+	}
+	if err := fetchSecrets(jobCtx, logs, exec, job); err != nil {
+		logs.printf("fetching secrets failed: %v\n", err)
+		st, code := resolveInterruption("failed", 1)
+		finish(st, code)
+		return
 	}
 
 	logs.printf("$ %s\n", job.Script)
@@ -829,6 +856,100 @@ func uploadJUnitReports(c *client, logs *logStreamer, job *proto.RunnerJob, work
 	logs.printf("reports: uploaded %d junit file(s)\n", matched)
 }
 
+// prepareRegistryAuth writes the job's Docker config.json (DOCKER_AUTH_CONFIG
+// merged with cloud registry logins) into the run directory. The docker
+// executor pulls with it; the job sees it as DOCKER_CONFIG, so docker push /
+// buildx / crane / skopeo inside the job authenticate too.
+func prepareRegistryAuth(ctx context.Context, logs *logStreamer, ex executor.Executor, job *proto.RunnerJob) error {
+	if len(job.RegistryLogins) == 0 && job.Env["DOCKER_AUTH_CONFIG"] == "" {
+		return nil
+	}
+	if job.RunDir == "" {
+		return errors.New("no run directory for the Docker config")
+	}
+	cfg, err := secrets.DockerConfig(ctx, secrets.Env(job.Env), job.RegistryLogins)
+	if err != nil {
+		return err
+	}
+	if cfg == nil {
+		return nil
+	}
+	dir := filepath.Join(job.RunDir, "docker")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), cfg, 0o644); err != nil {
+		return err
+	}
+	// The minted passwords are secrets: mask them (and their base64 auth forms).
+	var parsed struct {
+		Auths map[string]struct {
+			Auth string `json:"auth"`
+		} `json:"auths"`
+	}
+	_ = json.Unmarshal(cfg, &parsed)
+	for _, a := range parsed.Auths {
+		logs.redact(a.Auth)
+		if raw, err := base64.StdEncoding.DecodeString(a.Auth); err == nil {
+			if _, pass, ok := strings.Cut(string(raw), ":"); ok && len(pass) >= 8 {
+				logs.redact(pass)
+			}
+		}
+	}
+	job.DockerConfigDir = dir
+	job.Env["DOCKER_CONFIG"] = executor.RunPath(ex, job, "docker")
+	delete(job.Env, "DOCKER_AUTH_CONFIG") // consumed; don't hand the raw JSON to the script
+	names := make([]string, 0, len(parsed.Auths))
+	for r := range parsed.Auths {
+		names = append(names, r)
+	}
+	sort.Strings(names)
+	logs.printf("registry login: %s\n", strings.Join(names, ", "))
+	return nil
+}
+
+// fetchSecrets resolves the job's secrets: block into variables (or files in
+// the run directory) and masks every value in the log.
+func fetchSecrets(ctx context.Context, logs *logStreamer, ex executor.Executor, job *proto.RunnerJob) error {
+	if len(job.Secrets) == 0 {
+		return nil
+	}
+	values, err := secrets.Resolve(ctx, secrets.Env(job.Env), job.Secrets)
+	if err != nil {
+		return err
+	}
+	names := make([]string, 0, len(values))
+	for name, v := range values {
+		names = append(names, name)
+		// Same rule as masked variables: a value under 8 characters would
+		// redact every occurrence of that string and mangle the log.
+		if len(v) >= 8 {
+			logs.redact(v)
+			job.RedactValues = append(job.RedactValues, v)
+		} else if v != "" {
+			logs.printf("secrets: %s is shorter than 8 characters and will not be masked in this log\n", name)
+		}
+		if job.Secrets[name].File {
+			if job.RunDir == "" {
+				return errors.New("no run directory for secret files")
+			}
+			dir := filepath.Join(job.RunDir, "secrets")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				return err
+			}
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(v), 0o644); err != nil {
+				return err
+			}
+			job.Env[name] = executor.RunPath(ex, job, "secrets/"+name)
+			continue
+		}
+		job.Env[name] = v
+	}
+	sort.Strings(names)
+	logs.printf("secrets: resolved %s\n", strings.Join(names, ", "))
+	return nil
+}
+
 // uploadWorkspaceFile posts one workspace file to /runner/jobs/{id}/<kind>.
 // A missing file or rejected upload is logged, never a job failure.
 func uploadWorkspaceFile(c *client, logs *logStreamer, job *proto.RunnerJob, workdir, rel, kind, contentType string) {
@@ -985,12 +1106,16 @@ func startTokenRefresh(ctx context.Context, c *client, logs *logStreamer, ex exe
 	if tok == "" {
 		return func() {}
 	}
-	runDir, err := os.MkdirTemp("", "forge-run-*")
-	if err != nil {
-		logs.printf("warning: could not create the token directory (%v); FORGE_OIDC_TOKEN_FILE is unavailable\n", err)
-		return func() {}
+	runDir := job.RunDir
+	if runDir == "" { // callers outside runJob (tests): make one here
+		dir, err := os.MkdirTemp("", "forge-run-*")
+		if err != nil {
+			logs.printf("warning: could not create the token directory (%v); FORGE_OIDC_TOKEN_FILE is unavailable\n", err)
+			return func() {}
+		}
+		_ = os.Chmod(dir, 0o755)
+		runDir, job.RunDir = dir, dir
 	}
-	_ = os.Chmod(runDir, 0o755) // readable by a non-root container user
 	write := func(t string) error {
 		tmp := filepath.Join(runDir, oidcTokenFile+".tmp")
 		if err := os.WriteFile(tmp, []byte(t), 0o644); err != nil {
@@ -1000,10 +1125,8 @@ func startTokenRefresh(ctx context.Context, c *client, logs *logStreamer, ex exe
 	}
 	if err := write(tok); err != nil {
 		logs.printf("warning: could not write the token file (%v)\n", err)
-		os.RemoveAll(runDir)
 		return func() {}
 	}
-	job.RunDir = runDir
 	path := executor.RunPath(ex, job, oidcTokenFile)
 	job.Env["FORGE_OIDC_TOKEN_FILE"] = path
 	if _, set := job.Env["AWS_WEB_IDENTITY_TOKEN_FILE"]; !set {

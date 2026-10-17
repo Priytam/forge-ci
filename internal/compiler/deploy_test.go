@@ -71,3 +71,42 @@ func TestExtractCoverage(t *testing.T) {
 		}
 	}
 }
+
+func TestSecretsAndRegistryLogin(t *testing.T) {
+	yml := `stages: [d]
+jobs:
+  .base:
+    secrets:
+      SHARED: {vault: "ci/shared#token"}
+  deploy:
+    extends: .base
+    stage: d
+    registry_login: [123456789012.dkr.ecr.eu-west-1.amazonaws.com]
+    secrets:
+      DB_PASSWORD: {aws: "prod/db#password"}
+      SA_KEY: {gcp: "projects/p/secrets/sa", file: true}
+    script: [x]
+`
+	jobs, err := Compile(yml, "main", "api", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := jobs[0]
+	if len(j.Secrets) != 3 || j.Secrets["SHARED"].Vault != "ci/shared#token" || j.Secrets["DB_PASSWORD"].AWS != "prod/db#password" || !j.Secrets["SA_KEY"].File {
+		t.Errorf("secrets = %+v", j.Secrets)
+	}
+	if len(j.RegistryLogins) != 1 {
+		t.Errorf("registry logins = %v", j.RegistryLogins)
+	}
+	for bad, want := range map[string]string{
+		"secrets: {X: {vault: a#b, aws: c}}": "exactly one",
+		"secrets: {X: {}}":                   "exactly one",
+		"secrets: {bad-name: {aws: c}}":      "valid variable name",
+		"registry_login: [https://x/y]":      "host names",
+	} {
+		y := "stages: [d]\njobs:\n  j:\n    stage: d\n    script: [x]\n    " + bad + "\n"
+		if _, err := Compile(y, "main", "api", nil); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: err = %v, want %q", bad, err, want)
+		}
+	}
+}

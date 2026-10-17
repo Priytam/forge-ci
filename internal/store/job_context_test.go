@@ -90,3 +90,38 @@ func TestRetryWithDebugTrace(t *testing.T) {
 		t.Error("dependents re-run normally, without debug trace")
 	}
 }
+
+// TestAcquireCarriesSecretsAndRegistryLogins: what the YAML declared reaches
+// the runner, and survives a retry.
+func TestAcquireCarriesSecretsAndRegistryLogins(t *testing.T) {
+	st := newArtifactsTestStore(t)
+	ctx := context.Background()
+	yml := "stages: [b]\njobs:\n  build:\n    stage: b\n    registry_login: [ghcr.io]\n    secrets:\n      TOKEN: {vault: \"ci/x#t\"}\n    script: [x]\n"
+	jobs, err := compiler.Compile(yml, "main", compiler.SourceAPI, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreatePipeline(ctx, proto.CreatePipelineRequest{Repo: "acme/x", Ref: "main", SHA: "abc", Config: yml}, jobs, nil, false, false); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = st.PromoteReadyJobs(ctx)
+	rj, err := st.AcquireJob(ctx, proto.AcquireRequest{RunnerID: "r"})
+	if err != nil || rj == nil {
+		t.Fatalf("acquire: %v %v", rj, err)
+	}
+	if rj.Secrets["TOKEN"].Vault != "ci/x#t" || len(rj.RegistryLogins) != 1 || rj.RegistryLogins[0] != "ghcr.io" {
+		t.Errorf("runner job = secrets %+v logins %v", rj.Secrets, rj.RegistryLogins)
+	}
+	if _, _, err := st.CompleteJob(ctx, rj.ID, "failed", 1); err != nil {
+		t.Fatal(err)
+	}
+	res, err := st.RetryJob(ctx, rj.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = st.PromoteReadyJobs(ctx)
+	again, _ := st.AcquireJob(ctx, proto.AcquireRequest{RunnerID: "r"})
+	if again == nil || again.ID != res.Retried[rj.ID] || again.Secrets["TOKEN"].Vault != "ci/x#t" {
+		t.Errorf("retry lost the secrets: %+v", again)
+	}
+}

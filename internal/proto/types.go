@@ -136,6 +136,13 @@ type RunnerJob struct {
 	// Cobertura file posted to /runner/jobs/{id}/coverage. Both workspace-relative.
 	ReportDotenvPath   string `json:"report_dotenv_path,omitempty"`
 	CoverageReportPath string `json:"coverage_report_path,omitempty"`
+	// Secrets are fetched from external secret managers before the script
+	// (see compiler.secretSpec); RegistryLogins are registries to log into.
+	Secrets        map[string]SecretSpec `json:"secrets,omitempty"`
+	RegistryLogins []string              `json:"registry_logins,omitempty"`
+	// DockerConfigDir is runner-local: the directory holding the Docker
+	// config.json the runner prepared for this job ("" = none).
+	DockerConfigDir string `json:"-"`
 
 	// Cache directives (GitLab-style). The runner restores the cache before the
 	// script and saves it after, keyed by repo+key and shared across pipelines.
@@ -523,4 +530,15 @@ type TemplateInput struct {
 	Required    bool     `json:"required"`
 	Description string   `json:"description,omitempty"`
 	Options     []string `json:"options,omitempty"`
+}
+
+// SecretSpec names one external secret for the runner to fetch. Exactly one
+// provider field is set. File asks for the value to be written to a file in
+// the job's run directory, the variable holding its path.
+type SecretSpec struct {
+	Vault string `json:"vault,omitempty"` // KV v2 "path#field" or "path#field@mount"
+	AWS   string `json:"aws,omitempty"`   // Secrets Manager name or ARN, optional "#json-key"
+	GCP   string `json:"gcp,omitempty"`   // "projects/P/secrets/S[/versions/V]" or "S" (needs GCP_PROJECT)
+	Azure string `json:"azure,omitempty"` // "https://<vault>.vault.azure.net/secrets/<name>[/<version>]"
+	File  bool   `json:"file,omitempty"`
 }

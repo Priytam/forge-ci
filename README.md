@@ -13,7 +13,7 @@ ones listed are examples, not requirements:
 | Git hosts | GitHub (cloud + Enterprise), GitLab (cloud + self-hosted), Bitbucket, Gitea / Forgejo, AWS CodeCommit, **any git server** over https/ssh (plain git) |
 | Where jobs run | `shell` (any machine: bare metal, VM, laptop), `docker` (any Docker host), `kubernetes` (any cluster, one pod per job) |
 | Cloud credentials for jobs | keyless per-job OIDC tokens, refreshed for long builds — federates with AWS, GCP, Azure, HashiCorp Vault or anything that trusts an OIDC issuer |
-| Artifacts, caches, logs | local disk or any S3-compatible object store (AWS S3, MinIO, Ceph, Cloudflare R2, GCS interoperability, …) |
+| Artifacts, caches, logs | local disk, any S3-compatible object store (AWS S3, MinIO, Ceph, Cloudflare R2, GCS interoperability, …) or Azure Blob Storage |
 | Registries | any OCI registry (images, BuildKit layer cache) |
 | Sign-in | Google, Microsoft Entra ID, GitHub OAuth |
 | Notifications | Slack incoming webhooks, email (SMTP) |
@@ -442,7 +442,8 @@ provides the fallback CI. Full walkthrough: [docs/self-hosted-ci.md](docs/self-h
 - [AWS CodeCommit (EventBridge triggers, IAM SigV4 clone, PR comments)](docs/codecommit.md)
 - [Registering runners (VM/systemd, Docker, Kubernetes)](docs/runners.md)
 - [Kubernetes executor: deployment, access & RBAC (incl. separate-cluster)](docs/kubernetes-deployment.md)
-- [Artifact storage (local, MinIO, S3, GCS)](docs/artifact-storage.md)
+- [Artifact storage (local, S3-compatible, Azure Blob)](docs/artifact-storage.md)
+- [External secrets and registry login (Vault, AWS, GCP, Azure)](docs/secrets.md)
 - [High-volume log architecture (Redis live buffer, blob archive, SSE)](docs/log-ingestion-design.md)
 - [Roles, membership & approval rules](docs/rbac-approvals.md)
 - [SSO setup: Google, Microsoft, GitHub](docs/sso.md)

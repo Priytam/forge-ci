@@ -162,6 +162,16 @@ func dockerRunArgs(job *proto.RunnerJob, workdir, image, name, network string, e
 	return args
 }
 
+// dockerCmd builds a docker CLI command for job. When the runner prepared a
+// Docker config for the job (registry_login / DOCKER_AUTH_CONFIG), the CLI
+// uses it, so the job image and service images pull from private registries.
+func dockerCmd(ctx context.Context, job *proto.RunnerJob, args ...string) *exec.Cmd {
+	if job.DockerConfigDir != "" {
+		args = append([]string{"--config", job.DockerConfigDir}, args...)
+	}
+	return exec.CommandContext(ctx, "docker", args...)
+}
+
 func (dockerExecutor) Start(ctx context.Context, job *proto.RunnerJob, workdir string) (io.ReadCloser, func() int, error) {
 	image := job.Image
 	if image == "" {
@@ -174,7 +184,7 @@ func (dockerExecutor) Start(ctx context.Context, job *proto.RunnerJob, workdir s
 		// The workspace is bind-mounted so artifacts land on the host for
 		// collection after the container exits.
 		args := dockerRunArgs(job, workdir, image, name, jobNetwork(job))
-		pr, wait, err := start(exec.CommandContext(ctx, "docker", args...))
+		pr, wait, err := start(dockerCmd(ctx, job, args...))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -239,7 +249,7 @@ func startDockerWithServices(ctx context.Context, job *proto.RunnerJob, workdir,
 		}
 		args = append(args, svc.Image)
 		args = append(args, svc.Cmd...) // optional command override
-		if out, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput(); err != nil {
+		if out, err := dockerCmd(ctx, job, args...).CombinedOutput(); err != nil {
 			cleanup()
 			return nil, nil, fmt.Errorf("start service %q (%s): %s", svc.Alias, svc.Image, strings.TrimSpace(string(out)))
 		}
@@ -266,7 +276,7 @@ func startDockerWithServices(ctx context.Context, job *proto.RunnerJob, workdir,
 	args := dockerRunArgs(job, workdir, image, name, network,
 		"FORGE_SERVICE_ALIASES="+strings.Join(aliases, ","))
 
-	pr, wait, err := start(exec.CommandContext(ctx, "docker", args...))
+	pr, wait, err := start(dockerCmd(ctx, job, args...))
 	if err != nil {
 		cleanup()
 		return nil, nil, err

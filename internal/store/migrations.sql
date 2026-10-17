@@ -940,3 +940,7 @@ CREATE TABLE IF NOT EXISTS idp_group_mappings (
     CHECK (platform_admin OR (repo_pattern <> '' AND role IN ('admin','owner','developer'))),
     UNIQUE (provider, idp_group, platform_admin, repo_pattern)
 );
+
+-- External secrets and registry logins a job asks the runner for (batch 10).
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS secrets         JSONB  NOT NULL DEFAULT '{}';
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS registry_logins TEXT[] NOT NULL DEFAULT '{}';

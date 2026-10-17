@@ -1180,12 +1180,37 @@ function VariablesSecrets() {
         redaction. Anything that base64-encodes or otherwise transforms a
         secret before printing defeats masking entirely.
       </Note>
-      <Note tone="warn" title="Plaintext at rest">
-        Variable values are currently stored plaintext in the database
-        (envelope encryption / Vault integration is on the roadmap). Treat DB
-        access as secret access; do not put long-lived, high-blast-radius
-        credentials in variables yet.
+      <Note tone="info" title="At rest">
+        Variable values are envelope-encrypted in the database when the server
+        runs with <code>FORGE_SECRET_KEY</code> (see the README). Without the
+        key they are stored plaintext — set it before storing real credentials.
       </Note>
+      <h3>Secrets from a secret manager</h3>
+      <p>
+        Instead of copying a secret into Forge, a job can fetch it when it runs,
+        with its own identity (the job's OIDC token), from HashiCorp Vault, AWS
+        Secrets Manager, Google Secret Manager or Azure Key Vault:
+      </p>
+      <CodeBlock
+        code={`deploy:
+  stage: deploy
+  secrets:
+    DB_PASSWORD: {vault: "ci/prod/db#password"}
+    API_KEY:     {aws: "prod/api#key"}
+    SA_JSON:     {gcp: "projects/my-proj/secrets/deployer", file: true}   # path in the variable
+    CERT:        {azure: "https://acme-ci.vault.azure.net/secrets/deploy-cert"}
+  registry_login: [123456789012.dkr.ecr.eu-west-1.amazonaws.com]   # no docker login needed
+  script: [./deploy.sh]`}
+      />
+      <p>
+        Values are fetched before the script, masked in the log, and never
+        stored by Forge. <code>registry_login</code> mints a Docker login for
+        ECR, Artifact Registry or ACR the same way (any other registry: the{" "}
+        <code>DOCKER_AUTH_CONFIG</code> variable). Settings such as{" "}
+        <code>VAULT_ADDR</code> or <code>AWS_ROLE_ARN</code> are plain repo
+        variables; the trust setup is in <code>docs/oidc.md</code> and the
+        full reference in <code>docs/secrets.md</code>.
+      </p>
     </>
   );
 }

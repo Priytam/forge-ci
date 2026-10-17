@@ -112,6 +112,20 @@ func mergeSpec(parent, child jobSpec) jobSpec {
 	if child.Coverage != "" {
 		out.Coverage = child.Coverage
 	}
+	if child.RegistryLogin != nil {
+		out.RegistryLogin = child.RegistryLogin
+	}
+	// Secrets: union, child wins per name.
+	if len(parent.Secrets) > 0 || len(child.Secrets) > 0 {
+		merged := map[string]secretSpec{}
+		for k, v := range parent.Secrets {
+			merged[k] = v
+		}
+		for k, v := range child.Secrets {
+			merged[k] = v
+		}
+		out.Secrets = merged
+	}
 	// Services: child replaces the whole list when it declares one (arrays are
 	// replaced, not element-merged — same rule as script/needs/tags).
 	if child.Services != nil {
