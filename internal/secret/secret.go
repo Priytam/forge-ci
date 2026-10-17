@@ -12,7 +12,9 @@ package secret
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -29,6 +31,7 @@ const Prefix = "enc:v1:"
 // Cipher whose aead is nil) is a valid passthrough cipher.
 type Cipher struct {
 	aead cipher.AEAD // nil => passthrough mode (no key configured)
+	key  []byte      // the raw key, for Sign; nil in passthrough mode
 }
 
 // FromEnv builds a Cipher from FORGE_SECRET_KEY (base64-encoded 32 bytes).
@@ -53,7 +56,27 @@ func FromEnv() (*Cipher, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Cipher{aead: aead}, nil
+	return &Cipher{aead: aead, key: key}, nil
+}
+
+// Sign returns an HMAC-SHA256 of data under a key derived from the secret
+// key (domain-separated by purpose, so a signature for one use is never
+// valid for another). nil in passthrough mode: callers must treat "no key"
+// as "signing unavailable".
+func (c *Cipher) Sign(purpose string, data []byte) []byte {
+	if !c.HasKey() {
+		return nil
+	}
+	derived := sha256.Sum256(append([]byte("forge-sign:"+purpose+":"), c.key...))
+	m := hmac.New(sha256.New, derived[:])
+	m.Write(data)
+	return m.Sum(nil)
+}
+
+// Verify checks a Sign output in constant time.
+func (c *Cipher) Verify(purpose string, data, sig []byte) bool {
+	want := c.Sign(purpose, data)
+	return want != nil && hmac.Equal(want, sig)
 }
 
 // HasKey reports whether a real key is configured (i.e. not passthrough).

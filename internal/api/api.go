@@ -111,6 +111,7 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 	srv.registerDownloadRoutes()
 	srv.registerCatalogRoutes()
 	srv.registerIdentityRoutes()
+	srv.registerNotifyRouteRoutes()
 
 	return srv
 }

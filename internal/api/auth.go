@@ -100,6 +100,8 @@ func authExempt(path string) bool {
 	case strings.HasPrefix(path, "/api/v1/runner/"),
 		strings.HasPrefix(path, "/api/v1/webhooks/"),
 		strings.HasPrefix(path, "/api/v1/auth/"),
+		// Act-by-link approvals carry their own signed token (email links).
+		path == "/api/v1/approvals/link",
 		strings.HasPrefix(path, "/api/v1/downloads/"),
 		// OIDC discovery + JWKS must be reachable by AWS/GCP (no session) even
 		// when SSO is enforced, so cloud providers can validate job ID tokens.

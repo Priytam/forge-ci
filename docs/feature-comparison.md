@@ -52,6 +52,7 @@ Legend: ✅ shipped · 🟡 partial · ❌ not yet (roadmap).
 | External secret managers (`secrets:`) | ✅ Vault, AWS, GCP, Azure (Premium) | ✅ | runner fetches with the job's OIDC identity: Vault KV v2, AWS Secrets Manager, GCP Secret Manager, Azure Key Vault; masked; `file:` for key material — see [secrets.md](secrets.md) |
 | Registry login without stored passwords | ✅ (own registry) | ✅ | `registry_login:` mints ECR / Artifact Registry / ACR logins from the job identity; `DOCKER_AUTH_CONFIG` for any other registry; used to pull the job image and inside the job |
 | Artifact/cache/log storage backends | object storage | ✅ | local, any S3-compatible (AWS, GCS, MinIO, Ceph, R2), Azure Blob — see [artifact-storage.md](artifact-storage.md) |
+| Notifications | Slack, email, webhooks, Teams (integrations) | ✅ | pluggable notifiers: Slack, Microsoft Teams, signed JSON webhook, email; routes per event/repo; approve/reject from the email with signed links — see [notifications.md](notifications.md) |
 | Protected environments + approvers | ✅ (Premium) | ✅ | roles: admin/owner/developer |
 | Separation of duties (no self-approval) | ✅ | ✅ | pinned to `triggered_by` |
 | Approval audit trail | ✅ | ✅ | append-only `job_approvals` |

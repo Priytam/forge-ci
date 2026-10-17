@@ -944,3 +944,29 @@ CREATE TABLE IF NOT EXISTS idp_group_mappings (
 -- External secrets and registry logins a job asks the runner for (batch 10).
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS secrets         JSONB  NOT NULL DEFAULT '{}';
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS registry_logins TEXT[] NOT NULL DEFAULT '{}';
+
+-- Notification routes (batch 11): where events go. kind is a notifier
+-- (slack | teams | webhook | email | ...), target its address (webhook URL
+-- or comma-separated emails; "approvers" = each eligible approver), secret
+-- the HMAC key for webhook signatures. Both encrypted at rest. events lists
+-- the event kinds the route takes; repo_pattern limits it ('*' = every repo).
+CREATE TABLE IF NOT EXISTS notification_routes (
+    id           BIGSERIAL   PRIMARY KEY,
+    name         TEXT        NOT NULL,
+    kind         TEXT        NOT NULL,
+    target       TEXT        NOT NULL DEFAULT '',
+    secret       TEXT        NOT NULL DEFAULT '',
+    events       TEXT[]      NOT NULL DEFAULT '{}',
+    repo_pattern TEXT        NOT NULL DEFAULT '*',
+    enabled      BOOLEAN     NOT NULL DEFAULT TRUE,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- Pipeline-level events are claimed once per (pipeline, event), like commit
+-- statuses; deploy events once per job.
+CREATE TABLE IF NOT EXISTS pipeline_notifications (
+    pipeline_id BIGINT      NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
+    event       TEXT        NOT NULL,
+    sent_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (pipeline_id, event)
+);
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS deploy_notified_at TIMESTAMPTZ;

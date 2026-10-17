@@ -51,31 +51,89 @@ func (sc *Scheduler) notifyLoop(ctx context.Context) {
 	}
 }
 
-// notifyApprovals sends one notification per job that started waiting for
-// approval. Nothing is claimed when no channel is configured, so turning
-// notifications on later still reaches jobs blocked in the last hour.
+// externalURL is the API's public base (EXTERNAL_URL, else FRONTEND_URL),
+// where act-by-link approval URLs point.
+func externalURL() string {
+	for _, k := range []string{"EXTERNAL_URL", "FRONTEND_URL"} {
+		if v := strings.TrimSpace(os.Getenv(k)); v != "" {
+			return strings.TrimSuffix(v, "/")
+		}
+	}
+	return "http://localhost:8080"
+}
+
+// notifyApprovals sends every pending event — approval waits, finished
+// pipelines, finished deploys — to the routes that subscribe to it (and
+// approval waits to the legacy Slack/email settings). Nothing is claimed
+// when there is nowhere to send it, so configuring notifications later still
+// reaches events from the last hour.
 func (sc *Scheduler) notifyApprovals(ctx context.Context) {
 	cfg, err := sc.store.GetNotifySettings(ctx, true)
 	if err != nil {
 		slog.Error("notify: load settings", "err", err)
 		return
 	}
-	if cfg.SlackWebhookURL == "" && !cfg.EmailEnabled {
-		return
-	}
-	notices, err := sc.store.ClaimApprovalNotices(ctx, 20, adminEmails())
+	routes, err := sc.store.ListNotificationRoutes(ctx, true)
 	if err != nil {
-		slog.Error("notify: claim approval waits", "err", err)
+		slog.Error("notify: load routes", "err", err)
 		return
 	}
-	for _, n := range notices {
-		msg := notify.ApprovalMessage(n, frontendURL())
-		if err := sc.sender.Deliver(ctx, *cfg, n.Approvers, msg); err != nil {
-			slog.Error("notify: approval notification failed", "job", n.JobID, "err", err)
-			continue
+	subscribed := func(kind string) bool {
+		for _, r := range routes {
+			if r.Enabled && containsEvent(r.Events, kind) {
+				return true
+			}
 		}
-		slog.Info("notify: approvers told", "job", n.JobID, "env", n.Environment, "approvers", len(n.Approvers))
+		return false
 	}
+	legacyApprovals := cfg.SlackWebhookURL != "" || cfg.EmailEnabled
+
+	if legacyApprovals || subscribed(notify.EventApprovalNeeded) {
+		notices, err := sc.store.ClaimApprovalNotices(ctx, 20, adminEmails())
+		if err != nil {
+			slog.Error("notify: claim approval waits", "err", err)
+		}
+		for _, n := range notices {
+			ev := notify.ApprovalEvent(n, frontendURL())
+			notify.ApprovalLinksFor(sc.store.Cipher(), externalURL(), &ev)
+			if err := sc.sender.Dispatch(ctx, routes, cfg, ev); err != nil {
+				slog.Error("notify: approval notification failed", "job", n.JobID, "err", err)
+				continue
+			}
+			slog.Info("notify: approvers told", "job", n.JobID, "env", n.Environment, "approvers", len(n.Approvers))
+		}
+	}
+	if subscribed(notify.EventPipelineFailed) || subscribed(notify.EventPipelineFixed) || subscribed(notify.EventPipelineSucceeded) {
+		notices, err := sc.store.ClaimPipelineEvents(ctx, 50)
+		if err != nil {
+			slog.Error("notify: claim pipeline events", "err", err)
+		}
+		for _, n := range notices {
+			if err := sc.sender.Dispatch(ctx, routes, nil, notify.PipelineEvent(n, frontendURL())); err != nil {
+				slog.Error("notify: pipeline event failed", "pipeline", n.PipelineID, "event", n.Kind, "err", err)
+			}
+		}
+	}
+	if subscribed(notify.EventDeploySucceeded) || subscribed(notify.EventDeployFailed) {
+		notices, err := sc.store.ClaimDeployEvents(ctx, 50)
+		if err != nil {
+			slog.Error("notify: claim deploy events", "err", err)
+		}
+		for _, n := range notices {
+			if err := sc.sender.Dispatch(ctx, routes, nil, notify.DeployEvent(n, frontendURL())); err != nil {
+				slog.Error("notify: deploy event failed", "job", n.JobID, "event", n.Kind, "err", err)
+			}
+		}
+	}
+}
+
+func containsEvent(list []string, kind string) bool {
+	for _, e := range list {
+		if e == kind {
+			return true
+		}
+	}
+	return false
 }
 
 // NotifyApprovalsOnce runs one notification pass (tests and tooling).

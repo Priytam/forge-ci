@@ -1,33 +1,83 @@
-# Approval notifications
+# Notifications
 
-When a job starts waiting for environment approval (a protected environment,
-see docs/rbac-approvals.md), Forge tells the people who can approve it — once
-per job — so a production fix doesn't sit unnoticed.
+Forge announces what matters to wherever your team works. Each destination
+is a **notifier**; Slack, Microsoft Teams, a signed JSON **webhook** and
+**email** are built in, and another is one file in `internal/notify/`.
 
-Set it up under **Admin ▾ → Notifications** (`GET`/`PUT
-/api/v1/notification-settings`, admin only):
+| Event | When |
+|---|---|
+| `approval_needed` | a job starts waiting for environment approval |
+| `pipeline_failed` | a pipeline finishes with a failed job (not an `allow_failure` one) |
+| `pipeline_fixed` | a pipeline succeeds after the previous finished one on the same branch failed |
+| `pipeline_succeeded` | a pipeline finishes green |
+| `deploy_succeeded` / `deploy_failed` | an `environment:` job finishes |
 
-| Channel | Setting | Who gets it |
+## Routes — Admin → Notifications
+
+A **route** is a destination plus the events it takes, optionally limited to
+repos (`*`, `acme/*`, `acme/**`, or one repo). Add as many as you like: a
+`#deploys` Slack channel for deploy events across the org, a Teams channel
+for one team's failures, your incident tool over a webhook.
+
+| Kind | Target | Notes |
 |---|---|---|
-| Slack | an incoming-webhook URL for your team channel | the channel; the message names the eligible approvers |
-| Email | SMTP host, port, from address, optional username/password | each eligible approver whose username is an email |
+| `slack` | incoming-webhook URL | Block Kit message with an "Open in Forge" button |
+| `teams` | Teams workflow ("post to a channel when a webhook request is received") or connector URL | Adaptive Card |
+| `webhook` | your https URL | JSON body (below); `X-Forge-Event`, `X-Forge-Delivery`, and with a route secret `X-Forge-Signature: sha256=<hex HMAC-SHA256 of the body>` |
+| `email` | addresses separated by commas, or `approvers` (each eligible approver) | uses the SMTP settings on the same page |
 
-**Eligible approvers** are the repo's members whose role is in the
-environment's `approver_roles` (minus the person who started the run when
-self-approval is off). On a repo with no members anyone may approve, so the
-platform admins (`ADMIN_EMAILS`) are told.
+Targets and secrets are encrypted at rest and never returned by the API;
+**Test** sends a sample event through one route. `GET/POST/PUT/DELETE
+/api/v1/notification-routes[/{id}]`, `POST …/{id}/test` (admin).
 
-The message says which job, repo, branch and commit, the environment, how many
-approvals are needed and from which roles, and links to the job.
+Webhook body:
 
-Details:
+```json
+{
+  "event": "pipeline_failed", "repo": "acme/shop", "ref": "main", "sha": "…",
+  "pipeline_id": 812, "job_id": 0, "status": "failed",
+  "title": "acme/shop: pipeline #812 on main failed",
+  "text": "Pipeline #812 for acme/shop on main @ 1a2b3c4d failed.\nFix totals",
+  "link": "https://forge.example.com/pipelines/812",
+  "fields": {"Branch": "main @ 1a2b3c4d", "Failed jobs": "unit, lint", "Started by": "harish@acme.io"},
+  "at": "2026-10-17T09:30:00Z"
+}
+```
 
-- The scheduler checks every 5 seconds. Each wait is claimed once in the
-  database (`jobs.approval_notified_at`), so several server replicas never
-  double-send.
-- Only waits that began in the last hour are notified — turning notifications
-  on never floods anyone with old ones.
-- The Slack URL and SMTP password are encrypted at rest (`FORGE_SECRET_KEY`)
-  and never returned by the API; leave the field blank to keep the saved value.
-- Port 465 uses implicit TLS; other ports upgrade with STARTTLS when offered.
-- **Send test** posts a sample to Slack and emails the signed-in admin.
+Verify the signature as `hex(HMAC_SHA256(secret, raw_body))` and compare in
+constant time.
+
+## Approval defaults
+
+The **approval defaults** on the same page keep working as before: a Slack
+webhook for the team channel and/or an email to each eligible approver when
+a deploy waits for approval. **Eligible approvers** are the repo's members
+(direct or through an IdP group) whose role the environment's rule accepts,
+minus the person who started the run when self-approval is off; on a repo
+with no members, the platform admins (`ADMIN_EMAILS`).
+
+## Approve or reject from the email
+
+When the server runs with `FORGE_SECRET_KEY`, each approver's email carries
+**personal Approve / Reject links**. A link names the job, the approver and
+the verdict and is signed (HMAC-SHA256 with a key derived from the secret
+key); it expires after 24 hours. Opening it shows a confirmation page — the
+vote is cast only by the button on that page (a `POST`), so mail scanners
+and link previews that follow the link never vote. The vote goes through the
+normal approval rules as that approver (role, self-approval, one vote per
+person) and is audited as `approval.<verdict>` via email link. Slack and
+Teams messages carry an "Open in Forge" button instead: a channel-wide
+approve button would let anyone in the channel approve.
+
+## Details
+
+- The scheduler checks every 5 seconds. Each event is claimed once in the
+  database (`jobs.approval_notified_at`, `pipeline_notifications`,
+  `jobs.deploy_notified_at`), so several server replicas never double-send.
+- Only events from the last hour are sent — turning notifications on never
+  floods anyone with old ones — and nothing is claimed while no route or
+  default wants the event.
+- A pipeline counts as finished when every job is done and at least one
+  wasn't canceled; a canceled pipeline is not announced.
+- Port 465 uses implicit TLS for SMTP; other ports upgrade with STARTTLS when
+  offered.

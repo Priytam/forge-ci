@@ -1827,3 +1827,55 @@ export function publishCatalogTemplate(t: { name: string; version: string; yaml:
 export function deleteCatalogTemplate(name: string, version: string): Promise<void> {
   return requestVoid("DELETE", `/template-catalog?name=${encodeURIComponent(name)}&version=${encodeURIComponent(version)}`);
 }
+
+// ---- notification routes ----
+
+export interface NotificationRoute {
+  id: number;
+  name: string;
+  kind: string;
+  has_target: boolean;
+  target_hint?: string;
+  has_secret: boolean;
+  events: string[];
+  repo_pattern: string;
+  enabled: boolean;
+  created_at: string;
+}
+
+export interface NotificationRoutesResponse {
+  routes: NotificationRoute[];
+  kinds: string[];
+  events: string[];
+  links_enabled: boolean;
+}
+
+export function listNotificationRoutes(): Promise<NotificationRoutesResponse> {
+  return getJSON<NotificationRoutesResponse>("/notification-routes");
+}
+
+export interface NotificationRouteInput {
+  name: string;
+  kind: string;
+  target?: string;
+  secret?: string;
+  events: string[];
+  repo_pattern: string;
+  enabled: boolean;
+}
+
+export function createNotificationRoute(r: NotificationRouteInput): Promise<NotificationRoute> {
+  return postJSON<NotificationRoute>("/notification-routes", r);
+}
+
+export function updateNotificationRoute(id: number, r: NotificationRouteInput): Promise<NotificationRoute> {
+  return putJSON<NotificationRoute>(`/notification-routes/${id}`, r);
+}
+
+export function deleteNotificationRoute(id: number): Promise<void> {
+  return requestVoid("DELETE", `/notification-routes/${id}`);
+}
+
+export function testNotificationRoute(id: number): Promise<{ sent: boolean }> {
+  return postJSON<{ sent: boolean }>(`/notification-routes/${id}/test`, {});
+}
