@@ -112,6 +112,7 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 	srv.registerCatalogRoutes()
 	srv.registerIdentityRoutes()
 	srv.registerNotifyRouteRoutes()
+	srv.registerRunnerPoolRoutes()
 
 	return srv
 }

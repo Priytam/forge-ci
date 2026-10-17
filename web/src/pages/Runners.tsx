@@ -1,7 +1,8 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { getRunnerLoad, listRunners, relativeTime, setRunnerPaused, type RunnerLoadRow } from "../api";
+import { getIsAdmin, getRunnerLoad, listRunners, relativeTime, setRunnerPaused, type RunnerLoadRow } from "../api";
 import { usePoll } from "../hooks/usePoll";
+import RunnerPools from "../components/RunnerPools";
 
 interface TagStat {
   tag: string;
@@ -12,6 +13,10 @@ interface TagStat {
 export default function Runners() {
   const { data: runners, error, loading, refresh } = usePoll(listRunners, 5000);
   const { data: load } = usePoll(getRunnerLoad, 5000);
+  const [isAdmin, setIsAdmin] = useState(false);
+  useEffect(() => {
+    void getIsAdmin().then(setIsAdmin);
+  }, []);
   const loadById = useMemo(() => {
     const m = new Map<string, RunnerLoadRow>();
     for (const r of load?.runners ?? []) m.set(String(r.id), r);
@@ -63,6 +68,8 @@ export default function Runners() {
         kubernetes manager runs up to N parallel jobs as ephemeral pods with{" "}
         <code>--concurrency=N</code>.
       </p>
+
+      {isAdmin && <RunnerPools />}
 
       <p className="muted page-lede">
         Guides: <Link to="/docs/runner-docker">Docker runner</Link> ·{" "}

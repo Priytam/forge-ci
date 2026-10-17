@@ -1879,3 +1879,55 @@ export function deleteNotificationRoute(id: number): Promise<void> {
 export function testNotificationRoute(id: number): Promise<{ sent: boolean }> {
   return postJSON<{ sent: boolean }>(`/notification-routes/${id}/test`, {});
 }
+
+// ---- runner pools (autoscaling) ----
+
+export interface RunnerPool {
+  id: number;
+  name: string;
+  provider: string;
+  tags: string[];
+  min_runners: number;
+  max_runners: number;
+  jobs_per_runner: number;
+  scale_down_after_s: number;
+  /** provider settings JSON; secret keys come back masked */
+  settings?: string;
+  enabled: boolean;
+  created_at: string;
+  current_runners: number;
+  desired_runners: number;
+  pending_jobs: number;
+  last_action: string;
+  last_error: string;
+  last_scaled_at: string | null;
+  last_busy_at: string | null;
+  checked_at: string | null;
+}
+
+export interface RunnerPoolsResponse {
+  pools: RunnerPool[];
+  providers: string[];
+}
+
+export function listRunnerPools(): Promise<RunnerPoolsResponse> {
+  return getJSON<RunnerPoolsResponse>("/runner-pools");
+}
+
+export type RunnerPoolInput = Pick<RunnerPool, "name" | "provider" | "tags" | "min_runners" | "max_runners" | "jobs_per_runner" | "scale_down_after_s" | "settings" | "enabled">;
+
+export function createRunnerPool(p: RunnerPoolInput): Promise<RunnerPool> {
+  return postJSON<RunnerPool>("/runner-pools", p);
+}
+
+export function updateRunnerPool(id: number, p: RunnerPoolInput): Promise<RunnerPool> {
+  return putJSON<RunnerPool>(`/runner-pools/${id}`, p);
+}
+
+export function deleteRunnerPool(id: number): Promise<void> {
+  return requestVoid("DELETE", `/runner-pools/${id}`);
+}
+
+export function evaluateRunnerPools(): Promise<RunnerPoolsResponse> {
+  return postJSON<RunnerPoolsResponse>("/runner-pools/evaluate", {});
+}

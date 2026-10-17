@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/priytamjeepandey/forge-ci/internal/api"
+	"github.com/priytamjeepandey/forge-ci/internal/autoscale"
 	"github.com/priytamjeepandey/forge-ci/internal/blob"
 	"github.com/priytamjeepandey/forge-ci/internal/logstore"
 	"github.com/priytamjeepandey/forge-ci/internal/scheduler"
@@ -51,6 +52,7 @@ func main() {
 	defer logs.Close()
 
 	go scheduler.New(st, blobs, logs).Run(ctx)
+	go autoscale.Loop(ctx, st) // runner pools (no-op until one is configured)
 
 	srv := &http.Server{Addr: addr, Handler: api.New(st, blobs, logs)}
 	go func() {

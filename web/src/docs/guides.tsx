@@ -651,6 +651,42 @@ WantedBy=multi-user.target`}
   );
 }
 
+function RunnerAutoscaling() {
+  return (
+    <>
+      <p>
+        Let Forge grow and shrink your runners with the queue. A <strong>pool</strong> is a set of
+        identical runners (same tags) that a provider can resize; configure pools on{" "}
+        <Link to="/runners">Runners → Autoscaled pools</Link> (admin).
+      </p>
+      <DocTable
+        head={["Provider", "Resizes", "Settings"]}
+        rows={[
+          ["kubernetes", "a Deployment or StatefulSet of runners", <code>{'{"namespace": "ci", "deployment": "forge-runners"}'}</code>],
+          ["docker", "runner containers on a Docker host", <code>{'{"image": "…/forge-runner:1.9", "runner_token": "…", "docker_sock": "true"}'}</code>],
+          ["exec", "anything a command can: cloud VM groups, Terraform", <code>{'{"count_cmd": "…", "scale_cmd": "… $FORGE_DESIRED"}'}</code>],
+        ]}
+      />
+      <Steps>
+        <li>
+          Demand = jobs waiting for the pool's tags + jobs running on its runners. Desired ={" "}
+          <code>ceil(demand / jobs per runner)</code>, between min and max.
+        </li>
+        <li>Scale-up is immediate.</li>
+        <li>
+          Scale-down waits until the pool has been idle for the configured window, then removes one
+          runner per pass. A stopped runner drains: it finishes or requeues its job first.
+        </li>
+      </Steps>
+      <Note title="Prefer an external autoscaler?">
+        The queue metrics (<code>forge_queue_pending_jobs</code>) drive KEDA or any HPA just as well.
+        Pools are for when you'd rather Forge did it, on any infrastructure. Reference:{" "}
+        <code>docs/autoscaling.md</code>.
+      </Note>
+    </>
+  );
+}
+
 function RunnerGroups() {
   return (
     <>
@@ -1859,6 +1895,12 @@ export const GUIDES: Guide[] = [
     group: "Runners",
     title: "Runner groups & tags",
     render: RunnerGroups,
+  },
+  {
+    slug: "runner-autoscaling",
+    group: "Runners",
+    title: "Autoscaling runners",
+    render: RunnerAutoscaling,
   },
   {
     slug: "writing-yaml",

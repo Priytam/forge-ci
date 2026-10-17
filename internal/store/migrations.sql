@@ -970,3 +970,31 @@ CREATE TABLE IF NOT EXISTS pipeline_notifications (
     PRIMARY KEY (pipeline_id, event)
 );
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS deploy_notified_at TIMESTAMPTZ;
+
+-- Runner autoscaling (batch 12): a pool is a set of identical runners
+-- (same tags) that a provider — kubernetes, docker, exec (any cloud via a
+-- command) — can grow and shrink. settings is provider config, encrypted
+-- (it may hold a Kubernetes token or the runner token); the status columns
+-- are what the loop last observed and did.
+CREATE TABLE IF NOT EXISTS runner_pools (
+    id                 BIGSERIAL   PRIMARY KEY,
+    name               TEXT        NOT NULL UNIQUE,
+    provider           TEXT        NOT NULL,
+    tags               TEXT[]      NOT NULL DEFAULT '{}',
+    min_runners        INT         NOT NULL DEFAULT 0,
+    max_runners        INT         NOT NULL DEFAULT 5,
+    jobs_per_runner    INT         NOT NULL DEFAULT 1,
+    scale_down_after_s INT         NOT NULL DEFAULT 600,
+    settings           TEXT        NOT NULL DEFAULT '',
+    enabled            BOOLEAN     NOT NULL DEFAULT TRUE,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- status
+    current_runners    INT         NOT NULL DEFAULT 0,
+    desired_runners    INT         NOT NULL DEFAULT 0,
+    pending_jobs       INT         NOT NULL DEFAULT 0,
+    last_action        TEXT        NOT NULL DEFAULT '',
+    last_error         TEXT        NOT NULL DEFAULT '',
+    last_scaled_at     TIMESTAMPTZ,
+    last_busy_at       TIMESTAMPTZ,
+    checked_at         TIMESTAMPTZ
+);

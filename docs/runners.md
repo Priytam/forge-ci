@@ -229,6 +229,11 @@ spec:
 A runner that is stopped mid-scale-down drains: it finishes (or requeues) its
 current job before exiting (see *Graceful shutdown* above).
 
+Or let Forge scale the runners itself: **autoscaled pools** resize a
+Kubernetes Deployment, containers on a Docker host, or anything a command
+can (cloud VM groups, Terraform) from the queue — see
+[autoscaling.md](autoscaling.md).
+
 ## Persistent BuildKit cache and cache affinity
 
 ### Cache affinity (`runner_affinity: true`)
