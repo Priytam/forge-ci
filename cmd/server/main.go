@@ -4,6 +4,8 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"github.com/priytamjeepandey/forge-ci/internal/buildinfo"
 	"log/slog"
 	"net/http"
 	"os"
@@ -26,6 +28,11 @@ func envOr(key, fallback string) string {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "--version" {
+		fmt.Println(buildinfo.Version)
+		return
+	}
+	slog.Info("forge-server", "version", buildinfo.Version)
 	addr := envOr("LISTEN_ADDR", ":8080")
 	dsn := envOr("DATABASE_URL", "postgres://forge:forge@localhost:5433/forge?sslmode=disable")
 

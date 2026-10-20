@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { getIsAdmin, getRunnerLoad, listRunners, relativeTime, setRunnerPaused, type RunnerLoadRow } from "../api";
+import { getIsAdmin, getRollout, getRunnerLoad, listRunners, relativeTime, runnerOp, setRunnerPaused, startRollout, stopRollout, type Rollout, type RunnerLoadRow } from "../api";
 import { usePoll } from "../hooks/usePoll";
 import RunnerPools from "../components/RunnerPools";
 
@@ -14,9 +14,31 @@ export default function Runners() {
   const { data: runners, error, loading, refresh } = usePoll(listRunners, 5000);
   const { data: load } = usePoll(getRunnerLoad, 5000);
   const [isAdmin, setIsAdmin] = useState(false);
+  const [rollout, setRollout] = useState<Rollout | null>(null);
   useEffect(() => {
-    void getIsAdmin().then(setIsAdmin);
+    void getIsAdmin().then((a) => {
+      setIsAdmin(a);
+      if (a) void getRollout().then(setRollout).catch(() => undefined);
+    });
   }, []);
+  const op = async (id: string, what: "drain" | "resume" | "upgrade") => {
+    setActionError(null);
+    try {
+      await runnerOp(id, what);
+      refresh();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    }
+  };
+  const upgradeAll = async () => {
+    if (!window.confirm("Upgrade every outdated runner, one at a time? Each is drained, updated and resumed before the next starts. Runners without RUNNER_SELF_UPDATE=on are skipped.")) return;
+    setActionError(null);
+    try {
+      setRollout(await startRollout());
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    }
+  };
   const loadById = useMemo(() => {
     const m = new Map<string, RunnerLoadRow>();
     for (const r of load?.runners ?? []) m.set(String(r.id), r);
@@ -147,6 +169,23 @@ export default function Runners() {
       )}
 
       <h2 className="section-title">Runners</h2>
+      {isAdmin && runners && runners.some((r) => r.outdated) && !rollout?.active && (
+        <p className="muted">
+          {runners.filter((r) => r.outdated).length} runner(s) are outdated.{" "}
+          <button type="button" className="btn btn-icon" onClick={() => void upgradeAll()}>
+            Upgrade all runners
+          </button>
+        </p>
+      )}
+      {rollout?.active && (
+        <div className="card" style={{ marginBottom: 12 }}>
+          Rolling upgrade to <span className="mono">{rollout.target}</span>: {rollout.current ? <>upgrading <span className="mono">{rollout.current}</span></> : "finding the next runner"} ·{" "}
+          {rollout.done.length} done{rollout.skipped.length > 0 && <>, {rollout.skipped.length} skipped ({rollout.skipped.join(", ")})</>}{" "}
+          <button type="button" className="btn btn-icon" onClick={() => void stopRollout().then(() => setRollout(null))}>
+            Stop
+          </button>
+        </div>
+      )}
       {error && <div className="error-banner">Failed to load runners: {error}</div>}
       {actionError && <div className="error-banner">{actionError}</div>}
       {loading && !runners && <div className="muted">Loading runners…</div>}
@@ -165,6 +204,7 @@ export default function Runners() {
                 <th>Tags</th>
                 <th>Description</th>
                 <th>Status</th>
+                <th>Version</th>
                 <th>Running now</th>
                 <th>Last 24h</th>
                 <th>Last contact</th>
@@ -194,8 +234,17 @@ export default function Runners() {
                     )}
                   </td>
                   <td>{r.description}</td>
+                  <td className="mono">
+                    {r.version || <span className="muted">—</span>}
+                    {r.outdated && <span className="badge badge-failed" style={{ marginLeft: 6 }} title="differs from the runner this server bundles">outdated</span>}
+                  </td>
                   <td>
                     <span className="runner-status">
+                      {r.draining && (
+                        <span className="badge badge-blocked" title={r.update_requested ? "will self-update when idle" : "taking no new jobs"}>
+                          {r.update_requested ? "updating" : "draining"}{(r.running_jobs ?? 0) > 0 ? ` — ${r.running_jobs} left` : ""}
+                        </span>
+                      )}
                       <span
                         className={r.online ? "mini-dot mini-success" : "mini-dot"}
                       />
@@ -221,6 +270,14 @@ export default function Runners() {
                   </td>
                   <td className="muted">{relativeTime(r.last_contact_at)}</td>
                   <td>
+                    {isAdmin && (r.draining ? (
+                      <button type="button" className="btn btn-icon" onClick={() => void op(String(r.id), "resume")}>Resume</button>
+                    ) : (
+                      <button type="button" className="btn btn-icon" onClick={() => void op(String(r.id), "drain")} title="Finish in-flight jobs, take no new ones">Drain</button>
+                    ))}{" "}
+                    {isAdmin && r.outdated && !r.update_requested && (
+                      <button type="button" className="btn btn-icon" onClick={() => void op(String(r.id), "upgrade")} title="Drain, self-update when idle, resume">Upgrade</button>
+                    )}{" "}
                     <button
                       type="button"
                       className="btn"

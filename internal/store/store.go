@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/priytamjeepandey/forge-ci/internal/buildinfo"
 	"github.com/priytamjeepandey/forge-ci/internal/compiler"
 	"github.com/priytamjeepandey/forge-ci/internal/githubapp"
 	"github.com/priytamjeepandey/forge-ci/internal/oidc"
@@ -128,6 +129,7 @@ func New(ctx context.Context, dsn string) (*Store, error) {
 		return nil, fmt.Errorf("oidc signing key: %w", err)
 	}
 	s.oidcSigner = signer
+	s.recordSchemaStatus(ctx, buildinfo.Version)
 	if n, err := s.FoldProtectedEnvRules(ctx); err != nil {
 		slog.Warn("approval rules: fold aliases", "err", err)
 	} else if n > 0 {
@@ -326,6 +328,10 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 		if registryLogins == nil {
 			registryLogins = []string{}
 		}
+		retryWhen := j.RetryWhen
+		if len(retryWhen) == 0 {
+			retryWhen = []string{"always"}
+		}
 		tags := j.Tags
 		if len(tags) == 0 {
 			tags = defaultTags
@@ -364,10 +370,10 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 		var id int64
 		err = tx.QueryRow(ctx,
 			`INSERT INTO jobs (pipeline_id, name, stage, stage_idx, image, script, env, environment, tags, artifact_paths, artifact_expire_seconds, report_junit, cache_paths, cache_key, cache_key_files, cache_policy, services, network, timeout_seconds, max_attempts, status, manual, allow_failure, blocked_at, finished_at, status_reason, resource_group, affinity_key,
-			                   environment_url, report_dotenv, coverage_regex, coverage_report, secrets, registry_logins)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34) RETURNING id`,
+			                   environment_url, report_dotenv, coverage_regex, coverage_report, secrets, registry_logins, retry_when)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35) RETURNING id`,
 			p.ID, j.Name, j.Stage, j.StageIdx, image, j.Script, env, environment, tags, artifacts, j.ArtifactExpireSeconds, reportJUnit, cachePaths, j.CacheKey, cacheKeyFiles, j.CachePolicy, services, j.Network, timeoutSec, j.Retry+1, status, j.Manual, j.AllowFailure, blockedAt, finishedAt, denied, resourceGroup, affinityKey,
-			j.EnvironmentURL, j.ReportDotenv, j.CoverageRegex, j.CoverageReportPath, secretsJSON, registryLogins).Scan(&id)
+			j.EnvironmentURL, j.ReportDotenv, j.CoverageRegex, j.CoverageReportPath, secretsJSON, registryLogins, retryWhen).Scan(&id)
 		if err != nil {
 			return nil, err
 		}
@@ -631,7 +637,7 @@ func (s *Store) GetPipeline(ctx context.Context, id int64) (*proto.Pipeline, []p
 		        j.status,
 		        CASE WHEN j.status='failed' AND j.allow_failure THEN 'success' ELSE j.status END,
 		        j.started_at, j.finished_at, j.exit_code, j.manual, j.allow_failure, j.status_reason,
-		        j.retry_of, j.resource_group, j.coverage::float8,
+		        j.retry_of, j.resource_group, j.coverage::float8, j.runner_id,
 		        COALESCE(array_agg(n.needs_job_id) FILTER (WHERE n.needs_job_id IS NOT NULL), '{}')
 		 FROM jobs j LEFT JOIN job_needs n ON n.job_id = j.id
 		 WHERE j.pipeline_id = $1 AND NOT j.superseded
@@ -651,7 +657,7 @@ func (s *Store) GetPipeline(ctx context.Context, id int64) (*proto.Pipeline, []p
 		var effective string
 		if err := rows.Scan(&j.ID, &j.PipelineID, &j.Name, &j.Stage, &j.StageIdx, &j.Image,
 			&j.Environment, &j.Status, &effective, &j.StartedAt, &j.FinishedAt, &j.ExitCode,
-			&j.Manual, &j.AllowFailure, &j.StatusReason, &j.RetryOf, &j.ResourceGroup, &j.Coverage, &j.Needs); err != nil {
+			&j.Manual, &j.AllowFailure, &j.StatusReason, &j.RetryOf, &j.ResourceGroup, &j.Coverage, &j.RunnerID, &j.Needs); err != nil {
 			return nil, nil, err
 		}
 		jobs = append(jobs, j)
@@ -713,13 +719,13 @@ func (s *Store) GetJob(ctx context.Context, id int64) (*proto.Job, error) {
 	err := s.pool.QueryRow(ctx,
 		`SELECT j.id, j.pipeline_id, j.name, j.stage, j.stage_idx, j.image, j.environment,
 		        j.status, j.started_at, j.finished_at, j.exit_code, j.manual, j.allow_failure,
-		        j.status_reason, j.retry_of, j.resource_group,
+		        j.status_reason, j.retry_of, j.resource_group, j.runner_id, j.coverage::float8,
 		        COALESCE(array_agg(n.needs_job_id) FILTER (WHERE n.needs_job_id IS NOT NULL), '{}')
 		 FROM jobs j LEFT JOIN job_needs n ON n.job_id = j.id
 		 WHERE j.id = $1 GROUP BY j.id`, id).
 		Scan(&j.ID, &j.PipelineID, &j.Name, &j.Stage, &j.StageIdx, &j.Image,
 			&j.Environment, &j.Status, &j.StartedAt, &j.FinishedAt, &j.ExitCode,
-			&j.Manual, &j.AllowFailure, &j.StatusReason, &j.RetryOf, &j.ResourceGroup, &j.Needs)
+			&j.Manual, &j.AllowFailure, &j.StatusReason, &j.RetryOf, &j.ResourceGroup, &j.RunnerID, &j.Coverage, &j.Needs)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -1230,12 +1236,15 @@ func capCommitMessage(msg string) string {
 // protected refs and environment scope) overlaid by job-level YAML variables.
 // Returns (nil, nil) when the queue is empty.
 func (s *Store) AcquireJob(ctx context.Context, req proto.AcquireRequest) (*proto.RunnerJob, error) {
-	paused, err := s.TouchRunner(ctx, req.RunnerID, req.Executor, req.Tags)
+	state, err := s.TouchRunnerV(ctx, req.RunnerID, req.Executor, req.Tags, req.Version)
 	if err != nil {
 		return nil, err
 	}
-	if paused {
+	if state.Paused || state.Draining {
 		return nil, nil
+	}
+	if mm, err := s.Maintenance(ctx); err == nil && mm.On {
+		return nil, nil // server upgrade in progress: jobs queue
 	}
 	runnerTags := req.Tags
 	if runnerTags == nil {
@@ -1479,16 +1488,17 @@ func (s *Store) CompleteJob(ctx context.Context, jobID int64, status string, exi
 	defer tx.Rollback(ctx)
 
 	var attempt, maxAttempts int
+	var retryWhen []string
 	var cancelReq bool
 	var environment *string
 	var pipelineID int64
 	var repo, ref, sha, triggeredBy string
 	err = tx.QueryRow(ctx,
-		`SELECT j.attempt, j.max_attempts, j.cancel_requested, j.environment,
+		`SELECT j.retry_when, j.attempt, j.max_attempts, j.cancel_requested, j.environment,
 		        p.id, p.repo, p.ref, p.sha, p.triggered_by
 		 FROM jobs j JOIN pipelines p ON p.id = j.pipeline_id
 		 WHERE j.id=$1 AND j.status='running' FOR UPDATE OF j`, jobID).
-		Scan(&attempt, &maxAttempts, &cancelReq, &environment, &pipelineID, &repo, &ref, &sha, &triggeredBy)
+		Scan(&retryWhen, &attempt, &maxAttempts, &cancelReq, &environment, &pipelineID, &repo, &ref, &sha, &triggeredBy)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", "", ErrNotFound
 	}
@@ -1517,8 +1527,9 @@ func (s *Store) CompleteJob(ctx context.Context, jobID int64, status string, exi
 		return "canceled", "", tx.Commit(ctx)
 	}
 
-	// Retry a plain failure (not a timeout-kill: exit 124) while attempts remain.
-	if status == "failed" && exitCode != 124 && attempt < maxAttempts {
+	// Retry a plain failure (not a timeout-kill: exit 124) while attempts
+	// remain and the job's retry.when covers script failures.
+	if status == "failed" && exitCode != 124 && attempt < maxAttempts && compiler.RetryAppliesTo(retryWhen, compiler.RetryScriptFailure) {
 		if _, err := tx.Exec(ctx,
 			`UPDATE jobs SET status='pending', attempt=attempt+1, started_at=NULL,
 			        heartbeat_at=NULL, runner_id=NULL, exit_code=NULL WHERE id=$1`, jobID); err != nil {
@@ -1780,11 +1791,27 @@ func (s *Store) ExpireBlockedJobs(ctx context.Context) (int64, error) {
 
 // FailStaleJobs fails running jobs whose runner stopped heartbeating.
 func (s *Store) FailStaleJobs(ctx context.Context, staleAfter time.Duration) (int64, error) {
-	tag, err := s.pool.Exec(ctx,
-		`UPDATE jobs SET status='failed', finished_at=now()
+	// Jobs whose retry.when covers runner losses get another attempt first.
+	requeued, err := s.pool.Exec(ctx,
+		`UPDATE jobs SET status='pending', attempt=attempt+1, started_at=NULL, heartbeat_at=NULL,
+		        runner_id=NULL, exit_code=NULL,
+		        status_reason = 'runner lost (no heartbeat for ' || $1 || '); retrying'
+		 WHERE status='running' AND heartbeat_at < now() - $1::interval
+		   AND attempt < max_attempts
+		   AND ('always' = ANY(retry_when) OR 'runner_system_failure' = ANY(retry_when))`,
+		staleAfter.String())
+	if err != nil {
+		return 0, err
+	}
+	failed, err := s.pool.Exec(ctx,
+		`UPDATE jobs SET status='failed', finished_at=now(),
+		        status_reason = 'runner lost: no heartbeat for ' || $1 || ' (runner ' || COALESCE(runner_id, '?') || ')'
 		 WHERE status='running' AND heartbeat_at < now() - $1::interval`,
 		staleAfter.String())
-	return tag.RowsAffected(), err
+	if err != nil {
+		return 0, err
+	}
+	return requeued.RowsAffected() + failed.RowsAffected(), nil
 }
 
 // FailOverdueJobs is the server-side timeout backstop: running jobs past

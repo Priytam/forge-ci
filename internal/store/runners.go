@@ -29,8 +29,10 @@ func (s *Store) TouchRunner(ctx context.Context, id, executor string, tags []str
 
 func (s *Store) ListRunners(ctx context.Context) ([]proto.Runner, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, executor, tags, description, paused, created_at, last_contact_at
-		 FROM runners ORDER BY last_contact_at DESC`)
+		`SELECT r.id, r.executor, r.tags, r.description, r.paused, r.created_at, r.last_contact_at,
+		        r.version, r.draining, r.update_requested_at IS NOT NULL,
+		        (SELECT count(*) FROM jobs j WHERE j.status='running' AND j.runner_id = r.id)
+		 FROM runners r ORDER BY r.last_contact_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -40,7 +42,7 @@ func (s *Store) ListRunners(ctx context.Context) ([]proto.Runner, error) {
 	for rows.Next() {
 		var r proto.Runner
 		if err := rows.Scan(&r.ID, &r.Executor, &r.Tags, &r.Description, &r.Paused,
-			&r.CreatedAt, &r.LastContactAt); err != nil {
+			&r.CreatedAt, &r.LastContactAt, &r.Version, &r.Draining, &r.UpdateRequested, &r.RunningJobs); err != nil {
 			return nil, err
 		}
 		r.Online = time.Since(r.LastContactAt) < onlineWindow

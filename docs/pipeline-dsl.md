@@ -902,6 +902,22 @@ override them, as in GitLab.
 The URL variables are unset when neither `EXTERNAL_URL` nor `FRONTEND_URL` is
 configured.
 
+## `retry:` — how many times, and for which failures
+
+```yaml
+flaky-tests:
+  retry: 2                            # any failure, up to twice (as before)
+deploy:
+  retry:
+    max: 1
+    when: [runner_system_failure]     # only when the runner was lost, never for a failing script
+```
+
+`when:` takes `always` (default), `script_failure` (the script exited
+non-zero) and `runner_system_failure` (the runner stopped heart-beating mid-
+job — reboot, power, network). A timeout kill is never retried. The
+pipeline-wide `default: {retry: …}` accepts the same forms.
+
 ## Debug reruns — `CI_DEBUG_TRACE`
 
 **Retry with debug trace** on a failed or canceled job (or

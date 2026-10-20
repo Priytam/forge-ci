@@ -1,19 +1,25 @@
 FROM golang:1.25-alpine AS build
+# VERSION is stamped into the server and the bundled runner binaries
+# (internal/buildinfo), so the UI can tell outdated runners.
+ARG VERSION=dev
+ENV LDFLAGS="-X github.com/priytamjeepandey/forge-ci/internal/buildinfo.Version=${VERSION}"
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal
-RUN CGO_ENABLED=0 go build -o /out/forge-server ./cmd/server
+RUN CGO_ENABLED=0 go build -ldflags "$LDFLAGS" -o /out/forge-server ./cmd/server
 
 # Prebuilt forge-runner binaries, served from /api/v1/downloads/ so a QA
 # machine can register as a runner with a copy-paste command instead of
 # cloning this repo and building Go toolchain locally (see
 # deploy/downloads/install-runner.sh, internal/api/downloads.go).
-RUN CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -o /out/downloads/forge-runner-darwin-arm64       ./cmd/runner && \
-    CGO_ENABLED=0 GOOS=darwin  GOARCH=amd64 go build -o /out/downloads/forge-runner-darwin-amd64       ./cmd/runner && \
-    CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -o /out/downloads/forge-runner-linux-amd64        ./cmd/runner && \
-    CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o /out/downloads/forge-runner-windows-amd64.exe  ./cmd/runner
+RUN CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -ldflags "$LDFLAGS" -o /out/downloads/forge-runner-darwin-arm64       ./cmd/runner && \
+    CGO_ENABLED=0 GOOS=darwin  GOARCH=amd64 go build -ldflags "$LDFLAGS" -o /out/downloads/forge-runner-darwin-amd64       ./cmd/runner && \
+    CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -ldflags "$LDFLAGS" -o /out/downloads/forge-runner-linux-amd64        ./cmd/runner && \
+    CGO_ENABLED=0 GOOS=linux   GOARCH=arm64 go build -ldflags "$LDFLAGS" -o /out/downloads/forge-runner-linux-arm64        ./cmd/runner && \
+    CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "$LDFLAGS" -o /out/downloads/forge-runner-windows-amd64.exe  ./cmd/runner && \
+    echo "$VERSION" > /out/downloads/VERSION
 
 FROM alpine:3
 # git: the server reads and diffs repos on any git host with plain git, and

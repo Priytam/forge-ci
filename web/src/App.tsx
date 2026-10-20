@@ -23,6 +23,7 @@ import AdminNotifications from "./pages/AdminNotifications";
 import AdminApproverGroups from "./pages/AdminApproverGroups";
 import AdminServiceAccounts from "./pages/AdminServiceAccounts";
 import TemplateCatalog from "./pages/TemplateCatalog";
+import AdminAbout from "./pages/AdminAbout";
 import Environments from "./pages/Environments";
 import TestHistory from "./pages/TestHistory";
 import Shell from "./components/Shell";
@@ -58,6 +59,7 @@ export default function App() {
           <Route path="/admin/approver-groups" element={<AdminApproverGroups />} />
           <Route path="/admin/service-accounts" element={<AdminServiceAccounts />} />
           <Route path="/admin/audit" element={<AdminAudit />} />
+          <Route path="/admin/about" element={<AdminAbout />} />
           <Route path="/admin/runner-tokens" element={<AdminRunnerTokens />} />
           <Route path="/pipelines" element={<AllPipelines />} />
           <Route path="/jobs" element={<Jobs />} />

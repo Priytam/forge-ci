@@ -51,6 +51,7 @@ export const NAV: NavSection[] = [
       { to: "/admin/runner-tokens", label: "Runner tokens", icon: "key", keywords: "register runner" },
       { to: "/admin/sso", label: "Sign-in & identity", icon: "lock", keywords: "sso login oidc okta keycloak ldap active directory groups roles session google microsoft github" },
       { to: "/admin/audit", label: "Audit log", icon: "audit", keywords: "history who" },
+      { to: "/admin/about", label: "About & maintenance", icon: "sliders", keywords: "version upgrade maintenance mode migrations" },
       { to: "/tokens#policy", label: "API token policy", icon: "shield", keywords: "expiry" },
     ],
   },
@@ -71,6 +72,7 @@ const ADMIN_TITLES: Record<string, string> = {
   notifications: "Notifications",
   "approver-groups": "Approver groups",
   "service-accounts": "Service accounts",
+  about: "About & maintenance",
 };
 
 export interface Crumb {

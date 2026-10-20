@@ -234,6 +234,14 @@ Kubernetes Deployment, containers on a Docker host, or anything a command
 can (cloud VM groups, Terraform) from the queue — see
 [autoscaling.md](autoscaling.md).
 
+## Drain, upgrade, lost jobs, maintenance mode
+
+See [runner-operations.md](runner-operations.md): draining a runner from
+the Runners page, runner versions and self-update (one runner or a rolling
+"upgrade all"), what happens to a job whose runner vanishes
+(`retry: {when: [runner_system_failure]}`), and maintenance mode for server
+upgrades.
+
 ## Persistent BuildKit cache and cache affinity
 
 ### Cache affinity (`runner_affinity: true`)

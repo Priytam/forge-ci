@@ -88,6 +88,8 @@ type Job struct {
 	ResourceGroup string `json:"resource_group,omitempty"`
 	// Coverage is the job's coverage percentage, when it reports one.
 	Coverage *float64 `json:"coverage,omitempty"`
+	// RunnerID is the runner that ran (or is running) the job.
+	RunnerID *string `json:"runner_id,omitempty"`
 
 	// Approval gate, populated only for a job that targets a protected
 	// environment. Approvals is the append-only vote record (one per approver,
@@ -270,6 +272,14 @@ type Runner struct {
 	Online        bool      `json:"online"` // contacted within the last 30s
 	CreatedAt     time.Time `json:"created_at"`
 	LastContactAt time.Time `json:"last_contact_at"`
+	// Version is what the runner reported; Outdated when it differs from
+	// the runner the server bundles. Draining: taking no new jobs, with
+	// RunningJobs still in flight. UpdateRequested: will self-update when idle.
+	Version         string `json:"version,omitempty"`
+	Outdated        bool   `json:"outdated,omitempty"`
+	Draining        bool   `json:"draining,omitempty"`
+	UpdateRequested bool   `json:"update_requested,omitempty"`
+	RunningJobs     int    `json:"running_jobs"`
 }
 
 // ArtifactInfo is artifact metadata for list/download endpoints.
@@ -357,6 +367,7 @@ type AcquireRequest struct {
 	RunnerID string   `json:"runner_id"`
 	Executor string   `json:"executor"`
 	Tags     []string `json:"tags"`
+	Version  string   `json:"version,omitempty"` // runner build version
 }
 
 type CompleteRequest struct {

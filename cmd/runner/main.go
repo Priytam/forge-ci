@@ -13,6 +13,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/priytamjeepandey/forge-ci/internal/buildinfo"
 	"io"
 	"log/slog"
 	"net/http"
@@ -78,8 +79,13 @@ func main() {
 		tagsFlag = flag.String("tags", envOr("RUNNER_TAGS", ""), "comma-separated runner tags (jobs route by tag)")
 		token    = flag.String("token", envOr("RUNNER_TOKEN", ""), "runner auth token (required when the server runs RUNNER_AUTH=on)")
 		conc     = flag.Int("concurrency", concFromEnv(), "jobs to run in parallel (each forks its own executor)")
+		showVer  = flag.Bool("version", false, "print the runner version and exit")
 	)
 	flag.Parse()
+	if *showVer {
+		fmt.Println(buildinfo.Version)
+		return
+	}
 	if *conc < 1 {
 		*conc = 1
 	}
@@ -133,9 +139,9 @@ func main() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			req := proto.AcquireRequest{RunnerID: *runnerID, Executor: exec.Name(), Tags: tags}
+			req := proto.AcquireRequest{RunnerID: *runnerID, Executor: exec.Name(), Tags: tags, Version: buildinfo.Version}
 			for drainCtx.Err() == nil {
-				job, err := acquire(drainCtx, c, req)
+				job, action, err := acquire(drainCtx, c, req)
 				if err != nil {
 					if drainCtx.Err() == nil {
 						slog.Warn("acquire failed, retrying", "err", err)
@@ -144,9 +150,12 @@ func main() {
 					continue
 				}
 				if job == nil {
+					handleServerAction(drainCtx, c, action)
 					continue // long-poll timed out, poll again
 				}
+				inFlight.Add(1)
 				runJob(execCtx, drainCtx, c, exec, job)
+				inFlight.Add(-1)
 			}
 		}()
 	}
@@ -173,23 +182,85 @@ func concFromEnv() int {
 	return 1
 }
 
-func acquire(ctx context.Context, c *client, req proto.AcquireRequest) (*proto.RunnerJob, error) {
+// inFlight counts jobs this runner is executing across its slots, so a
+// self-update only happens when the whole runner is idle.
+var inFlight atomic.Int32
+
+// serverAction is what the server asked for on an empty acquire.
+type serverAction struct {
+	Action        string // "" | update | drain
+	ServerVersion string
+	Maintenance   bool
+}
+
+func acquire(ctx context.Context, c *client, req proto.AcquireRequest) (*proto.RunnerJob, serverAction, error) {
 	resp, err := c.postJSON(ctx, "/api/v1/runner/acquire", req)
 	if err != nil {
-		return nil, err
+		return nil, serverAction{}, err
 	}
 	defer resp.Body.Close()
 	switch resp.StatusCode {
 	case http.StatusNoContent:
-		return nil, nil
+		return nil, serverAction{
+			Action: resp.Header.Get("X-Forge-Runner-Action"), ServerVersion: resp.Header.Get("X-Forge-Server-Version"),
+			Maintenance: resp.Header.Get("X-Forge-Maintenance") == "on",
+		}, nil
 	case http.StatusOK:
 		var job proto.RunnerJob
 		if err := json.NewDecoder(resp.Body).Decode(&job); err != nil {
-			return nil, err
+			return nil, serverAction{}, err
 		}
-		return &job, nil
+		return &job, serverAction{}, nil
 	default:
-		return nil, fmt.Errorf("acquire: unexpected status %d", resp.StatusCode)
+		return nil, serverAction{}, fmt.Errorf("acquire: unexpected status %d", resp.StatusCode)
+	}
+}
+
+var (
+	lastActionLog = map[string]time.Time{}
+	actionMu      sync.Mutex
+	updating      atomic.Bool
+)
+
+// logOnce logs an action at most once a minute (the runner polls every few
+// seconds while draining).
+func logOnce(key string, level slog.Level, msg string, args ...any) {
+	actionMu.Lock()
+	defer actionMu.Unlock()
+	if time.Since(lastActionLog[key]) < time.Minute {
+		return
+	}
+	lastActionLog[key] = time.Now()
+	slog.Log(context.Background(), level, msg, args...)
+}
+
+// handleServerAction reacts to what the server asked for on an empty poll.
+func handleServerAction(ctx context.Context, c *client, a serverAction) {
+	switch {
+	case a.Maintenance:
+		logOnce("maintenance", slog.LevelInfo, "server is in maintenance mode; not taking jobs")
+	case a.Action == "drain":
+		logOnce("drain", slog.LevelInfo, "draining (asked by the server); finishing in-flight jobs", "in_flight", inFlight.Load())
+	case a.Action == "update":
+		if inFlight.Load() > 0 {
+			logOnce("update-wait", slog.LevelInfo, "update requested; waiting for in-flight jobs", "in_flight", inFlight.Load())
+			return
+		}
+		if !selfUpdateEnabled() {
+			logOnce("update-off", slog.LevelWarn, "update requested but RUNNER_SELF_UPDATE is not on; update this runner the way it was installed")
+			return
+		}
+		if a.ServerVersion != "" && a.ServerVersion == buildinfo.Version {
+			return // already there; the next poll clears the request
+		}
+		if !updating.CompareAndSwap(false, true) {
+			return
+		}
+		slog.Info("self-update: starting", "from", buildinfo.Version, "to", a.ServerVersion)
+		if err := selfUpdate(ctx, c, a.ServerVersion); err != nil {
+			slog.Error("self-update failed; keeping the current binary", "err", err)
+			updating.Store(false)
+		}
 	}
 }
 

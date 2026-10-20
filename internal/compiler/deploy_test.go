@@ -110,3 +110,33 @@ jobs:
 		}
 	}
 }
+
+func TestRetryLongForm(t *testing.T) {
+	yml := "stages: [d]\ndefault: {retry: {max: 2, when: [script_failure]}}\njobs:\n  a:\n    stage: d\n    script: [x]\n  b:\n    stage: d\n    retry: 1\n    script: [x]\n  c:\n    stage: d\n    retry: {max: 1, when: [runner_system_failure, always]}\n    script: [x]\n"
+	jobs, err := Compile(yml, "main", "api", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	by := map[string]CompiledJob{}
+	for _, j := range jobs {
+		by[j.Name] = j
+	}
+	if by["a"].Retry != 2 || strings.Join(by["a"].RetryWhen, ",") != "script_failure" {
+		t.Errorf("a = %d %v", by["a"].Retry, by["a"].RetryWhen)
+	}
+	if by["b"].Retry != 1 || strings.Join(by["b"].RetryWhen, ",") != "always" {
+		t.Errorf("b = %d %v", by["b"].Retry, by["b"].RetryWhen)
+	}
+	if by["c"].Retry != 1 || strings.Join(by["c"].RetryWhen, ",") != "always,runner_system_failure" {
+		t.Errorf("c = %d %v", by["c"].Retry, by["c"].RetryWhen)
+	}
+	if _, err := Compile("stages: [d]\njobs:\n  j:\n    stage: d\n    retry: {max: 1, when: [sometimes]}\n    script: [x]\n", "main", "api", nil); err == nil || !strings.Contains(err.Error(), "retry.when") {
+		t.Errorf("bad when: %v", err)
+	}
+	if _, err := Compile("stages: [d]\njobs:\n  j:\n    stage: d\n    retry: {when: [always]}\n    script: [x]\n", "main", "api", nil); err == nil || !strings.Contains(err.Error(), "max is required") {
+		t.Errorf("missing max: %v", err)
+	}
+	if !RetryAppliesTo([]string{"runner_system_failure"}, RetryRunnerSystemFailure) || RetryAppliesTo([]string{"runner_system_failure"}, RetryScriptFailure) || !RetryAppliesTo(nil, RetryScriptFailure) {
+		t.Error("RetryAppliesTo")
+	}
+}

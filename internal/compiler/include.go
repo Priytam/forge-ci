@@ -226,7 +226,7 @@ func mergeConfig(base, overlay config) config {
 	if overlay.Default.Timeout != "" {
 		out.Default.Timeout = overlay.Default.Timeout
 	}
-	if overlay.Default.Retry != nil {
+	if overlay.Default.Retry.Max != nil {
 		out.Default.Retry = overlay.Default.Retry
 	}
 

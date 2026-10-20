@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -22,8 +23,7 @@ import (
 )
 
 const (
-	acquireLongPoll = 25 * time.Second
-	maxLogChunk     = 1 << 20 // 1 MiB per POST
+	maxLogChunk = 1 << 20 // 1 MiB per POST
 
 	defaultMaxJobLogBytes  = 10 << 20  // MAX_JOB_LOG_BYTES  (10 MiB)
 	defaultMaxArtifactByte = 500 << 20 // MAX_ARTIFACT_BYTES (500 MiB)
@@ -114,6 +114,8 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 	srv.registerIdentityRoutes()
 	srv.registerNotifyRouteRoutes()
 	srv.registerRunnerPoolRoutes()
+	srv.registerRunnerOpRoutes()
+	srv.registerStatusRoutes()
 
 	return srv
 }
@@ -772,7 +774,7 @@ func (s *Server) acquire(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "runner_id is required")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), acquireLongPoll)
+	ctx, cancel := context.WithTimeout(r.Context(), acquireLongPoll())
 	defer cancel()
 	for {
 		job, err := s.store.AcquireJob(ctx, req)
@@ -791,10 +793,29 @@ func (s *Server) acquire(w http.ResponseWriter, r *http.Request) {
 		}
 		select {
 		case <-ctx.Done():
-			w.WriteHeader(http.StatusNoContent)
+			s.noJob(w, r, req)
 			return
 		case <-time.After(time.Second):
 		}
+	}
+	s.noJob(w, r, req)
+}
+
+// noJob answers an acquire that found nothing, telling the runner what the
+// server wants from it: X-Forge-Runner-Action "update" (self-update when
+// idle) or "drain", X-Forge-Server-Version, and X-Forge-Maintenance.
+func (s *Server) noJob(w http.ResponseWriter, r *http.Request, req proto.AcquireRequest) {
+	w.Header().Set("X-Forge-Server-Version", bundledRunnerVersion())
+	if st, err := s.store.RunnerState(r.Context(), req.RunnerID); err == nil {
+		switch {
+		case st.UpdateRequested:
+			w.Header().Set("X-Forge-Runner-Action", "update")
+		case st.Draining:
+			w.Header().Set("X-Forge-Runner-Action", "drain")
+		}
+	}
+	if mm, err := s.store.Maintenance(r.Context()); err == nil && mm.On {
+		w.Header().Set("X-Forge-Maintenance", "on")
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -1061,4 +1082,13 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"job": job})
+}
+
+// acquireLongPoll is how long an acquire waits for a job before answering
+// 204 (ACQUIRE_LONG_POLL, default 25s; tests set it low).
+func acquireLongPoll() time.Duration {
+	if d, err := time.ParseDuration(os.Getenv("ACQUIRE_LONG_POLL")); err == nil && d > 0 {
+		return d
+	}
+	return 25 * time.Second
 }

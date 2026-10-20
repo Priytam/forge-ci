@@ -998,3 +998,11 @@ CREATE TABLE IF NOT EXISTS runner_pools (
     last_busy_at       TIMESTAMPTZ,
     checked_at         TIMESTAMPTZ
 );
+
+-- Runner operations (batch 15): version reporting, drain, self-update
+-- requests; per-job retry conditions (retry: {max, when}).
+ALTER TABLE runners ADD COLUMN IF NOT EXISTS version             TEXT NOT NULL DEFAULT '';
+ALTER TABLE runners ADD COLUMN IF NOT EXISTS draining            BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE runners ADD COLUMN IF NOT EXISTS drain_requested_at  TIMESTAMPTZ;
+ALTER TABLE runners ADD COLUMN IF NOT EXISTS update_requested_at TIMESTAMPTZ;
+ALTER TABLE jobs    ADD COLUMN IF NOT EXISTS retry_when          TEXT[] NOT NULL DEFAULT '{always}';

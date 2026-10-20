@@ -131,6 +131,8 @@ export interface Job {
   retry_of?: number;
   /** at most one job per (repo, group) runs at a time */
   resource_group?: string;
+  /** the runner that ran (or is running) the job */
+  runner_id?: string | null;
 }
 
 /** One recorded vote on an approval-gated job. */
@@ -169,6 +171,13 @@ export interface Runner {
   online: boolean;
   created_at: string;
   last_contact_at: string;
+  /** reported build version; outdated when it differs from the server's bundled runner */
+  version?: string;
+  outdated?: boolean;
+  /** taking no new jobs; running_jobs still in flight */
+  draining?: boolean;
+  update_requested?: boolean;
+  running_jobs?: number;
 }
 
 export interface Artifact {
@@ -1954,4 +1963,66 @@ export function deleteRunnerPool(id: number): Promise<void> {
 
 export function evaluateRunnerPools(): Promise<RunnerPoolsResponse> {
   return postJSON<RunnerPoolsResponse>("/runner-pools/evaluate", {});
+}
+
+
+// ---- server status, about, maintenance, runner operations ----
+
+export interface ServerStatus {
+  version: string;
+  maintenance?: { on: boolean; message?: string; by?: string; since?: string };
+}
+
+/** Public: no session needed, never redirects. */
+export async function getServerStatus(): Promise<ServerStatus> {
+  const res = await fetch(`${BASE}/status`, { headers: { Accept: "application/json" } });
+  if (!res.ok) throw new ApiError(res.status, `Request failed with status ${res.status}`);
+  return (await res.json()) as ServerStatus;
+}
+
+export interface AboutInfo {
+  version: string;
+  platform: string;
+  runner_version: string;
+  started_at: string;
+  uptime_seconds: number;
+  database_ok: boolean;
+  schema?: { applied_at?: string; version?: string };
+  maintenance?: { on: boolean; message?: string; by?: string; since?: string };
+  downloads_served: string[];
+}
+
+export function getAbout(): Promise<AboutInfo> {
+  return getJSON<AboutInfo>("/about");
+}
+
+export function setMaintenance(on: boolean, message: string): Promise<unknown> {
+  return putJSON<unknown>("/maintenance", { on, message });
+}
+
+export function runnerOp(id: string, op: "drain" | "resume" | "upgrade"): Promise<{ running_jobs: number }> {
+  return postJSON<{ running_jobs: number }>(`/runners/${encodeURIComponent(id)}/${op}`, {});
+}
+
+export interface Rollout {
+  active: boolean;
+  target: string;
+  current?: string;
+  done: string[];
+  skipped: string[];
+  started_at?: string;
+  by?: string;
+  note?: string;
+}
+
+export function getRollout(): Promise<Rollout> {
+  return getJSON<Rollout>("/runners/rollout");
+}
+
+export function startRollout(): Promise<Rollout> {
+  return postJSON<Rollout>("/runners/rollout", {});
+}
+
+export function stopRollout(): Promise<void> {
+  return requestVoid("DELETE", "/runners/rollout");
 }

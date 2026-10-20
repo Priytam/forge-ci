@@ -324,6 +324,10 @@ func (sc *Scheduler) step(ctx context.Context) {
 		{"cancel_dead", sc.store.CancelDeadJobs},
 		{"fail_fast_cancel", sc.store.FailFastCancel},
 		{"cancel_superseded_deploys", sc.store.CancelSupersededDeploys},
+		{"runner_rollout", func(ctx context.Context) (int64, error) {
+			_, err := sc.store.AdvanceRollout(ctx, sc.staleAfter)
+			return 0, err
+		}},
 		{"promote_ready", sc.store.PromoteReadyJobs},
 		{"expire_blocked", sc.store.ExpireBlockedJobs},
 		{"fail_overdue", sc.store.FailOverdueJobs},

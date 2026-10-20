@@ -200,7 +200,8 @@ func (s *Store) ClaimPipelineEvents(ctx context.Context, limit int) ([]PipelineE
 		          CASE WHEN bool_or(j.status = 'failed' AND NOT j.allow_failure) OR bool_or(j.status = 'canceled') THEN 'failed'
 		               ELSE 'success' END AS status,
 		          max(j.finished_at) AS finished_at,
-		          array_remove(array_agg(j.name) FILTER (WHERE j.status = 'failed' AND NOT j.allow_failure), NULL) AS failed_jobs
+		          array_remove(array_agg(j.name || CASE WHEN j.status_reason <> '' THEN ' (' || j.status_reason || ')' ELSE '' END)
+		                       FILTER (WHERE j.status = 'failed' AND NOT j.allow_failure), NULL) AS failed_jobs
 		   FROM pipelines p JOIN jobs j ON j.pipeline_id = p.id AND NOT j.superseded
 		   WHERE p.created_at > now() - $2::interval
 		   GROUP BY p.id

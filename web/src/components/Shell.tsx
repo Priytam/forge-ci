@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import SessionWatch from "./SessionWatch";
+import MaintenanceBanner from "./MaintenanceBanner";
 import { Link, NavLink, useLocation } from "react-router-dom";
 import { getIsAdmin } from "../api";
 import AuthMenu from "./AuthMenu";
@@ -133,6 +134,7 @@ export default function Shell({ children }: { children: ReactNode }) {
             <AuthMenu />
           </div>
         </header>
+        <MaintenanceBanner />
         <main className="content">{children}</main>
         <SessionWatch />
       </div>

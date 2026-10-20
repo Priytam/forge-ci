@@ -4262,3 +4262,12 @@ h2.section-title {
   font-size: 13px;
   max-width: calc(100vw - 40px);
 }
+
+/* Maintenance banner */
+.maintenance-banner {
+  background: #b45309;
+  color: #fff;
+  padding: 8px 16px;
+  font-size: 13px;
+  text-align: center;
+}

@@ -109,6 +109,7 @@ func authExempt(path string) bool {
 		path == "/.well-known/openid-configuration",
 		path == "/.well-known/jwks.json",
 		path == "/api/v1/healthz",
+		path == "/api/v1/status",
 		path == "/api/v1/metrics":
 		return true
 	}

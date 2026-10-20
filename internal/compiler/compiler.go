@@ -100,7 +100,7 @@ type jobSpec struct {
 	Cache        cacheSpec         `yaml:"cache"`
 	Services     []serviceSpec     `yaml:"services"`
 	Timeout      string            `yaml:"timeout"` // Go duration, e.g. "30m", "2h"
-	Retry        *int              `yaml:"retry"`   // 0..10; nil = inherit default
+	Retry        retrySpec         `yaml:"retry"`   // 0..10, or {max, when}; unset = inherit default
 	Rules        []ruleSpec        `yaml:"rules"`
 	Extends      stringOrSlice     `yaml:"extends"`
 	Parallel     *parallelSpec     `yaml:"parallel"`
@@ -296,8 +296,8 @@ type config struct {
 	FailFast   *bool              `yaml:"fail_fast"`   // nil = default false
 	Include    []includeSpec      `yaml:"include"`
 	Default    struct {
-		Timeout string `yaml:"timeout"` // pipeline-wide TTL for jobs without their own
-		Retry   *int   `yaml:"retry"`   // pipeline-wide retry for jobs without their own
+		Timeout string    `yaml:"timeout"` // pipeline-wide TTL for jobs without their own
+		Retry   retrySpec `yaml:"retry"`   // pipeline-wide retry for jobs without their own
 	} `yaml:"default"`
 }
 
@@ -441,6 +441,9 @@ type CompiledJob struct {
 	// registries it logs into.
 	Secrets        map[string]proto.SecretSpec
 	RegistryLogins []string
+	// RetryWhen lists the failure kinds Retry applies to: always,
+	// script_failure, runner_system_failure.
+	RetryWhen []string
 	// CoverageRegex extracts coverage from the log (Go regexp, "" = none);
 	// CoverageReportPath is a Cobertura file to read it from instead.
 	CoverageRegex      string
@@ -801,14 +804,19 @@ func CompileWith(yml, ref, source string, opts CompileOpts) ([]CompiledJob, erro
 		}
 
 		// Retry precedence: job retry > YAML default.retry > 0 (no retry).
-		retry, err := validateRetry(fmt.Sprintf("job %q", inst.orig), spec.Retry)
+		retry, err := validateRetry(fmt.Sprintf("job %q", inst.orig), spec.Retry.Max)
 		if err != nil {
 			return nil, err
 		}
-		if spec.Retry == nil {
-			if retry, err = validateRetry("default", cfg.Default.Retry); err != nil {
+		retryWhen := spec.Retry.When
+		if spec.Retry.Max == nil {
+			if retry, err = validateRetry("default", cfg.Default.Retry.Max); err != nil {
 				return nil, err
 			}
+			retryWhen = cfg.Default.Retry.When
+		}
+		if retryWhen, err = validateRetryWhen(fmt.Sprintf("job %q", inst.orig), retryWhen); err != nil {
+			return nil, err
 		}
 
 		// Needs: explicit (with matrix fan-in) or implicit (nearest earlier
@@ -862,6 +870,7 @@ func CompileWith(yml, ref, source string, opts CompileOpts) ([]CompiledJob, erro
 			CachePolicy:           cachePolicy,
 			TimeoutSec:            timeoutSec,
 			Retry:                 retry,
+			RetryWhen:             retryWhen,
 			Manual:                inst.manual,
 			AllowFailure:          inst.allowFailure,
 			Services:              services,

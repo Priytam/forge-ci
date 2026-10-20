@@ -301,6 +301,11 @@ export default function JobLog() {
         </div>
       )}
 
+      {job?.runner_id && (
+        <p className="muted">
+          Ran on runner <Link to={`/jobs?runner=${encodeURIComponent(job.runner_id)}`} className="mono">{job.runner_id}</Link>
+        </p>
+      )}
       {job?.status_reason && (
         <div className="error-banner">
           This job did not run: {job.status_reason}. An admin sets which branches
