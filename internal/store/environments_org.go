@@ -318,6 +318,8 @@ type JobFilter struct {
 	Runner      string
 	Environment string
 	Name        string // case-insensitive substring of the job name
+	// StartedFrom / StartedTo bound started_at (history drill-down).
+	StartedFrom, StartedTo *time.Time
 }
 
 // Validate rejects unknown statuses.
@@ -376,6 +378,12 @@ func (s *Store) ListJobsFiltered(ctx context.Context, f JobFilter, limit, offset
 	}
 	if f.Name != "" {
 		add(`j.name ILIKE '%' || $? || '%'`, escapeLike(f.Name))
+	}
+	if f.StartedFrom != nil {
+		add("j.started_at >= $?", *f.StartedFrom)
+	}
+	if f.StartedTo != nil {
+		add("j.started_at < $?", *f.StartedTo)
 	}
 	where := strings.Join(conds, " AND ")
 	const from = ` FROM jobs j JOIN pipelines p ON p.id = j.pipeline_id WHERE `

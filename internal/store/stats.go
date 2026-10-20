@@ -22,8 +22,30 @@ type DashboardStats struct {
 		// n=200, so the UI shows this beside it.
 		Finished24h int `json:"finished_24h"`
 	} `json:"now"`
-	Pipelines []PipelineBucket `json:"pipelines"` // last 24 hourly buckets
+	Pipelines []PipelineBucket `json:"pipelines"` // dense buckets over the range
 	Jobs      []JobBucket      `json:"jobs"`
+	// Range describes the window the series and rates cover; Previous is
+	// the same-length window before it, for "▲4 vs last week".
+	Range    RangeInfo     `json:"range"`
+	Previous *PeriodTotals `json:"previous,omitempty"`
+	Totals   PeriodTotals  `json:"totals"`
+}
+
+// RangeInfo echoes the resolved range.
+type RangeInfo struct {
+	From          time.Time `json:"from"`
+	To            time.Time `json:"to"`
+	BucketSeconds int       `json:"bucket_seconds"`
+	Label         string    `json:"label"`
+}
+
+// PeriodTotals are the comparable numbers for one window.
+type PeriodTotals struct {
+	Pipelines   int `json:"pipelines"`
+	Finished    int `json:"finished"`
+	Succeeded   int `json:"succeeded"`
+	SuccessRate int `json:"success_rate"` // percent, -1 when nothing finished
+	JobsStarted int `json:"jobs_started"`
 }
 
 type PipelineBucket struct {
@@ -38,8 +60,17 @@ type JobBucket struct {
 	Count int       `json:"count"`
 }
 
+// DashboardStats keeps the 24h shape for callers that pass no range.
 func (s *Store) DashboardStats(ctx context.Context) (*DashboardStats, error) {
+	r, _ := ParseRange("24h", "", "", "", time.Now())
+	return s.DashboardStatsRange(ctx, r)
+}
+
+// DashboardStatsRange is the dashboard over any range, with the previous
+// window for comparison.
+func (s *Store) DashboardStatsRange(ctx context.Context, r Range) (*DashboardStats, error) {
 	var st DashboardStats
+	st.Range = RangeInfo{From: r.From, To: r.To, BucketSeconds: int(r.Bucket.Seconds()), Label: r.Label}
 
 	err := s.pool.QueryRow(ctx, `
 		SELECT
@@ -64,80 +95,47 @@ func (s *Store) DashboardStats(ctx context.Context) (*DashboardStats, error) {
 		return nil, err
 	}
 
-	// Hourly pipeline outcomes for the last 24h, derived from job statuses
-	// with the same precedence as deriveStatus.
-	rows, err := s.pool.Query(ctx, `
-		WITH ps AS (
-		  SELECT p.id, date_trunc('hour', p.created_at) AS hour,
-		    CASE
-		      WHEN bool_or(j.status='failed')  THEN 'failed'
-		      WHEN bool_or(j.status='canceled') THEN 'other'
-		      WHEN bool_and(j.status='success') THEN 'success'
-		      ELSE 'other'
-		    END AS status
-		  FROM pipelines p JOIN jobs j ON j.pipeline_id = p.id AND NOT j.superseded
-		  WHERE p.created_at > now() - interval '24 hours'
-		  GROUP BY p.id
-		)
-		SELECT hour,
-		  count(*) FILTER (WHERE status='success'),
-		  count(*) FILTER (WHERE status='failed'),
-		  count(*) FILTER (WHERE status='other')
-		FROM ps GROUP BY hour ORDER BY hour`)
+	// Series over the range (live from jobs, or hourly rollups beyond 7 days).
+	buckets, finished, succeeded, err := s.PipelineSeries(ctx, r)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	byHour := map[time.Time]PipelineBucket{}
-	finished, succeeded := 0, 0
-	for rows.Next() {
-		var b PipelineBucket
-		if err := rows.Scan(&b.Hour, &b.Success, &b.Failed, &b.Other); err != nil {
-			return nil, err
-		}
-		byHour[b.Hour.UTC()] = b
-		finished += b.Success + b.Failed
-		succeeded += b.Success
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	jrows, err := s.pool.Query(ctx, `
-		SELECT date_trunc('hour', started_at), count(*)
-		FROM jobs WHERE started_at > now() - interval '24 hours'
-		GROUP BY 1 ORDER BY 1`)
+	st.Pipelines = buckets
+	hist, err := s.RunnerHistory(ctx, r, HistoryFilter{})
 	if err != nil {
 		return nil, err
 	}
-	defer jrows.Close()
-	jobsByHour := map[time.Time]int{}
-	for jrows.Next() {
-		var h time.Time
-		var n int
-		if err := jrows.Scan(&h, &n); err != nil {
-			return nil, err
+	st.Jobs = make([]JobBucket, 0, len(hist))
+	jobsStarted := 0
+	for _, b := range hist {
+		st.Jobs = append(st.Jobs, JobBucket{Hour: b.At, Count: b.JobsStarted})
+		jobsStarted += b.JobsStarted
+	}
+	st.Totals = periodTotals(buckets, finished, succeeded, jobsStarted)
+	// The same-length window before this one.
+	prev := Range{From: r.From.Add(-r.To.Sub(r.From)), To: r.From, Bucket: r.Bucket, Label: r.Label}
+	if pb, pf, ps, err := s.PipelineSeries(ctx, prev); err == nil {
+		ph, _ := s.RunnerHistory(ctx, prev, HistoryFilter{})
+		pj := 0
+		for _, b := range ph {
+			pj += b.JobsStarted
 		}
-		jobsByHour[h.UTC()] = n
+		t := periodTotals(pb, pf, ps, pj)
+		st.Previous = &t
 	}
-	if err := jrows.Err(); err != nil {
-		return nil, err
-	}
-
-	// Dense series: emit all 24 buckets so charts show flat zeros, not gaps.
-	start := time.Now().UTC().Truncate(time.Hour).Add(-23 * time.Hour)
-	for i := 0; i < 24; i++ {
-		h := start.Add(time.Duration(i) * time.Hour)
-		b := byHour[h]
-		b.Hour = h
-		st.Pipelines = append(st.Pipelines, b)
-		st.Jobs = append(st.Jobs, JobBucket{Hour: h, Count: jobsByHour[h]})
-	}
-
-	st.Now.SuccessRate24h = -1
+	// The 24h-named fields keep their meaning for the chosen range.
 	st.Now.Finished24h = finished
-	if finished > 0 {
-		st.Now.SuccessRate24h = succeeded * 100 / finished
-	}
+	st.Now.SuccessRate24h = st.Totals.SuccessRate
 	return &st, nil
+}
+
+func periodTotals(buckets []PipelineBucket, finished, succeeded, jobsStarted int) PeriodTotals {
+	t := PeriodTotals{Finished: finished, Succeeded: succeeded, JobsStarted: jobsStarted, SuccessRate: -1}
+	for _, b := range buckets {
+		t.Pipelines += b.Success + b.Failed + b.Other
+	}
+	if finished > 0 {
+		t.SuccessRate = succeeded * 100 / finished
+	}
+	return t
 }

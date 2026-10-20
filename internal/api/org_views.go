@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/priytamjeepandey/forge-ci/internal/store"
 )
@@ -137,6 +138,8 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 		Runner:      strings.TrimSpace(q.Get("runner")),
 		Environment: strings.TrimSpace(q.Get("environment")),
 		Name:        strings.TrimSpace(q.Get("name")),
+		StartedFrom: parseTimeParam(q.Get("started_from")),
+		StartedTo:   parseTimeParam(q.Get("started_to")),
 	}
 	if err := f.Validate(); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -151,4 +154,16 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Total-Count", strconv.Itoa(total))
 	w.Header().Set("X-Has-More", strconv.FormatBool(offset+len(jobs) < total))
 	writeJSON(w, http.StatusOK, jobs)
+}
+
+// parseTimeParam reads an RFC 3339 query value (nil when absent or invalid).
+func parseTimeParam(v string) *time.Time {
+	if v == "" {
+		return nil
+	}
+	t, err := time.Parse(time.RFC3339, v)
+	if err != nil {
+		return nil
+	}
+	return &t
 }

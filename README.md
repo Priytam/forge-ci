@@ -445,6 +445,8 @@ provides the fallback CI. Full walkthrough: [docs/self-hosted-ci.md](docs/self-h
 - [Artifact storage (local, S3-compatible, Azure Blob)](docs/artifact-storage.md)
 - [External secrets and registry login (Vault, AWS, GCP, Azure)](docs/secrets.md)
 - [Runner autoscaling (Kubernetes, Docker host, any cloud via exec)](docs/autoscaling.md)
+- [Runner operations: drain, upgrade, lost jobs, maintenance mode](docs/runner-operations.md)
+- [Observability: history, time ranges, webhook health](docs/observability.md)
 - [Notifications: Slack, Teams, webhooks, email; approve by link](docs/notifications.md)
 - [High-volume log architecture (Redis live buffer, blob archive, SSE)](docs/log-ingestion-design.md)
 - [Roles, membership & approval rules](docs/rbac-approvals.md)

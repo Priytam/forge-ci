@@ -28,6 +28,7 @@ type Scheduler struct {
 	logs          *logstore.Service
 	tick          time.Duration
 	staleAfter    time.Duration
+	lastRollup    time.Time
 	gcEvery       time.Duration // retention GC cadence
 	archiveEvery  time.Duration // log-archive safety-net sweep cadence
 	scheduleEvery time.Duration // cron-schedule fire-check cadence
@@ -324,6 +325,19 @@ func (sc *Scheduler) step(ctx context.Context) {
 		{"cancel_dead", sc.store.CancelDeadJobs},
 		{"fail_fast_cancel", sc.store.FailFastCancel},
 		{"cancel_superseded_deploys", sc.store.CancelSupersededDeploys},
+		{"stats_rollup", func(ctx context.Context) (int64, error) {
+			// Hourly rollups every 10 minutes (idempotent; backfills a week).
+			if time.Since(sc.lastRollup) < 10*time.Minute {
+				return 0, nil
+			}
+			sc.lastRollup = time.Now()
+			n, err := sc.store.RollupHour(ctx, 7*24*time.Hour)
+			if err == nil {
+				_, _ = sc.store.PruneWebhookLog(ctx, 30*24*time.Hour)
+				_ = sc.store.PruneRollups(ctx, 400*24*time.Hour)
+			}
+			return int64(n), err
+		}},
 		{"runner_rollout", func(ctx context.Context) (int64, error) {
 			_, err := sc.store.AdvanceRollout(ctx, sc.staleAfter)
 			return 0, err

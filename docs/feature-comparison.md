@@ -84,6 +84,7 @@ Legend: ✅ shipped · 🟡 partial · ❌ not yet (roadmap).
 | Live log viewer | ✅ | ✅ | |
 | Settings → CI/CD sections (variables, runners, artifacts, members) | ✅ | ✅ | |
 | Runner drain / rolling upgrade / lost-job handling | 🟡 | ✅ | drain & resume per runner, version + "outdated", self-update and rolling "upgrade all"; lost jobs fail with a reason or retry via `retry: {when: [runner_system_failure]}`; maintenance mode — see [runner-operations.md](runner-operations.md) |
+| History & time ranges | ✅ (analytics, Premium) | ✅ | 24h / 7d / 30d everywhere with previous-period comparison; per-runner load, queue-wait and duration p50/p95 with drill-down; hourly rollups; webhook delivery health per repo — see [observability.md](observability.md) |
 | Runner autoscaling | ✅ (docker-machine / k8s executor / fleeting) | ✅ | autoscaled pools with pluggable providers: Kubernetes Deployment, Docker host, exec (any cloud via CLI/Terraform); queue-driven, drain-aware scale-down — see [autoscaling.md](autoscaling.md); or KEDA on the queue metrics |
 | Environments/deployments board | ✅ | ✅ | board + history + drift + rollback + freezes, deploy URL/version/digest per deployment ([docs/environments.md](environments.md)) |
 | Promote a build between environments | 🟡 (manual pattern) | ✅ | one click/API call redeploys the source deployment's exact commit, artifacts and digest; only the target's deploy jobs run; gates apply ([environments.md](environments.md#promotion--ship-the-build-you-tested)) |

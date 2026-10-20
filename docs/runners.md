@@ -234,6 +234,13 @@ Kubernetes Deployment, containers on a Docker host, or anything a command
 can (cloud VM groups, Terraform) from the queue — see
 [autoscaling.md](autoscaling.md).
 
+## History: load, queue latency, job duration
+
+The Runners page charts busy slots, jobs started, queue-wait p50/p95 and
+job-duration p50/p95 over 24h / 7 days / 30 days, per runner or overall,
+with click-through to the jobs behind a point — see
+[observability.md](observability.md).
+
 ## Drain, upgrade, lost jobs, maintenance mode
 
 See [runner-operations.md](runner-operations.md): draining a runner from

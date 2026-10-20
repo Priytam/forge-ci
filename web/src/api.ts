@@ -936,15 +936,96 @@ export interface JobBucket {
   count: number;
 }
 
-export interface Stats {
-  now: StatsNow;
-  /** exactly 24 hourly buckets, oldest first */
-  pipelines: PipelineBucket[];
-  jobs: JobBucket[];
+export interface PeriodTotals {
+  pipelines: number;
+  finished: number;
+  succeeded: number;
+  /** percent; -1 when nothing finished */
+  success_rate: number;
+  jobs_started: number;
 }
 
-export function getStats(): Promise<Stats> {
-  return getJSON<Stats>("/stats");
+export interface Stats {
+  now: StatsNow;
+  /** dense buckets over the range, oldest first */
+  pipelines: PipelineBucket[];
+  jobs: JobBucket[];
+  range: { from: string; to: string; bucket_seconds: number; label: string };
+  totals: PeriodTotals;
+  /** the same-length window before this one */
+  previous?: PeriodTotals;
+}
+
+export function getStats(range = "24h"): Promise<Stats> {
+  return getJSON<Stats>(`/stats?range=${encodeURIComponent(range)}`);
+}
+
+// ---- runner history and webhook health ----
+
+export interface HistoryBucket {
+  at: string;
+  jobs_started: number;
+  busy_seconds: number;
+  busy_slots: number;
+  wait_p50: number;
+  wait_p95: number;
+  duration_p50: number;
+  duration_p95: number;
+  finished: number;
+  failed: number;
+}
+
+export interface RunnerHistoryResponse {
+  range: { from: string; to: string; bucket_seconds: number; label: string };
+  buckets: HistoryBucket[];
+}
+
+export function getRunnerHistory(range: string, filter: { runner?: string; repo?: string; job?: string } = {}): Promise<RunnerHistoryResponse> {
+  const q = new URLSearchParams({ range });
+  if (filter.runner) q.set("runner", filter.runner);
+  if (filter.repo) q.set("repo", filter.repo);
+  if (filter.job) q.set("job", filter.job);
+  return getJSON<RunnerHistoryResponse>(`/runner-history?${q.toString()}`);
+}
+
+export function getHistoryJobs(from: string, to: string, filter: { runner?: string; repo?: string; job?: string } = {}): Promise<JobRow[]> {
+  const q = new URLSearchParams({ from, to });
+  if (filter.runner) q.set("runner", filter.runner);
+  if (filter.repo) q.set("repo", filter.repo);
+  if (filter.job) q.set("job", filter.job);
+  return getJSON<{ jobs: JobRow[] }>(`/runner-history/jobs?${q.toString()}`).then((r) => r.jobs ?? []);
+}
+
+export interface WebhookHealth {
+  repo: string;
+  accepted: number;
+  rejected: number;
+  errors: number;
+  duplicates: number;
+  sources: number;
+  failing_sources?: string[];
+  last_at?: string;
+}
+
+export interface WebhookEntry {
+  id: number;
+  received_at: string;
+  provider: string;
+  repo?: string;
+  event?: string;
+  status: number;
+  reason?: string;
+  delivery_id?: string;
+  source_ip?: string;
+  pipeline_id?: number;
+}
+
+export function getWebhookLog(repo: string): Promise<{ health: WebhookHealth; entries: WebhookEntry[] }> {
+  return getJSON<{ health: WebhookHealth; entries: WebhookEntry[] }>(`/webhook-log?repo=${encodeURIComponent(repo)}`);
+}
+
+export function getFailingWebhooks(): Promise<WebhookHealth[]> {
+  return getJSON<{ repos: WebhookHealth[] }>("/webhook-log/failing").then((r) => r.repos ?? []);
 }
 
 // --- Auth / SSO ---
@@ -1379,6 +1460,9 @@ export interface PipelineFilter {
   ref?: string;
   statuses?: string[];
   runner?: string;
+  /** started_at window (RFC 3339), from the history drill-down */
+  started_from?: string;
+  started_to?: string;
   environment?: string;
 }
 
@@ -1396,6 +1480,8 @@ export function filterToParams(f: PipelineFilter): URLSearchParams {
   for (const s of f.statuses ?? []) qs.append("status", s);
   if (f.runner) qs.set("runner", f.runner);
   if (f.environment) qs.set("environment", f.environment);
+  if (f.started_from) qs.set("started_from", f.started_from);
+  if (f.started_to) qs.set("started_to", f.started_to);
   return qs;
 }
 
@@ -1406,6 +1492,8 @@ export function paramsToFilter(qs: URLSearchParams): PipelineFilter {
     statuses: qs.getAll("status").filter(Boolean),
     runner: qs.get("runner") ?? "",
     environment: qs.get("environment") ?? "",
+    started_from: qs.get("started_from") ?? "",
+    started_to: qs.get("started_to") ?? "",
   };
 }
 

@@ -4271,3 +4271,15 @@ h2.section-title {
   font-size: 13px;
   text-align: center;
 }
+
+/* Range picker and history charts */
+.range-picker { display: inline-flex; gap: 4px; }
+.range-picker .range-on { background: var(--accent); color: #fff; }
+.dash-range { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; font-size: 13px; }
+.hist-chart { margin: 10px 0 14px; }
+.hist-head { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; font-size: 12px; margin-bottom: 4px; }
+.hist-title { font-weight: 600; }
+.hist-legend { display: flex; gap: 12px; flex-wrap: wrap; color: var(--text-muted); }
+.hist-legend-item { display: inline-flex; align-items: center; gap: 4px; }
+.hist-swatch { width: 10px; height: 3px; border-radius: 2px; display: inline-block; }
+.hist-svg { width: 100%; height: 120px; display: block; background: color-mix(in srgb, var(--text) 4%, transparent); border-radius: 8px; }

@@ -1,11 +1,4 @@
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useState,
-  type FormEvent,
-  type ReactNode,
-} from "react";
+import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
   addMember,
@@ -27,6 +20,9 @@ import {
   listMembers,
   listProtectedEnvironments,
   deleteProtectedEnvironment,
+  getWebhookLog,
+  type WebhookEntry,
+  type WebhookHealth,
   listRepoTemplates,
   listRunners,
   listSchedules,
@@ -510,6 +506,72 @@ function ArtifactsSection({ repo }: { repo: string }) {
         </div>
       ) : (
         <div className="muted">No artifacts for this repo yet.</div>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- Webhooks ---------------- */
+
+function WebhooksSection({ repo }: { repo: string }) {
+  const [health, setHealth] = useState<WebhookHealth | null>(null);
+  const [entries, setEntries] = useState<WebhookEntry[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    void getWebhookLog(repo)
+      .then((r) => {
+        setHealth(r.health);
+        setEntries(r.entries);
+      })
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+  }, [repo]);
+  if (error) return <div className="error-banner">{error}</div>;
+  if (!health) return <div className="muted">Loading…</div>;
+  const failing = health.rejected + health.errors;
+  return (
+    <div>
+      <p className="muted">
+        Last 24h: {health.accepted} accepted · {health.rejected} rejected signature · {health.errors} errors · {health.duplicates} duplicates
+        {health.sources > 0 && <> · from {health.sources} source{health.sources === 1 ? "" : "s"}</>}
+      </p>
+      {failing > 0 && (
+        <div className="error-banner">
+          {health.sources > 1 ? `This repo sends from ${health.sources} hooks; ` : ""}
+          {health.rejected > 0
+            ? `${health.rejected} deliver${health.rejected === 1 ? "y" : "ies"} failed the signature check${health.failing_sources?.length ? ` (from ${health.failing_sources.join(", ")})` : ""} — a hook with a stale or missing secret. Fix or delete it on the git host.`
+            : `${health.errors} deliver${health.errors === 1 ? "y" : "ies"} were rejected; see the reasons below.`}
+        </div>
+      )}
+      {entries.length === 0 ? (
+        <div className="muted">No deliveries logged yet.</div>
+      ) : (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>When</th>
+                <th>Event</th>
+                <th>Result</th>
+                <th>From</th>
+                <th>Pipeline</th>
+              </tr>
+            </thead>
+            <tbody>
+              {entries.map((e) => (
+                <tr key={e.id}>
+                  <td className="muted">{relativeTime(e.received_at)}</td>
+                  <td className="mono">{e.provider}{e.event ? ` · ${e.event}` : ""}</td>
+                  <td>
+                    <span className={`badge ${e.status < 300 ? "badge-success" : e.status === 202 ? "badge-created" : "badge-failed"}`}>{e.status}</span>
+                    {e.reason && <span className="muted"> {e.reason}</span>}
+                  </td>
+                  <td className="mono muted">{e.source_ip || "—"}</td>
+                  <td>{e.pipeline_id ? <Link to={`/pipelines/${e.pipeline_id}`}>#{e.pipeline_id}</Link> : <span className="muted">—</span>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   );
@@ -1472,6 +1534,18 @@ export default function RepoSettings() {
         }
       >
         <ArtifactsSection repo={repo} />
+      </Section>
+
+      <Section
+        title="Webhooks"
+        description={
+          <>
+            Every delivery the git host sent for this repo, accepted or not — so a
+            hook with a stale secret shows up here, not only in server logs.
+          </>
+        }
+      >
+        <WebhooksSection repo={repo} />
       </Section>
 
       <Section

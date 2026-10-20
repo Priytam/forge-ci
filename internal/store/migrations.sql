@@ -1006,3 +1006,42 @@ ALTER TABLE runners ADD COLUMN IF NOT EXISTS draining            BOOLEAN NOT NUL
 ALTER TABLE runners ADD COLUMN IF NOT EXISTS drain_requested_at  TIMESTAMPTZ;
 ALTER TABLE runners ADD COLUMN IF NOT EXISTS update_requested_at TIMESTAMPTZ;
 ALTER TABLE jobs    ADD COLUMN IF NOT EXISTS retry_when          TEXT[] NOT NULL DEFAULT '{always}';
+
+-- Observability (batch 16): webhook delivery log, hourly rollups for long
+-- history ranges.
+CREATE TABLE IF NOT EXISTS webhook_log (
+    id          BIGSERIAL   PRIMARY KEY,
+    received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    provider    TEXT        NOT NULL,
+    repo        TEXT        NOT NULL DEFAULT '',
+    event       TEXT        NOT NULL DEFAULT '',
+    status      INT         NOT NULL,
+    reason      TEXT        NOT NULL DEFAULT '',
+    delivery_id TEXT        NOT NULL DEFAULT '',
+    source_ip   TEXT        NOT NULL DEFAULT '',
+    pipeline_id BIGINT
+);
+CREATE INDEX IF NOT EXISTS webhook_log_repo_idx ON webhook_log (repo, id DESC);
+CREATE INDEX IF NOT EXISTS webhook_log_received_idx ON webhook_log (received_at);
+CREATE TABLE IF NOT EXISTS job_stats_hourly (
+    hour         TIMESTAMPTZ NOT NULL,
+    runner_id    TEXT        NOT NULL DEFAULT '',   -- '' = all runners
+    jobs_started INT         NOT NULL DEFAULT 0,
+    busy_seconds INT         NOT NULL DEFAULT 0,
+    wait_p50     DOUBLE PRECISION NOT NULL DEFAULT 0,
+    wait_p95     DOUBLE PRECISION NOT NULL DEFAULT 0,
+    dur_p50      DOUBLE PRECISION NOT NULL DEFAULT 0,
+    dur_p95      DOUBLE PRECISION NOT NULL DEFAULT 0,
+    finished     INT         NOT NULL DEFAULT 0,
+    failed       INT         NOT NULL DEFAULT 0,
+    PRIMARY KEY (hour, runner_id)
+);
+CREATE TABLE IF NOT EXISTS pipeline_stats_hourly (
+    hour    TIMESTAMPTZ NOT NULL,
+    repo    TEXT        NOT NULL,
+    success INT         NOT NULL DEFAULT 0,
+    failed  INT         NOT NULL DEFAULT 0,
+    other   INT         NOT NULL DEFAULT 0,
+    PRIMARY KEY (hour, repo)
+);
+CREATE INDEX IF NOT EXISTS jobs_started_at_idx ON jobs (started_at) WHERE started_at IS NOT NULL;

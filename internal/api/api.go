@@ -116,6 +116,7 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 	srv.registerRunnerPoolRoutes()
 	srv.registerRunnerOpRoutes()
 	srv.registerStatusRoutes()
+	srv.registerHistoryRoutes()
 
 	return srv
 }
@@ -246,7 +247,12 @@ func (s *Server) listRepos(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) dashboardStats(w http.ResponseWriter, r *http.Request) {
-	stats, err := s.store.DashboardStats(r.Context())
+	rg, err := parseRangeQuery(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	stats, err := s.store.DashboardStatsRange(r.Context(), rg)
 	if err != nil {
 		slog.Error("stats", "err", err)
 		writeErr(w, http.StatusInternalServerError, "failed to compute stats")
@@ -442,6 +448,9 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, renderQueueMetrics(load))
 	} else {
 		slog.Error("metrics: runner load", "err", err)
+	}
+	if lat, err := s.store.RecentLatency(r.Context(), time.Hour); err == nil {
+		_, _ = io.WriteString(w, renderLatencyMetrics(lat))
 	}
 }
 
@@ -1091,4 +1100,21 @@ func acquireLongPoll() time.Duration {
 		return d
 	}
 	return 25 * time.Second
+}
+
+// renderLatencyMetrics exports the last hour's queue wait and job duration
+// percentiles, and busy slots per runner — the "do we need more runners" and
+// "did builds get slower" signals, for alerting.
+func renderLatencyMetrics(l *store.Latency) string {
+	var b strings.Builder
+	b.WriteString("# HELP forge_job_queue_wait_seconds Time from queued to started over the last hour.\n# TYPE forge_job_queue_wait_seconds gauge\n")
+	fmt.Fprintf(&b, "forge_job_queue_wait_seconds{quantile=\"0.5\"} %.1f\nforge_job_queue_wait_seconds{quantile=\"0.95\"} %.1f\n", l.WaitP50, l.WaitP95)
+	b.WriteString("# HELP forge_job_duration_seconds Job run time over the last hour.\n# TYPE forge_job_duration_seconds gauge\n")
+	fmt.Fprintf(&b, "forge_job_duration_seconds{quantile=\"0.5\"} %.1f\nforge_job_duration_seconds{quantile=\"0.95\"} %.1f\n", l.DurationP50, l.DurationP95)
+	fmt.Fprintf(&b, "# HELP forge_jobs_started_last_hour Jobs started in the last hour.\n# TYPE forge_jobs_started_last_hour gauge\nforge_jobs_started_last_hour %d\n", l.JobsStarted)
+	b.WriteString("# HELP forge_runner_busy_slots Average busy slots per runner over the last hour.\n# TYPE forge_runner_busy_slots gauge\n")
+	for _, r := range l.Runners {
+		fmt.Fprintf(&b, "forge_runner_busy_slots{runner=%q} %.2f\n", r.RunnerID, r.BusySlots)
+	}
+	return b.String()
 }

@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { getIsAdmin, getRollout, getRunnerLoad, listRunners, relativeTime, runnerOp, setRunnerPaused, startRollout, stopRollout, type Rollout, type RunnerLoadRow } from "../api";
 import { usePoll } from "../hooks/usePoll";
 import RunnerPools from "../components/RunnerPools";
+import RunnerHistory from "../components/RunnerHistory";
 
 interface TagStat {
   tag: string;
@@ -92,6 +93,8 @@ export default function Runners() {
       </p>
 
       {isAdmin && <RunnerPools />}
+
+      <RunnerHistory runners={(runners ?? []).map((r) => String(r.id))} />
 
       <p className="muted page-lede">
         Guides: <Link to="/docs/runner-docker">Docker runner</Link> ·{" "}

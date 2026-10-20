@@ -29,13 +29,13 @@ import (
 // with Forge (PUT /api/v1/repo-configs). See docs/vcs-integration.md.
 
 func (s *Server) registerWebhookRoutes() {
-	s.mux.HandleFunc("POST /api/v1/webhooks/github", s.githubWebhook)
-	s.mux.HandleFunc("POST /api/v1/webhooks/bitbucket", s.bitbucketWebhook)
-	s.mux.HandleFunc("POST /api/v1/webhooks/gitlab", s.gitlabWebhook)
-	s.mux.HandleFunc("POST /api/v1/webhooks/gitea", s.giteaWebhook)
+	s.mux.HandleFunc("POST /api/v1/webhooks/github", s.logged("github", s.githubWebhook))
+	s.mux.HandleFunc("POST /api/v1/webhooks/bitbucket", s.logged("bitbucket", s.bitbucketWebhook))
+	s.mux.HandleFunc("POST /api/v1/webhooks/gitlab", s.logged("gitlab", s.gitlabWebhook))
+	s.mux.HandleFunc("POST /api/v1/webhooks/gitea", s.logged("gitea", s.giteaWebhook))
 	// CodeCommit has no webhooks: this route is fed by an EventBridge API
 	// Destination. See internal/api/webhooks_codecommit.go.
-	s.mux.HandleFunc("POST /api/v1/webhooks/codecommit", s.codecommitWebhook)
+	s.mux.HandleFunc("POST /api/v1/webhooks/codecommit", s.logged("codecommit", s.codecommitWebhook))
 	s.mux.HandleFunc("PUT /api/v1/repo-configs", s.putRepoConfig)
 	s.mux.HandleFunc("GET /api/v1/repo-configs", s.getRepoConfig)
 	s.mux.HandleFunc("GET /api/v1/repo-configs/versions", s.listConfigVersions)

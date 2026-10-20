@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
-import { getAbout, getIsAdmin, relativeTime, setMaintenance, type AboutInfo } from "../api";
+import { Link } from "react-router-dom";
+import { getAbout, getFailingWebhooks, getIsAdmin, relativeTime, setMaintenance, type AboutInfo, type WebhookHealth } from "../api";
 
 /** Admin: server and runner versions, migrations, uptime, maintenance mode. */
 export default function AdminAbout() {
@@ -7,7 +8,9 @@ export default function AdminAbout() {
   const [info, setInfo] = useState<AboutInfo | null>(null);
   const [message, setMessage] = useState("");
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [failing, setFailing] = useState<WebhookHealth[]>([]);
   const reload = useCallback(() => {
+    void getFailingWebhooks().then(setFailing).catch(() => undefined);
     void getAbout()
       .then((i) => {
         setInfo(i);
@@ -85,6 +88,38 @@ export default function AdminAbout() {
             This build is not stamped. Build with <code>-ldflags "-X github.com/priytamjeepandey/forge-ci/internal/buildinfo.Version=1.9.0"</code>{" "}
             (the Dockerfiles take <code>--build-arg VERSION=…</code>) so runners can tell when they are outdated.
           </p>
+        )}
+      </div>
+
+      <div className="card settings-form" style={{ marginTop: 16 }}>
+        <h2>Webhook health (24h)</h2>
+        {failing.length === 0 ? (
+          <p className="muted">No repo has had a rejected or failed webhook delivery in the last 24 hours.</p>
+        ) : (
+          <table className="dense-table">
+            <thead>
+              <tr>
+                <th>Repo</th>
+                <th>Accepted</th>
+                <th>Rejected signature</th>
+                <th>Errors</th>
+                <th>Sources</th>
+              </tr>
+            </thead>
+            <tbody>
+              {failing.map((f) => (
+                <tr key={f.repo}>
+                  <td>
+                    <Link to={`/repos/${encodeURIComponent(f.repo)}/settings`} className="mono">{f.repo}</Link>
+                  </td>
+                  <td>{f.accepted}</td>
+                  <td className={f.rejected > 0 ? "error-text" : ""}>{f.rejected}{f.failing_sources?.length ? <span className="muted"> ({f.failing_sources.join(", ")})</span> : null}</td>
+                  <td className={f.errors > 0 ? "error-text" : ""}>{f.errors}</td>
+                  <td>{f.sources}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         )}
       </div>
 

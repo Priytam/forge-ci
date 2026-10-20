@@ -1,5 +1,6 @@
-import { useId, useRef, useState, type ReactNode } from "react";
+import { useCallback, useId, useRef, useState, type ReactNode } from "react";
 import { getStats } from "../api";
+import RangePicker, { useRange } from "./RangePicker";
 import { usePoll } from "../hooks/usePoll";
 
 function hourLabel(hour: string): string {
@@ -303,14 +304,27 @@ function MiniChart({
 
 /* ---------------- Dashboard ---------------- */
 
+/** "▲4 vs last week" for a current/previous pair; null when nothing to compare. */
+function delta(cur: number, prev: number | undefined, unit = ""): { text: string; up: boolean } | null {
+  if (prev == null || prev < 0 || cur < 0) return null;
+  const d = cur - prev;
+  if (d === 0) return { text: "same as before", up: true };
+  return { text: `${d > 0 ? "▲" : "▼"}${Math.abs(d)}${unit} vs previous`, up: d > 0 };
+}
+
 export default function Dashboard() {
-  const { data } = usePoll(getStats, 5000);
+  const [range, setRange] = useRange();
+  const fetcher = useCallback(() => getStats(range), [range]);
+  const { data } = usePoll(fetcher, 5000);
 
   if (!data) return null;
   const { now } = data;
 
-  const rate = now.success_rate_24h;
-  const finished = now.finished_24h ?? 0;
+  const rangeLabel = range === "24h" ? "24h" : range === "7d" ? "7 days" : "30 days";
+  const rate = data.totals?.success_rate ?? now.success_rate_24h;
+  const finished = data.totals?.finished ?? now.finished_24h ?? 0;
+  const rateDelta = delta(rate, data.previous?.success_rate, "pt");
+  const runsDelta = delta(data.totals?.pipelines ?? 0, data.previous?.pipelines);
   const rateClass =
     rate < 0 ? "" : rate >= 90 ? "stat-good" : rate >= 70 ? "stat-warn" : "stat-bad";
 
@@ -318,6 +332,14 @@ export default function Dashboard() {
 
   return (
     <div className="dash">
+      <div className="dash-range">
+        <RangePicker value={range} onChange={setRange} />
+        {runsDelta && (
+          <span className="muted">
+            {data.totals.pipelines} pipeline{data.totals.pipelines === 1 ? "" : "s"} in the last {rangeLabel} · {runsDelta.text}
+          </span>
+        )}
+      </div>
       <div className="stat-grid">
         <StatTile
           value={now.running_jobs}
@@ -356,15 +378,17 @@ export default function Dashboard() {
               </>
             )
           }
-          label="Success rate 24h"
+          label={`Success rate ${rangeLabel}`}
           /* The sample size sits beside the percentage: without it, 0% of one
              run is indistinguishable from 0% of two hundred. */
           sublabel={
             rate < 0
               ? "no runs finished yet"
-              : now.blocked_jobs > 0
-                ? `${now.blocked_jobs} still awaiting approval`
-                : undefined
+              : rateDelta
+                ? rateDelta.text
+                : now.blocked_jobs > 0
+                  ? `${now.blocked_jobs} still awaiting approval`
+                  : undefined
           }
           valueClass={rateClass}
           accent={
@@ -380,7 +404,7 @@ export default function Dashboard() {
       </div>
 
       <MiniChart
-        title="Activity (24h)"
+        title={`Activity (${rangeLabel})`}
         hours={hours}
         legend
         endLabels
