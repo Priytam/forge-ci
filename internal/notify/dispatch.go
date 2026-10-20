@@ -87,7 +87,8 @@ func (s *Sender) emailEvent(ctx context.Context, cfg store.NotifySettings, to []
 		if ev.Link != "" {
 			fmt.Fprintf(&b, "\nOpen in Forge: %s\n", ev.Link)
 		}
-		if err := s.Email(ctx, cfg, []string{rcpt}, Message{Subject: "[Forge] " + ev.Title, Text: b.String(), Link: ev.Link}); err != nil {
+		links := ev.Actions[rcpt]
+		if err := s.Email(ctx, cfg, []string{rcpt}, Message{Subject: "[Forge] " + ev.Title, Text: b.String(), HTML: RenderHTML(ev, links), Link: ev.Link}); err != nil {
 			errs = append(errs, err)
 		}
 	}

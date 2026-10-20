@@ -96,8 +96,10 @@ func (s *Store) SaveNotifySettings(ctx context.Context, in NotifySettings) error
 			return err
 		}
 	}
-	st.EmailEnabled, st.SMTPHost, st.SMTPPort = in.EmailEnabled, in.SMTPHost, in.SMTPPort
-	st.SMTPUsername, st.SMTPFrom = in.SMTPUsername, in.SMTPFrom
+	// Whitespace from a paste must never reach the dialer (" smtp.gmail.com"
+	// fails every send with "no such host").
+	st.EmailEnabled, st.SMTPHost, st.SMTPPort = in.EmailEnabled, strings.TrimSpace(in.SMTPHost), in.SMTPPort
+	st.SMTPUsername, st.SMTPFrom = strings.TrimSpace(in.SMTPUsername), strings.TrimSpace(in.SMTPFrom)
 	raw, _ := json.Marshal(st)
 	_, err = s.pool.Exec(ctx,
 		`INSERT INTO platform_settings (key, value) VALUES ($1,$2)
@@ -237,4 +239,62 @@ func (s *Store) fillApprovers(ctx context.Context, n *ApprovalNotice, admins []s
 	}
 	sort.Strings(n.Approvers)
 	return nil
+}
+
+// DeliveryResult is how the last delivery on a channel went, and how many
+// in a row have failed.
+type DeliveryResult struct {
+	OK                  bool      `json:"ok"`
+	Error               string    `json:"error,omitempty"`
+	At                  time.Time `json:"at"`
+	ConsecutiveFailures int       `json:"consecutive_failures"`
+}
+
+func deliveryKey(channel string) string { return "notify_delivery:" + channel }
+
+// RecordDeliveryResult stores the outcome of one delivery on a channel.
+func (s *Store) RecordDeliveryResult(ctx context.Context, channel string, deliveryErr error) error {
+	prev, _ := s.deliveryResult(ctx, channel)
+	r := DeliveryResult{OK: deliveryErr == nil, At: time.Now()}
+	if deliveryErr != nil {
+		r.Error = deliveryErr.Error()
+		if len(r.Error) > 300 {
+			r.Error = r.Error[:300] + "…"
+		}
+		r.ConsecutiveFailures = prev.ConsecutiveFailures + 1
+	}
+	raw, _ := json.Marshal(r)
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO platform_settings (key, value) VALUES ($1,$2)
+		 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`, deliveryKey(channel), raw)
+	return err
+}
+
+func (s *Store) deliveryResult(ctx context.Context, channel string) (DeliveryResult, error) {
+	var raw []byte
+	var r DeliveryResult
+	err := s.pool.QueryRow(ctx, `SELECT value FROM platform_settings WHERE key=$1`, deliveryKey(channel)).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return r, nil
+	}
+	if err != nil {
+		return r, err
+	}
+	return r, json.Unmarshal(raw, &r)
+}
+
+// DeliveryStatus returns the last result per channel ("email", "slack");
+// channels that never delivered are absent.
+func (s *Store) DeliveryStatus(ctx context.Context) (map[string]DeliveryResult, error) {
+	out := map[string]DeliveryResult{}
+	for _, ch := range []string{"email", "slack"} {
+		r, err := s.deliveryResult(ctx, ch)
+		if err != nil {
+			return nil, err
+		}
+		if !r.At.IsZero() {
+			out[ch] = r
+		}
+	}
+	return out, nil
 }

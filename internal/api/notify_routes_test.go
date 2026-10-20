@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http/httptest"
 	"net/url"
@@ -162,4 +163,48 @@ func TestPipelineAndDeployEventClaims(t *testing.T) {
 		t.Errorf("deploys announced twice: %v", again)
 	}
 	_ = p2
+}
+
+func TestNotifySettingsTrimAndHealth(t *testing.T) {
+	h := newEnforcedHarness(t)
+	admin := h.login("admin@acme.io")
+	ctx := context.Background()
+	// A pasted host with a leading space is trimmed, not saved broken.
+	rec := h.do(admin, "PUT", "/api/v1/notification-settings?check=0", map[string]any{
+		"email_enabled": true, "smtp_host": " smtp.example.com ", "smtp_port": 587, "smtp_from": " forge@example.com ", "smtp_username": " bot ",
+	})
+	h.expect(rec, 200, "")
+	cfg, _ := h.st.GetNotifySettings(ctx, false)
+	if cfg.SMTPHost != "smtp.example.com" || cfg.SMTPFrom != "forge@example.com" || cfg.SMTPUsername != "bot" {
+		t.Errorf("not trimmed: %+v", cfg)
+	}
+	if rec := h.do(admin, "PUT", "/api/v1/notification-settings", map[string]any{"email_enabled": true, "smtp_host": "smtp .example.com", "smtp_from": "f@x"}); rec.Code != 400 || !strings.Contains(rec.Body.String(), "host name") {
+		t.Errorf("host with space = %d %s", rec.Code, rec.Body.String())
+	}
+	// Save with the check on: an unreachable server is reported inline, the save still lands.
+	rec = h.do(admin, "PUT", "/api/v1/notification-settings", map[string]any{"email_enabled": true, "smtp_host": "127.0.0.1", "smtp_port": 1, "smtp_from": "f@x.io"})
+	h.expect(rec, 200, "")
+	var view struct {
+		Check *struct {
+			OK    bool
+			Error string
+		} `json:"smtp_check"`
+		Delivery map[string]store.DeliveryResult `json:"delivery"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &view)
+	if view.Check == nil || view.Check.OK || !strings.Contains(view.Check.Error, "connect") {
+		t.Errorf("smtp_check = %+v", view.Check)
+	}
+	// Delivery health: failures accumulate, a success resets.
+	_ = h.st.RecordDeliveryResult(ctx, "email", errors.New("lookup  smtp.gmail.com: no such host"))
+	_ = h.st.RecordDeliveryResult(ctx, "email", errors.New("lookup  smtp.gmail.com: no such host"))
+	_ = json.Unmarshal(h.do(admin, "GET", "/api/v1/notification-settings", nil).Body.Bytes(), &view)
+	if d := view.Delivery["email"]; d.OK || d.ConsecutiveFailures != 2 || !strings.Contains(d.Error, "no such host") {
+		t.Errorf("delivery = %+v", d)
+	}
+	_ = h.st.RecordDeliveryResult(ctx, "email", nil)
+	_ = json.Unmarshal(h.do(admin, "GET", "/api/v1/notification-settings", nil).Body.Bytes(), &view)
+	if d := view.Delivery["email"]; !d.OK || d.ConsecutiveFailures != 0 {
+		t.Errorf("after success = %+v", d)
+	}
 }

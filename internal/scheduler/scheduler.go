@@ -60,8 +60,10 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Scheduler {
 		statusEnabled: os.Getenv("COMMIT_STATUS") != "off",
 		statusSem:     make(chan struct{}, 4),
 		inflight:      map[string]struct{}{},
-		sender:        &notify.Sender{},
-		notifyEvery:   notifyEvery,
+		sender: &notify.Sender{OnResult: func(ch string, err error) {
+			_ = s.RecordDeliveryResult(context.Background(), ch, err)
+		}},
+		notifyEvery: notifyEvery,
 	}
 }
 

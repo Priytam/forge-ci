@@ -69,6 +69,28 @@ person) and is audited as `approval.<verdict>` via email link. Slack and
 Teams messages carry an "Open in Forge" button instead: a channel-wide
 approve button would let anyone in the channel approve.
 
+## Email
+
+Emails are `multipart/alternative`: a plain-text part (what text-only
+clients show) and an HTML part — a coloured status banner (amber waiting for
+approval, red failed, green succeeded/fixed/deployed), the title and summary,
+a details table (repository, branch @ sha, environment, started by, who can
+approve…) and buttons: **Approve** / **Reject** (that recipient's signed
+links) and **Open in Forge**. Table layout and inline styles only, 560px
+wide, so Gmail, Outlook and phones render it; subjects are RFC 2047-encoded
+so a commit title in any language is safe. **Send test** uses the same
+template.
+
+### Health
+
+Saving the settings trims pasted whitespace, refuses a host with spaces, and
+— when email is enabled — **checks the connection** (dial, STARTTLS, sign-in;
+no mail is sent) and shows the result inline. The page shows the **last
+delivery** per channel ("last email: ok 2 min ago" / "failed — …") and a red
+banner when three or more deliveries in a row have failed.
+`GET /api/v1/notification-settings` returns `delivery` and, after a save,
+`smtp_check`; add `?check=0` to a `PUT` to skip the check.
+
 ## Details
 
 - The scheduler checks every 5 seconds. Each event is claimed once in the

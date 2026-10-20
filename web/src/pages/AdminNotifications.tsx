@@ -6,6 +6,7 @@ import {
   getNotifySettings,
   listNotificationRoutes,
   putNotifySettings,
+  relativeTime,
   testNotificationRoute,
   testNotify,
   updateNotificationRoute,
@@ -255,7 +256,13 @@ export default function AdminNotifications() {
       setCfg(saved);
       setSlackURL("");
       setPassword("");
-      setMsg({ ok: true, text: "Saved." });
+      if (saved.smtp_check && !saved.smtp_check.ok) {
+        setMsg({ ok: false, text: `Saved, but the SMTP server could not be reached: ${saved.smtp_check.error}` });
+      } else if (saved.smtp_check?.ok) {
+        setMsg({ ok: true, text: "Saved. SMTP connection and sign-in OK." });
+      } else {
+        setMsg({ ok: true, text: "Saved." });
+      }
     } catch (err) {
       setMsg({ ok: false, text: err instanceof Error ? err.message : String(err) });
     } finally {
@@ -288,8 +295,27 @@ export default function AdminNotifications() {
         event to Slack, Microsoft Teams, your own webhook, or email.
       </p>
 
+      {Object.entries(cfg.delivery ?? {}).some(([, d]) => d.consecutive_failures >= 3) && (
+        <div className="error-banner">
+          Notifications are failing:{" "}
+          {Object.entries(cfg.delivery ?? {})
+            .filter(([, d]) => d.consecutive_failures >= 3)
+            .map(([ch, d]) => `${ch} — ${d.consecutive_failures} in a row, last: ${d.error}`)
+            .join("; ")}
+        </div>
+      )}
+
       <form className="card settings-form" onSubmit={(e) => void save(e)}>
         <h2>Approval defaults</h2>
+        {cfg.delivery && Object.keys(cfg.delivery).length > 0 && (
+          <p className="muted">
+            {Object.entries(cfg.delivery).map(([ch, d]) => (
+              <span key={ch} style={{ marginRight: 16 }}>
+                last {ch}: {d.ok ? "ok" : <span className="error-text">failed — {d.error}</span>} ({relativeTime(d.at)})
+              </span>
+            ))}
+          </p>
+        )}
         <h3>Slack</h3>
         <label className="field">
           <span>Incoming webhook URL</span>

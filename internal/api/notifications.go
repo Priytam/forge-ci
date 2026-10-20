@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
+	"time"
 
 	"github.com/priytamjeepandey/forge-ci/internal/notify"
 	"github.com/priytamjeepandey/forge-ci/internal/store"
@@ -30,8 +32,29 @@ func (s *Server) getNotifySettings(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "failed to load notification settings")
 		return
 	}
-	writeJSON(w, http.StatusOK, cfg)
+	writeJSON(w, http.StatusOK, s.notifyView(r, cfg, nil))
 }
+
+// notifyView is the settings plus delivery health and, after a save, the
+// SMTP connection check.
+func (s *Server) notifyView(r *http.Request, cfg *store.NotifySettings, check *smtpCheck) map[string]any {
+	out := map[string]any{}
+	raw, _ := json.Marshal(cfg)
+	_ = json.Unmarshal(raw, &out)
+	delivery, _ := s.store.DeliveryStatus(r.Context())
+	out["delivery"] = delivery
+	if check != nil {
+		out["smtp_check"] = check
+	}
+	return out
+}
+
+type smtpCheck struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+var hostRe = regexp.MustCompile(`^[A-Za-z0-9.-]+$`)
 
 func (s *Server) putNotifySettings(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
@@ -43,8 +66,13 @@ func (s *Server) putNotifySettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in.SlackWebhookURL = strings.TrimSpace(in.SlackWebhookURL)
+	in.SMTPHost, in.SMTPUsername, in.SMTPFrom = strings.TrimSpace(in.SMTPHost), strings.TrimSpace(in.SMTPUsername), strings.TrimSpace(in.SMTPFrom)
 	if in.SlackWebhookURL != "" && !strings.HasPrefix(in.SlackWebhookURL, "https://") {
 		writeErr(w, http.StatusBadRequest, "slack_webhook_url must be an https:// incoming-webhook URL")
+		return
+	}
+	if in.SMTPHost != "" && !hostRe.MatchString(in.SMTPHost) {
+		writeErr(w, http.StatusBadRequest, "smtp_host must be a host name (no spaces, scheme or port)")
 		return
 	}
 	if in.EmailEnabled && (in.SMTPHost == "" || !strings.Contains(in.SMTPFrom, "@")) {
@@ -67,7 +95,22 @@ func (s *Server) putNotifySettings(w http.ResponseWriter, r *http.Request) {
 		"email_enabled": in.EmailEnabled,
 		"smtp_host":     in.SMTPHost,
 	})
-	s.getNotifySettings(w, r)
+	// Saved; now say whether the SMTP server can be reached and signed into,
+	// so a typo shows up here and not as silently undelivered mail later.
+	cfg, err := s.store.GetNotifySettings(r.Context(), false)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to load notification settings")
+		return
+	}
+	var check *smtpCheck
+	if cfg.EmailEnabled && r.URL.Query().Get("check") != "0" {
+		full, _ := s.store.GetNotifySettings(r.Context(), true)
+		check = &smtpCheck{OK: true}
+		if err := (&notify.Sender{Timeout: 10 * time.Second}).CheckSMTP(r.Context(), *full); err != nil {
+			check.OK, check.Error = false, err.Error()
+		}
+	}
+	writeJSON(w, http.StatusOK, s.notifyView(r, cfg, check))
 }
 
 // testNotify sends a sample approval notification on every configured
@@ -86,13 +129,15 @@ func (s *Server) testNotify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	me := s.sessionActor(r)
-	msg := notify.ApprovalMessage(store.ApprovalNotice{
+	// The same event and template a real approval wait produces.
+	ev := notify.ApprovalEvent(store.ApprovalNotice{
 		JobID: 0, JobName: "deploy_production (test)", Repo: "forge/test", Ref: "main",
 		SHA: "0000000000", Environment: "production", TriggeredBy: me, RequiredApprovals: 1,
 		ApproverRoles: []string{"owner", "admin"}, Approvers: []string{me},
 	}, frontendURL())
-	msg.Subject = "[Forge] Test notification"
-	if err := (&notify.Sender{}).Deliver(r.Context(), *cfg, []string{me}, msg); err != nil {
+	ev.Title = "Test notification — " + ev.Title
+	sender := &notify.Sender{OnResult: func(ch string, err error) { _ = s.store.RecordDeliveryResult(r.Context(), ch, err) }}
+	if err := sender.Dispatch(r.Context(), nil, cfg, ev); err != nil {
 		writeErr(w, http.StatusBadGateway, err.Error())
 		return
 	}

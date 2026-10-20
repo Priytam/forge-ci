@@ -1655,6 +1655,17 @@ export interface NotifySettings {
   has_smtp_password: boolean;
   smtp_from: string;
   clear_slack?: boolean;
+  /** last delivery per channel, when any has been attempted */
+  delivery?: Record<string, DeliveryResult>;
+  /** connection check run on save (email enabled) */
+  smtp_check?: { ok: boolean; error?: string };
+}
+
+export interface DeliveryResult {
+  ok: boolean;
+  error?: string;
+  at: string;
+  consecutive_failures: number;
 }
 
 export function getNotifySettings(): Promise<NotifySettings> {

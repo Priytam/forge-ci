@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/priytamjeepandey/forge-ci/internal/store"
 )
@@ -164,5 +166,60 @@ func TestDeliverSlackAndEmail(t *testing.T) {
 	}
 	if n := len(smtpSrv.messages()); n != 3 {
 		t.Errorf("email should still send when slack fails: %d messages", n)
+	}
+}
+
+func TestEmailIsMultipartWithEncodedSubject(t *testing.T) {
+	smtpSrv := newFakeSMTP(t)
+	cfg := store.NotifySettings{EmailEnabled: true, SMTPHost: "127.0.0.1", SMTPPort: smtpSrv.port(), SMTPFrom: "forge@acme.io"}
+	ev := Event{Kind: EventApprovalNeeded, Repo: "acme/ecom", Title: "acme/ecom: déploiement waits for approval", Text: "Needs 1 approval.\nmore",
+		Link: "https://forge/jobs/1", Fields: map[string]string{"Branch": "main @ abc12345"}, Approvers: []string{"ravi@acme.io"},
+		Actions: map[string]ApprovalLinks{"ravi@acme.io": {Approve: "https://forge/api/v1/approvals/link?t=A", Reject: "https://forge/api/v1/approvals/link?t=R"}}}
+	var results []string
+	s := &Sender{OnResult: func(ch string, err error) { results = append(results, fmt.Sprintf("%s:%v", ch, err == nil)) }}
+	if err := s.Dispatch(context.Background(), nil, &cfg, ev); err != nil {
+		t.Fatal(err)
+	}
+	mails := smtpSrv.messages()
+	if len(mails) != 1 {
+		t.Fatalf("mails = %d", len(mails))
+	}
+	m := mails[0]
+	for _, want := range []string{
+		"Subject: =?utf-8?q?", "multipart/alternative", "Content-Type: text/plain", "Content-Type: text/html",
+		"Approve</a>", "approvals/link?t=3DA", "Waiting for approval", "acme/ecom",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("mail missing %q:\n%s", want, m)
+		}
+	}
+	if strings.Contains(m, "Subject: acme/ecom: déploiement") {
+		t.Error("subject sent raw, not RFC 2047 encoded")
+	}
+	if strings.Join(results, ",") != "email:true" {
+		t.Errorf("results = %v", results)
+	}
+	// A plain Message (no HTML) stays single-part.
+	if err := s.Email(context.Background(), cfg, []string{"x@acme.io"}, Message{Subject: "plain", Text: "hi"}); err != nil {
+		t.Fatal(err)
+	}
+	if last := smtpSrv.messages()[1]; strings.Contains(last, "multipart") || !strings.Contains(last, "Content-Type: text/plain") {
+		t.Errorf("plain mail = %s", last)
+	}
+}
+
+func TestCheckSMTP(t *testing.T) {
+	smtpSrv := newFakeSMTP(t)
+	s := &Sender{Timeout: 2 * time.Second}
+	ok := store.NotifySettings{SMTPHost: "127.0.0.1", SMTPPort: smtpSrv.port(), SMTPFrom: "f@x", SMTPUsername: "u", SMTPPassword: "p"}
+	if err := s.CheckSMTP(context.Background(), ok); err != nil {
+		t.Errorf("check ok = %v", err)
+	}
+	if len(smtpSrv.messages()) != 0 {
+		t.Error("the check sent mail")
+	}
+	bad := store.NotifySettings{SMTPHost: "127.0.0.1", SMTPPort: 1, SMTPFrom: "f@x"}
+	if err := s.CheckSMTP(context.Background(), bad); err == nil || !strings.Contains(err.Error(), "connect to 127.0.0.1:1") {
+		t.Errorf("check bad = %v", err)
 	}
 }

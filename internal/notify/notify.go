@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"mime"
+	"mime/quotedprintable"
 	"net"
 	"net/http"
 	"net/smtp"
@@ -23,6 +25,7 @@ import (
 type Message struct {
 	Subject string
 	Text    string // plain text body
+	HTML    string // optional HTML alternative (RenderHTML)
 	Link    string // where to approve
 }
 
@@ -66,6 +69,15 @@ func ApprovalMessage(n store.ApprovalNotice, frontend string) Message {
 type Sender struct {
 	HTTP    *http.Client
 	Timeout time.Duration
+	// OnResult, when set, is told how each delivery went (channel "email" or
+	// "slack"), so the admin page can show "last email: ok / failed".
+	OnResult func(channel string, err error)
+}
+
+func (s *Sender) report(channel string, err error) {
+	if s.OnResult != nil {
+		s.OnResult(channel, err)
+	}
 }
 
 func (s *Sender) client() *http.Client {
@@ -94,12 +106,16 @@ func (s *Sender) Slack(ctx context.Context, webhookURL string, m Message) error 
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := s.client().Do(req)
 	if err != nil {
+		s.report("slack", err)
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("slack webhook returned %d", resp.StatusCode)
+		err := fmt.Errorf("slack webhook returned %d", resp.StatusCode)
+		s.report("slack", err)
+		return err
 	}
+	s.report("slack", nil)
 	return nil
 }
 
@@ -111,6 +127,105 @@ func slackEscape(s string) string {
 // otherwise STARTTLS when the server offers it. Recipients that are not
 // email addresses are skipped.
 func (s *Sender) Email(ctx context.Context, cfg store.NotifySettings, to []string, m Message) error {
+	err := s.email(ctx, cfg, to, m)
+	s.report("email", err)
+	return err
+}
+
+// smtpConnect dials, upgrades to TLS (implicit on 465, STARTTLS elsewhere
+// when offered) and authenticates. The caller closes the client.
+func (s *Sender) smtpConnect(ctx context.Context, cfg store.NotifySettings) (*smtp.Client, error) {
+	host := strings.TrimSpace(cfg.SMTPHost)
+	if host == "" || cfg.SMTPFrom == "" {
+		return nil, errors.New("email is enabled but smtp_host or smtp_from is not set")
+	}
+	port := cfg.SMTPPort
+	if port == 0 {
+		port = 587
+	}
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	timeout := s.Timeout
+	if timeout == 0 {
+		timeout = 15 * time.Second
+	}
+	dialer := &net.Dialer{Timeout: timeout}
+	var conn net.Conn
+	var err error
+	if port == 465 {
+		conn, err = tls.DialWithDialer(dialer, "tcp", addr, &tls.Config{ServerName: host})
+	} else {
+		conn, err = dialer.DialContext(ctx, "tcp", addr)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("connect to %s: %w", addr, err)
+	}
+	_ = conn.SetDeadline(time.Now().Add(timeout))
+	c, err := smtp.NewClient(conn, host)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	if port != 465 {
+		if ok, _ := c.Extension("STARTTLS"); ok {
+			if err := c.StartTLS(&tls.Config{ServerName: host}); err != nil {
+				c.Close()
+				return nil, fmt.Errorf("starttls: %w", err)
+			}
+		}
+	}
+	if cfg.SMTPUsername != "" {
+		if err := c.Auth(smtp.PlainAuth("", cfg.SMTPUsername, cfg.SMTPPassword, host)); err != nil {
+			c.Close()
+			return nil, fmt.Errorf("authentication failed for %s: %w", cfg.SMTPUsername, err)
+		}
+	}
+	return c, nil
+}
+
+// CheckSMTP verifies the settings reach and authenticate with the server
+// without sending mail.
+func (s *Sender) CheckSMTP(ctx context.Context, cfg store.NotifySettings) error {
+	c, err := s.smtpConnect(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	return c.Quit()
+}
+
+// encodeHeader makes a header value safe for non-ASCII (RFC 2047).
+func encodeHeader(v string) string {
+	v = strings.NewReplacer("\r", " ", "\n", " ").Replace(v)
+	return mime.QEncoding.Encode("utf-8", v)
+}
+
+// buildMail renders the message: text/plain alone, or multipart/alternative
+// with text and HTML parts, both quoted-printable.
+func buildMail(from, to string, m Message) []byte {
+	var b bytes.Buffer
+	fmt.Fprintf(&b, "From: %s\r\nTo: %s\r\nSubject: %s\r\nMIME-Version: 1.0\r\nDate: %s\r\n",
+		from, to, encodeHeader(m.Subject), time.Now().Format(time.RFC1123Z))
+	qp := func(body string) string {
+		var out bytes.Buffer
+		w := quotedprintable.NewWriter(&out)
+		_, _ = w.Write([]byte(strings.ReplaceAll(body, "\n", "\r\n")))
+		_ = w.Close()
+		return out.String()
+	}
+	if m.HTML == "" {
+		b.WriteString("Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n")
+		b.WriteString(qp(m.Text))
+		return b.Bytes()
+	}
+	boundary := fmt.Sprintf("forge-%d", time.Now().UnixNano())
+	fmt.Fprintf(&b, "Content-Type: multipart/alternative; boundary=%q\r\n\r\n", boundary)
+	fmt.Fprintf(&b, "--%s\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n%s\r\n", boundary, qp(m.Text))
+	fmt.Fprintf(&b, "--%s\r\nContent-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n%s\r\n", boundary, qp(m.HTML))
+	fmt.Fprintf(&b, "--%s--\r\n", boundary)
+	return b.Bytes()
+}
+
+func (s *Sender) email(ctx context.Context, cfg store.NotifySettings, to []string, m Message) error {
 	var rcpts []string
 	for _, r := range to {
 		if strings.Contains(r, "@") {
@@ -120,48 +235,11 @@ func (s *Sender) Email(ctx context.Context, cfg store.NotifySettings, to []strin
 	if len(rcpts) == 0 {
 		return nil
 	}
-	if cfg.SMTPHost == "" || cfg.SMTPFrom == "" {
-		return errors.New("email is enabled but smtp_host or smtp_from is not set")
-	}
-	port := cfg.SMTPPort
-	if port == 0 {
-		port = 587
-	}
-	addr := net.JoinHostPort(cfg.SMTPHost, strconv.Itoa(port))
-	timeout := s.Timeout
-	if timeout == 0 {
-		timeout = 15 * time.Second
-	}
-	dialer := &net.Dialer{Timeout: timeout}
-	var conn net.Conn
-	var err error
-	if port == 465 {
-		conn, err = tls.DialWithDialer(dialer, "tcp", addr, &tls.Config{ServerName: cfg.SMTPHost})
-	} else {
-		conn, err = dialer.DialContext(ctx, "tcp", addr)
-	}
+	c, err := s.smtpConnect(ctx, cfg)
 	if err != nil {
-		return err
-	}
-	_ = conn.SetDeadline(time.Now().Add(timeout))
-	c, err := smtp.NewClient(conn, cfg.SMTPHost)
-	if err != nil {
-		conn.Close()
 		return err
 	}
 	defer c.Close()
-	if port != 465 {
-		if ok, _ := c.Extension("STARTTLS"); ok {
-			if err := c.StartTLS(&tls.Config{ServerName: cfg.SMTPHost}); err != nil {
-				return err
-			}
-		}
-	}
-	if cfg.SMTPUsername != "" {
-		if err := c.Auth(smtp.PlainAuth("", cfg.SMTPUsername, cfg.SMTPPassword, cfg.SMTPHost)); err != nil {
-			return err
-		}
-	}
 	for _, r := range rcpts {
 		if err := c.Mail(cfg.SMTPFrom); err != nil {
 			return err
@@ -173,9 +251,9 @@ func (s *Sender) Email(ctx context.Context, cfg store.NotifySettings, to []strin
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(w, "From: %s\r\nTo: %s\r\nSubject: %s\r\nMIME-Version: 1.0\r\n"+
-			"Content-Type: text/plain; charset=utf-8\r\n\r\n%s",
-			cfg.SMTPFrom, r, m.Subject, strings.ReplaceAll(m.Text, "\n", "\r\n"))
+		if _, err := w.Write(buildMail(cfg.SMTPFrom, r, m)); err != nil {
+			return err
+		}
 		if err := w.Close(); err != nil {
 			return err
 		}
