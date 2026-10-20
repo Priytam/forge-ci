@@ -712,6 +712,11 @@ function MembersSection({ repo }: { repo: string }) {
                     {env.repo === "" && (
                       <span className="global-chip">global default</span>
                     )}
+                    {env.inactive && (
+                      <span className="badge badge-failed" title="No registered environment (or alias) has this name, so no job can match it. Delete it, or register the environment.">
+                        inactive
+                      </span>
+                    )}
                   </td>
                   <td>{env.required_approvals}</td>
                   <td>{env.approval_timeout_hours}</td>

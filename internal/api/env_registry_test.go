@@ -181,29 +181,26 @@ func TestEnvRegistryEnforcesBranchesAndAliases(t *testing.T) {
 	}
 }
 
-// TestEnvRegistryRefusesConflictingRename: when a repo already has approval
-// rules for both an alias and the canonical name, saving must change nothing.
-func TestEnvRegistryRefusesConflictingRename(t *testing.T) {
+// TestEnvRegistryFoldsConflictingRules: when a repo has approval rules for
+// both an alias and the canonical name, saving the registry folds them into
+// one canonical rule with the stricter settings (it used to refuse the save
+// and leave the weaker rule in place).
+func TestEnvRegistryFoldsConflictingRules(t *testing.T) {
 	h := newEnforcedHarness(t)
 	ctx := context.Background()
 	admin := h.login("admin@acme.io")
-	if _, err := h.db.Exec(ctx, `INSERT INTO protected_environments (repo, name) VALUES
-		('acme/app', 'prod'), ('acme/app', 'production')`); err != nil {
+	if _, err := h.db.Exec(ctx, `INSERT INTO protected_environments (repo, name, required_approvals, allow_self_approval) VALUES
+		('acme/app', 'prod', 3, FALSE), ('acme/app', 'production', 1, TRUE)`); err != nil {
 		t.Fatal(err)
 	}
 	rec := h.do(admin, "PUT", "/api/v1/environment-registry", testPolicy)
-	h.expect(rec, 409, "conflicting rename")
-	if !strings.Contains(rec.Body.String(), "acme/app") {
-		t.Errorf("conflict message should name the repo: %s", rec.Body.String())
-	}
-	var n int
-	_ = h.db.QueryRow(ctx, `SELECT count(*) FROM environment_registry`).Scan(&n)
-	if n != 0 {
-		t.Errorf("registry saved despite conflict")
-	}
-	_ = h.db.QueryRow(ctx, `SELECT count(*) FROM protected_environments WHERE name='prod'`).Scan(&n)
-	if n != 1 {
-		t.Errorf("rows renamed despite conflict")
+	h.expect(rec, 200, "fold instead of conflict")
+	var n, required int
+	var selfOK bool
+	_ = h.db.QueryRow(ctx, `SELECT count(*) FROM protected_environments WHERE repo='acme/app'`).Scan(&n)
+	_ = h.db.QueryRow(ctx, `SELECT required_approvals, allow_self_approval FROM protected_environments WHERE repo='acme/app' AND name='production'`).Scan(&required, &selfOK)
+	if n != 1 || required != 3 || selfOK {
+		t.Errorf("after fold: %d rules, required %d, self-approval %v; want 1 / 3 / false", n, required, selfOK)
 	}
 }
 

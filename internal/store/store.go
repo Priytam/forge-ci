@@ -128,6 +128,11 @@ func New(ctx context.Context, dsn string) (*Store, error) {
 		return nil, fmt.Errorf("oidc signing key: %w", err)
 	}
 	s.oidcSigner = signer
+	if n, err := s.FoldProtectedEnvRules(ctx); err != nil {
+		slog.Warn("approval rules: fold aliases", "err", err)
+	} else if n > 0 {
+		slog.Info("approval rules: folded alias/case-variant rules into registered names", "rules", n)
+	}
 	return s, nil
 }
 
@@ -796,6 +801,18 @@ func (s *Store) attachApprovals(ctx context.Context, repo string, jobs []proto.J
 			jobs[i].RequiredApprovals = rule.RequiredApprovals
 			jobs[i].RequiredGroup = rule.RequiredGroup
 			jobs[i].RequiredGroupApprovals = rule.RequiredGroupApprovals
+			if rule.RequiredGroup != "" {
+				members, _ := s.groupMembers(ctx, s.pool, rule.RequiredGroup)
+				for m := range members {
+					jobs[i].GroupMembers = append(jobs[i].GroupMembers, m)
+				}
+				sort.Strings(jobs[i].GroupMembers)
+				for _, v := range votes[jobs[i].ID] {
+					if v.Verdict == "approved" && members[strings.ToLower(v.Approver)] {
+						jobs[i].GroupApprovals++
+					}
+				}
+			}
 		}
 	}
 	return nil
@@ -1718,7 +1735,7 @@ func (s *Store) CancelDeadJobs(ctx context.Context) (int64, error) {
 // the global (repo=”) default.
 const protectedFor = `EXISTS (
 	SELECT 1 FROM protected_environments pe, pipelines p
-	WHERE p.id = j.pipeline_id AND pe.name = j.environment AND pe.repo IN ('', p.repo))`
+	WHERE p.id = j.pipeline_id AND lower(pe.name) = lower(j.environment) AND pe.repo IN ('', p.repo))`
 
 // frozenEnv is true when the job targets an environment currently inside a
 // deploy-freeze window (repo-specific or global). A frozen job is left in
@@ -1755,7 +1772,7 @@ func (s *Store) ExpireBlockedJobs(ctx context.Context) (int64, error) {
 		   AND j.blocked_at + make_interval(hours => (
 		       SELECT pe.approval_timeout_hours
 		       FROM protected_environments pe, pipelines p
-		       WHERE p.id = j.pipeline_id AND pe.name = j.environment
+		       WHERE p.id = j.pipeline_id AND lower(pe.name) = lower(j.environment)
 		         AND pe.repo IN ('', p.repo)
 		       ORDER BY pe.repo DESC LIMIT 1)) < now()`)
 	return tag.RowsAffected(), err

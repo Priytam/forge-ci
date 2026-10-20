@@ -257,14 +257,20 @@ func (s *Store) repoHasMembers(ctx context.Context, repo string) (bool, error) {
 
 // resolveProtectedEnv returns the approval rule for (repo, env): the
 // repo-specific row if present, else the global (repo=”) default, else nil.
+// The job's environment is canonicalised the same way saving a rule is
+// (registry alias or case variant → registered name), so a job stored under
+// an old spelling never matches a weaker leftover rule.
 func (s *Store) resolveProtectedEnv(ctx context.Context, repo, name string) (*proto.ProtectedEnvironment, error) {
+	if policy, err := s.GetEnvPolicy(ctx); err == nil && len(policy.Environments) > 0 {
+		name = policy.Canonical(name)
+	}
 	var pe proto.ProtectedEnvironment
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, repo, name, required_approvals, approval_timeout_hours,
 		        approver_roles, allow_self_approval, required_group, required_group_approvals
 		 FROM protected_environments
-		 WHERE name=$2 AND repo IN ('', $1)
-		 ORDER BY repo DESC LIMIT 1`, repo, name).
+		 WHERE lower(name)=lower($2) AND repo IN ('', $1)
+		 ORDER BY repo DESC, (name = $2) DESC LIMIT 1`, repo, name).
 		Scan(&pe.ID, &pe.Repo, &pe.Name, &pe.RequiredApprovals, &pe.ApprovalTimeoutHours,
 			&pe.ApproverRoles, &pe.AllowSelfApproval, &pe.RequiredGroup, &pe.RequiredGroupApprovals)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -295,7 +301,107 @@ func (s *Store) ListProtectedEnvs(ctx context.Context, repo string) ([]proto.Pro
 		}
 		out = append(out, pe)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// With a registry in use, a rule whose name is no registered environment
+	// (nor an alias of one) can never match a job: say so.
+	if policy, perr := s.GetEnvPolicy(ctx); perr == nil && len(policy.Environments) > 0 {
+		for i := range out {
+			out[i].Inactive = policy.Resolve(out[i].Name) == nil
+		}
+	}
+	return out, nil
+}
+
+// FoldProtectedEnvRules merges approval rules saved under an alias or case
+// variant of a registered environment into the canonical rule, keeping the
+// stricter settings (more approvals, shorter timeout, self-approval off,
+// the group requirement), so a job can never fall through to a weaker
+// leftover. Runs at start and when the registry is saved. Returns how many
+// rules were folded.
+func (s *Store) FoldProtectedEnvRules(ctx context.Context) (int, error) {
+	policy, err := s.GetEnvPolicy(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return s.foldProtectedEnvRules(ctx, policy)
+}
+
+func (s *Store) foldProtectedEnvRules(ctx context.Context, policy *EnvPolicy) (int, error) {
+	if policy == nil || len(policy.Environments) == 0 {
+		return 0, nil
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, repo, name, required_approvals, approval_timeout_hours, approver_roles,
+		        allow_self_approval, required_group, required_group_approvals
+		 FROM protected_environments ORDER BY repo, id`)
+	if err != nil {
+		return 0, err
+	}
+	var all []proto.ProtectedEnvironment
+	for rows.Next() {
+		var pe proto.ProtectedEnvironment
+		if err := rows.Scan(&pe.ID, &pe.Repo, &pe.Name, &pe.RequiredApprovals, &pe.ApprovalTimeoutHours,
+			&pe.ApproverRoles, &pe.AllowSelfApproval, &pe.RequiredGroup, &pe.RequiredGroupApprovals); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		all = append(all, pe)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	byKey := map[string]*proto.ProtectedEnvironment{} // repo|canonical name → the rule already using the canonical name
+	for i := range all {
+		if all[i].Name == policy.Canonical(all[i].Name) {
+			byKey[all[i].Repo+"|"+all[i].Name] = &all[i]
+		}
+	}
+	folded := 0
+	for i := range all {
+		pe := all[i]
+		canonical := policy.Canonical(pe.Name)
+		if canonical == pe.Name {
+			continue
+		}
+		target, exists := byKey[pe.Repo+"|"+canonical]
+		if !exists {
+			if _, err := s.pool.Exec(ctx, `UPDATE protected_environments SET name=$2 WHERE id=$1`, pe.ID, canonical); err != nil {
+				return folded, err
+			}
+			all[i].Name = canonical
+			byKey[pe.Repo+"|"+canonical] = &all[i]
+			folded++
+			continue
+		}
+		// Merge into the canonical rule: strictest of each setting.
+		if pe.RequiredApprovals > target.RequiredApprovals {
+			target.RequiredApprovals = pe.RequiredApprovals
+		}
+		if pe.ApprovalTimeoutHours > 0 && (target.ApprovalTimeoutHours == 0 || pe.ApprovalTimeoutHours < target.ApprovalTimeoutHours) {
+			target.ApprovalTimeoutHours = pe.ApprovalTimeoutHours
+		}
+		target.AllowSelfApproval = target.AllowSelfApproval && pe.AllowSelfApproval
+		if target.RequiredGroup == "" && pe.RequiredGroup != "" {
+			target.RequiredGroup, target.RequiredGroupApprovals = pe.RequiredGroup, pe.RequiredGroupApprovals
+		} else if pe.RequiredGroup == target.RequiredGroup && pe.RequiredGroupApprovals > target.RequiredGroupApprovals {
+			target.RequiredGroupApprovals = pe.RequiredGroupApprovals
+		}
+		if _, err := s.pool.Exec(ctx,
+			`UPDATE protected_environments SET required_approvals=$2, approval_timeout_hours=$3,
+			        allow_self_approval=$4, required_group=$5, required_group_approvals=$6 WHERE id=$1`,
+			target.ID, target.RequiredApprovals, target.ApprovalTimeoutHours, target.AllowSelfApproval,
+			target.RequiredGroup, target.RequiredGroupApprovals); err != nil {
+			return folded, err
+		}
+		if _, err := s.pool.Exec(ctx, `DELETE FROM protected_environments WHERE id=$1`, pe.ID); err != nil {
+			return folded, err
+		}
+		folded++
+	}
+	return folded, nil
 }
 
 // UpsertProtectedEnv creates or updates a repo-scoped approval rule.

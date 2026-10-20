@@ -152,3 +152,15 @@ func (s *Store) DeleteSession(ctx context.Context, token string) error {
 	_, err := s.pool.Exec(ctx, `DELETE FROM sessions WHERE token=$1`, token)
 	return err
 }
+
+// ExtendSession pushes a live session's expiry out by ttl from now.
+func (s *Store) ExtendSession(ctx context.Context, token string, ttl time.Duration) (*Session, error) {
+	tag, err := s.pool.Exec(ctx, `UPDATE sessions SET expires_at = now() + $2::interval WHERE token=$1 AND expires_at > now()`, token, ttl.String())
+	if err != nil {
+		return nil, err
+	}
+	if tag.RowsAffected() == 0 {
+		return nil, ErrNotFound
+	}
+	return s.GetSession(ctx, token)
+}

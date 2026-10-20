@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { getAuthProviders, ldapLogin, loginUrl, type AuthProviderInfo, type AuthProviders } from "../api";
 
 const LABELS: Record<string, string> = {
@@ -9,7 +9,7 @@ const LABELS: Record<string, string> = {
 };
 
 /** Username/password sign-in against the directory (LDAP / AD). */
-function DirectoryForm({ info }: { info: AuthProviderInfo }) {
+function DirectoryForm({ info, next }: { info: AuthProviderInfo; next: string }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
@@ -20,7 +20,7 @@ function DirectoryForm({ info }: { info: AuthProviderInfo }) {
     setError(null);
     try {
       await ldapLogin(username.trim(), password);
-      window.location.href = "/";
+      window.location.href = next || "/";
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setBusy(false);
@@ -46,6 +46,9 @@ function DirectoryForm({ info }: { info: AuthProviderInfo }) {
 }
 
 export default function Login() {
+  const [params] = useSearchParams();
+  const rawNext = params.get("next") ?? "";
+  const next = rawNext.startsWith("/") && !rawNext.startsWith("//") ? rawNext : "";
   const [data, setData] = useState<AuthProviders | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -82,7 +85,7 @@ export default function Login() {
                 type="button"
                 className={`btn login-btn login-${p.name}`}
                 onClick={() => {
-                  window.location.href = loginUrl(p.name);
+                  window.location.href = loginUrl(p.name, next);
                 }}
               >
                 {LABELS[p.name] ?? `Continue with ${p.label}`}
@@ -91,7 +94,7 @@ export default function Login() {
           </div>
         )}
         {buttons.length > 0 && directory && <div className="login-or muted">or</div>}
-        {directory && <DirectoryForm info={directory} />}
+        {directory && <DirectoryForm info={directory} next={next} />}
 
         {data && !data.enforced && (
           <p className="muted login-open">

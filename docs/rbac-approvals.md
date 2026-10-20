@@ -110,3 +110,33 @@ curl -X POST $FORGE/api/v1/protected-environments -d '{
 - A group named by a rule can't be deleted (409) until the rule changes.
 - Approval notifications include the group's members and say "at least M from
   <group>".
+
+
+## One environment, one rule
+
+Rule names are canonicalised through the environment registry (an alias or
+case variant such as `prod` or `production` becomes the registered
+`Production`), in three places so an old rule can never win silently:
+
+- **saving** a rule canonicalises its name;
+- **resolving** the rule for a job canonicalises the job's environment the
+  same way (and matches case-insensitively), so a job stored under an old
+  spelling meets the canonical rule;
+- **at start and whenever the registry is saved**, rules saved under an
+  alias or case variant are **folded** into the canonical rule, keeping the
+  stricter of each setting (more approvals, the shorter timeout, self-approval
+  off, the group requirement), and the leftover row is deleted. The server log
+  says how many were folded.
+
+A rule whose name matches no registered environment (nor an alias) is shown
+as **inactive** on the Members & approval rules page — no job can ever match
+it — with a Delete button.
+
+## Seeing why a job is still blocked
+
+Job detail (`GET /api/v1/jobs/{id}`) and the pipeline view both return the
+full gate: `required_approvals`, `required_group`,
+`required_group_approvals`, `group_approvals` (group votes so far) and
+`group_members`. The gate shows "1 of 2 from release-approvers — waiting on
+Ravi, Ashwin", and tells a viewer whose vote cannot release the job that
+their vote counts but one more is still needed from the group.

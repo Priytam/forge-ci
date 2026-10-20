@@ -84,6 +84,7 @@ func (s *Server) registerAuthRoutes() {
 	m.HandleFunc("GET /api/v1/auth/login/{provider}", s.authLogin)
 	m.HandleFunc("GET /api/v1/auth/callback/{provider}", s.authCallback)
 	m.HandleFunc("GET /api/v1/auth/me", s.authMe)
+	m.HandleFunc("POST /api/v1/auth/refresh", s.authRefresh)
 	m.HandleFunc("POST /api/v1/auth/logout", s.authLogout)
 	// Admin config.
 	m.HandleFunc("GET /api/v1/sso", s.listSSO)
@@ -206,8 +207,31 @@ func (s *Server) authProviders(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"providers": enabled, "provider_info": infos, "enforced": len(enabled) > 0})
 }
 
+const nextCookie = "forge_next"
+
+// rememberNext stores where to send the user after sign-in: a path on this
+// site only (never a full URL, so a crafted link can't bounce them elsewhere).
+func rememberNext(w http.ResponseWriter, r *http.Request) {
+	next := r.URL.Query().Get("next")
+	if !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") || len(next) > 2000 {
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: nextCookie, Value: next, Path: "/api/v1/auth", MaxAge: 600, HttpOnly: true,
+		SameSite: http.SameSiteLaxMode, Secure: strings.HasPrefix(externalURL(), "https://")})
+}
+
+// afterLoginURL is the frontend page to land on: the remembered path, else home.
+func afterLoginURL(w http.ResponseWriter, r *http.Request) string {
+	if c, err := r.Cookie(nextCookie); err == nil && strings.HasPrefix(c.Value, "/") && !strings.HasPrefix(c.Value, "//") {
+		http.SetCookie(w, &http.Cookie{Name: nextCookie, Value: "", Path: "/api/v1/auth", MaxAge: -1})
+		return frontendURL() + c.Value
+	}
+	return frontendURL()
+}
+
 func (s *Server) authLogin(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("provider")
+	rememberNext(w, r)
 	if name == "oidc" {
 		cfg, err := s.store.GetEnabledSSOProvider(r.Context(), name)
 		if err != nil {
@@ -306,7 +330,34 @@ func (s *Server) authCallback(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "failed to create session")
 		return
 	}
-	http.Redirect(w, r, frontendURL(), http.StatusFound)
+	http.Redirect(w, r, afterLoginURL(w, r), http.StatusFound)
+}
+
+// authRefresh extends the current session by the configured lifetime, for
+// the "session expires soon — stay signed in" prompt.
+func (s *Server) authRefresh(w http.ResponseWriter, r *http.Request) {
+	c, err := r.Cookie(sessionCookie)
+	if err != nil || c.Value == "" {
+		writeErr(w, http.StatusUnauthorized, "not signed in")
+		return
+	}
+	sess := s.currentSession(r)
+	if sess == nil || sess.Provider == apiTokenProvider || sess.Provider == serviceAccountProvider {
+		writeErr(w, http.StatusUnauthorized, "not a browser session")
+		return
+	}
+	ttl := s.sessionLifetime(r.Context())
+	sess, err = s.store.ExtendSession(r.Context(), c.Value, ttl)
+	if err != nil {
+		writeErr(w, http.StatusUnauthorized, "session has expired")
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name: sessionCookie, Value: c.Value, Path: "/",
+		MaxAge: int(ttl.Seconds()), HttpOnly: true, SameSite: http.SameSiteLaxMode,
+		Secure: strings.HasPrefix(externalURL(), "https://"),
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"expires_at": sess.Expires})
 }
 
 func (s *Server) authMe(w http.ResponseWriter, r *http.Request) {

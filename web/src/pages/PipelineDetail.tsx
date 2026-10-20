@@ -436,6 +436,8 @@ export default function PipelineDetail() {
                             required={job.required_approvals}
                             requiredGroup={job.required_group}
                             requiredGroupApprovals={job.required_group_approvals}
+                            groupApprovals={job.group_approvals}
+                            groupMembers={job.group_members}
                             status={job.status}
                             onDone={refresh}
                           />

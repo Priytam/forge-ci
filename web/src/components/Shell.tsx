@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
+import SessionWatch from "./SessionWatch";
 import { Link, NavLink, useLocation } from "react-router-dom";
 import { getIsAdmin } from "../api";
 import AuthMenu from "./AuthMenu";
@@ -133,6 +134,7 @@ export default function Shell({ children }: { children: ReactNode }) {
           </div>
         </header>
         <main className="content">{children}</main>
+        <SessionWatch />
       </div>
       <CommandPalette open={palette} onClose={() => setPalette(false)} />
     </div>

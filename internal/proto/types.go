@@ -100,6 +100,10 @@ type Job struct {
 	// approvals from members of this approver group.
 	RequiredGroup          string `json:"required_group,omitempty"`
 	RequiredGroupApprovals int    `json:"required_group_approvals,omitempty"`
+	// GroupApprovals: approved votes so far from the required group;
+	// GroupMembers: who could still supply one (the group's members).
+	GroupApprovals int      `json:"group_approvals,omitempty"`
+	GroupMembers   []string `json:"group_members,omitempty"`
 }
 
 // JobApproval is one recorded vote on an approval-gated job. Votes are
@@ -503,6 +507,9 @@ type ProtectedEnvironment struct {
 	// least this many must come from members of this approver group.
 	RequiredGroup          string `json:"required_group"`
 	RequiredGroupApprovals int    `json:"required_group_approvals"`
+	// Inactive: the environment registry is in use and this rule's name
+	// resolves to no registered environment, so no job can ever match it.
+	Inactive bool `json:"inactive,omitempty"`
 }
 
 // OIDCTokenResponse is a freshly minted per-job OIDC token (runner protocol).

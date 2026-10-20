@@ -122,6 +122,9 @@ export interface Job {
   /** the gate also needs required_group_approvals votes from this group */
   required_group?: string;
   required_group_approvals?: number;
+  /** approved votes so far from the required group, and its members */
+  group_approvals?: number;
+  group_members?: string[];
   /** why the job ended without running, e.g. a branch rule refused it */
   status_reason?: string;
   /** the job this one re-runs, when it came from "Retry job" */
@@ -241,6 +244,8 @@ export interface ProtectedEnvironment {
   /** of the required approvals, at least required_group_approvals from this group */
   required_group?: string;
   required_group_approvals?: number;
+  /** cannot match any registered environment (safe to delete) */
+  inactive?: boolean;
 }
 
 export interface RepoConfig {
@@ -363,7 +368,9 @@ async function parseError(res: Response): Promise<ApiError> {
     typeof window !== "undefined" &&
     !window.location.pathname.startsWith("/login")
   ) {
-    window.location.assign("/login");
+    // Come back to this page after signing in.
+    const next = window.location.pathname + window.location.search;
+    window.location.assign(next === "/" ? "/login" : `/login?next=${encodeURIComponent(next)}`);
   }
   return new ApiError(res.status, message);
 }
@@ -1019,8 +1026,14 @@ export function getIsAdmin(force = false): Promise<boolean> {
 }
 
 /** Full-page navigation target for starting an IdP login (302s to the IdP). */
-export function loginUrl(provider: string): string {
-  return `${BASE}/auth/login/${encodeURIComponent(provider)}`;
+export function loginUrl(provider: string, next?: string): string {
+  const base = `${BASE}/auth/login/${encodeURIComponent(provider)}`;
+  return next && next.startsWith("/") && !next.startsWith("//") ? `${base}?next=${encodeURIComponent(next)}` : base;
+}
+
+/** Extends the current session; returns the new expiry. */
+export function refreshSession(): Promise<{ expires_at: string }> {
+  return postJSON<{ expires_at: string }>("/auth/refresh", {});
 }
 
 export async function logout(): Promise<void> {

@@ -232,6 +232,12 @@ func (s *Store) SaveEnvPolicy(ctx context.Context, p EnvPolicy) error {
 	if err := p.Validate(); err != nil {
 		return err
 	}
+	// Approval rules saved under an alias or case variant of a registered
+	// name are folded into the canonical rule first, so the rename below
+	// never meets two rules for one environment.
+	if _, err := s.foldProtectedEnvRules(ctx, &p); err != nil {
+		return err
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err

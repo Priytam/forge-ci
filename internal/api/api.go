@@ -71,6 +71,7 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 	m.HandleFunc("POST /api/v1/pipelines/{id}/retry", srv.retryPipeline)
 	m.HandleFunc("GET /api/v1/repos", srv.listRepos)
 	m.HandleFunc("GET /api/v1/stats", srv.dashboardStats)
+	m.HandleFunc("GET /api/v1/jobs/{id}", srv.getJob)
 	m.HandleFunc("GET /api/v1/jobs/{id}/logs", srv.getLogs)
 	m.HandleFunc("GET /api/v1/jobs/{id}/logs/stream", srv.streamLogs)
 	m.HandleFunc("GET /api/v1/jobs/{id}/logs/summary", srv.logSummary)
@@ -1040,4 +1041,24 @@ func (s *Server) complete(w http.ResponseWriter, r *http.Request) {
 	}
 	slog.Info("job completed", "job", id, "reported", req.Status, "final", final, "exit_code", req.ExitCode)
 	w.WriteHeader(http.StatusOK)
+}
+
+// getJob returns one job with its approval gate (votes, requirement, group
+// progress) — the same shape the pipeline view carries per job.
+func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+	job, err := s.store.GetJob(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "job not found")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to load job")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"job": job})
 }

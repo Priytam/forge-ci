@@ -205,6 +205,15 @@ for them.
 
 ## Session lifetime
 
+Ten minutes before a session ends, the UI shows "Your session expires in N
+min — Stay signed in"; the button extends the session in place
+(`POST /api/v1/auth/refresh`), so a form in progress is not lost. If a
+session has already expired, the next request sends the browser to the login
+page with `?next=<page>`, and sign-in returns to that page (same-site paths
+only).
+
+
+
 New sign-ins last **12 hours** by default. Change it on the admin page
 (1 hour to 30 days) or with `SESSION_TTL` (a Go duration, e.g. `72h`); the
 admin setting wins.

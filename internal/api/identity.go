@@ -322,7 +322,7 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request, cfg *store
 		writeErr(w, code, err.Error())
 		return
 	}
-	http.Redirect(w, r, frontendURL(), http.StatusFound)
+	http.Redirect(w, r, afterLoginURL(w, r), http.StatusFound)
 }
 
 // idTokenClaims decodes an ID token received directly from the token
