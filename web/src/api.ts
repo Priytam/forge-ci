@@ -178,6 +178,10 @@ export interface Runner {
   draining?: boolean;
   update_requested?: boolean;
   running_jobs?: number;
+  /** job slots (the runner's --concurrency; 1 for older runners) */
+  concurrency?: number;
+  /** not seen for a day: left out of capacity and tag counts, removable */
+  stale?: boolean;
 }
 
 export interface Artifact {
@@ -514,6 +518,11 @@ export function listRunners(): Promise<Runner[]> {
   return getJSON<Runner[]>("/runners");
 }
 
+/** Admin: remove an offline, idle runner (409 when it is online or busy). */
+export function deleteRunner(id: string): Promise<void> {
+  return requestVoid("DELETE", `/runners/${encodeURIComponent(id)}`);
+}
+
 export function setRunnerPaused(
   id: number | string,
   paused: boolean
@@ -822,6 +831,8 @@ export function deleteFreeze(
 export interface AuditEntry {
   id: number;
   ts: string;
+  /** same instant as ts */
+  created_at: string;
   actor: string;
   action: string;
   target: string;
@@ -962,15 +973,46 @@ export function getStats(range = "24h"): Promise<Stats> {
 
 // ---- runner history and webhook health ----
 
+/** A time range as the history endpoints take it: a preset, or custom from/to (RFC 3339). */
+export interface RangeQuery {
+  range: string;
+  from?: string;
+  to?: string;
+}
+
+function rangeSearch(r: RangeQuery, extra: Record<string, string | undefined> = {}): string {
+  const q = new URLSearchParams({ range: r.range });
+  if (r.range === "custom") {
+    if (r.from) q.set("from", r.from);
+    if (r.to) q.set("to", r.to);
+  }
+  for (const [k, v] of Object.entries(extra)) if (v) q.set(k, v);
+  return q.toString();
+}
+
 export interface HistoryBucket {
   at: string;
+  /** the history doesn't cover this bucket (not rolled up): a gap, not a zero */
+  no_data?: boolean;
   jobs_started: number;
   busy_seconds: number;
   busy_slots: number;
-  wait_p50: number;
-  wait_p95: number;
-  duration_p50: number;
-  duration_p95: number;
+  /** percentiles are null when nothing was measured in the bucket */
+  wait_p50: number | null;
+  wait_p95: number | null;
+  duration_p50: number | null;
+  duration_p95: number | null;
+  finished: number;
+  failed: number;
+}
+
+export interface HistorySummary {
+  jobs_started: number;
+  busy_seconds: number;
+  wait_p50: number | null;
+  wait_p95: number | null;
+  duration_p50: number | null;
+  duration_p95: number | null;
   finished: number;
   failed: number;
 }
@@ -978,22 +1020,40 @@ export interface HistoryBucket {
 export interface RunnerHistoryResponse {
   range: { from: string; to: string; bucket_seconds: number; label: string };
   buckets: HistoryBucket[];
+  summary: HistorySummary;
 }
 
-export function getRunnerHistory(range: string, filter: { runner?: string; repo?: string; job?: string } = {}): Promise<RunnerHistoryResponse> {
-  const q = new URLSearchParams({ range });
-  if (filter.runner) q.set("runner", filter.runner);
-  if (filter.repo) q.set("repo", filter.repo);
-  if (filter.job) q.set("job", filter.job);
-  return getJSON<RunnerHistoryResponse>(`/runner-history?${q.toString()}`);
+export interface HistoryFilter {
+  runner?: string;
+  repo?: string;
+  job?: string;
 }
 
-export function getHistoryJobs(from: string, to: string, filter: { runner?: string; repo?: string; job?: string } = {}): Promise<JobRow[]> {
+export function getRunnerHistory(range: RangeQuery, filter: HistoryFilter = {}): Promise<RunnerHistoryResponse> {
+  return getJSON<RunnerHistoryResponse>(`/runner-history?${rangeSearch(range, { ...filter })}`);
+}
+
+export function getHistoryJobs(from: string, to: string, filter: HistoryFilter = {}, limit?: number): Promise<JobRow[]> {
   const q = new URLSearchParams({ from, to });
   if (filter.runner) q.set("runner", filter.runner);
   if (filter.repo) q.set("repo", filter.repo);
   if (filter.job) q.set("job", filter.job);
+  if (limit) q.set("limit", String(limit));
   return getJSON<{ jobs: JobRow[] }>(`/runner-history/jobs?${q.toString()}`).then((r) => r.jobs ?? []);
+}
+
+/** A runner operation, maintenance window or Forge deploy on the time axis. */
+export interface RunnerEvent {
+  at: string;
+  action: string;
+  target: string;
+  /** admin-only */
+  actor?: string;
+  detail?: Record<string, unknown>;
+}
+
+export function getRunnerEvents(range: RangeQuery, runner?: string): Promise<RunnerEvent[]> {
+  return getJSON<{ events: RunnerEvent[] }>(`/runner-events?${rangeSearch(range, { runner })}`).then((r) => r.events ?? []);
 }
 
 export interface WebhookHealth {
@@ -1899,21 +1959,30 @@ export interface RunnerLoadRow {
   paused: boolean;
   online: boolean;
   last_contact_at: string;
+  concurrency: number;
   running: number;
   running_jobs: { job_id: number; pipeline_id: number; repo: string; name: string; started_at: string }[];
-  jobs_24h: number;
-  busy_seconds_24h: number;
+  /** jobs started, and busy seconds, within the load's from/to */
+  jobs: number;
+  busy_seconds: number;
 }
 
 export interface RunnerLoad {
+  from: string;
+  to: string;
   queues: QueueStat[];
   runners: RunnerLoadRow[];
   pending: number;
   running: number;
 }
 
-export function getRunnerLoad(): Promise<RunnerLoad> {
-  return getJSON<RunnerLoad>("/runner-load");
+export function getRunnerLoad(range: RangeQuery = { range: "24h" }): Promise<RunnerLoad> {
+  return getJSON<RunnerLoad>(`/runner-load?${rangeSearch(range)}`);
+}
+
+/** The runners page's live feed: {runners, load} on connect and on change. */
+export function runnerStreamURL(range: RangeQuery): string {
+  return `${BASE}/runners/stream?${rangeSearch(range)}`;
 }
 
 // ---- template catalog ----

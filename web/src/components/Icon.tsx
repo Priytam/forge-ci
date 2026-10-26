@@ -21,6 +21,20 @@ const PATHS: Record<string, string> = {
   plus: "M8 3v10M3 8h10",
   play: "M5 3.5v9l7-4.5-7-4.5Z",
   bell: "M4 11V7a4 4 0 0 1 8 0v4l1.5 1.5h-11L4 11ZM6.5 13.5a1.5 1.5 0 0 0 3 0",
+  more: "M8 3.5v.01M8 8v.01M8 12.5v.01",
+  close: "M4 4l8 8M12 4l-8 8",
+  copy: "M5.5 5.5h7v7h-7zM3.5 10.5v-7h7",
+  check: "M3.5 8.5 6.5 11.5 12.5 4.5",
+  chevron: "M4 6l4 4 4-4",
+  pause: "M6 4v8M10 4v8",
+  drain: "M8 3v7M5 7.5 8 10.5l3-3M4 13h8",
+  upgrade: "M8 13V6M5 8.5 8 5.5l3 3M4 3h8",
+  trash: "M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.5 9h6l.5-9",
+  offline: "M8 8a2 2 0 1 0 0 .01M3 3l10 10",
+  activity: "M2 8h2.5L6 4l4 8 1.5-4H14",
+  dot: "M8 6a2 2 0 1 0 0 4 2 2 0 0 0 0-4Z",
+  alert: "M8 2.5 14 13H2L8 2.5ZM8 6.5v3M8 11.2v.01",
+  layers: "M8 2 2 5l6 3 6-3-6-3ZM2 8l6 3 6-3",
 };
 
 export type IconName = keyof typeof PATHS;
