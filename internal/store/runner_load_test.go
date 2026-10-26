@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/priytamjeepandey/forge-ci/internal/proto"
 )
@@ -23,7 +24,7 @@ func TestRunnerLoadQueuesByTags(t *testing.T) {
 	if _, err := st.AcquireJob(ctx, proto.AcquireRequest{RunnerID: "lin-1", Tags: []string{"linux"}}); err != nil {
 		t.Fatal(err)
 	}
-	load, err := st.GetRunnerLoad(ctx)
+	load, err := st.GetRunnerLoad(ctx, time.Now().Add(-24*time.Hour), time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,5 +48,32 @@ func TestRunnerLoadQueuesByTags(t *testing.T) {
 	_ = st.pool.QueryRow(ctx, `SELECT count(*) FROM jobs WHERE status='pending' AND queued_at IS NOT NULL`).Scan(&queued)
 	if queued != 3 {
 		t.Errorf("pending jobs with queued_at = %d, want 3", queued)
+	}
+}
+
+// TestDeployRecordedAsEvent: a server start on a new version is a deploy
+// event the runners page marks on its charts; a restart on the same version
+// is not.
+func TestDeployRecordedAsEvent(t *testing.T) {
+	st := newArtifactsTestStore(t)
+	ctx := context.Background()
+	st.recordSchemaStatus(ctx, "aaa1111")
+	st.recordSchemaStatus(ctx, "bbb2222")
+	st.recordSchemaStatus(ctx, "bbb2222")
+	events, err := st.ListEvents(ctx, time.Now().Add(-time.Hour), time.Now().Add(time.Minute), "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var deploys []AuditEntry
+	for _, e := range events {
+		if e.Action == "server.upgrade" {
+			deploys = append(deploys, e)
+		}
+	}
+	// store.New already recorded this binary's version (dev), so both
+	// version changes are deploys and the same-version restart is not.
+	if len(deploys) != 2 || deploys[0].Target != "aaa1111" || deploys[1].Target != "bbb2222" ||
+		deploys[1].Detail["from"] != "aaa1111" || deploys[1].Actor != "system" {
+		t.Errorf("deploy events = %+v", deploys)
 	}
 }

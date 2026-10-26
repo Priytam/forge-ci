@@ -139,7 +139,7 @@ func main() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			req := proto.AcquireRequest{RunnerID: *runnerID, Executor: exec.Name(), Tags: tags, Version: buildinfo.Version}
+			req := proto.AcquireRequest{RunnerID: *runnerID, Executor: exec.Name(), Tags: tags, Version: buildinfo.Version, Concurrency: *conc}
 			for drainCtx.Err() == nil {
 				job, action, err := acquire(drainCtx, c, req)
 				if err != nil {

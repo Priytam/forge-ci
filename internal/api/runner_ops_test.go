@@ -141,7 +141,7 @@ func TestRolloutAdvancesOneRunnerAtATime(t *testing.T) {
 	h := newEnforcedHarness(t)
 	ctx := context.Background()
 	for _, r := range []struct{ id, v string }{{"a", "1.0.0"}, {"b", "1.0.0"}, {"c", "2.0.0"}} {
-		if _, err := h.st.TouchRunnerV(ctx, r.id, "shell", nil, r.v); err != nil {
+		if _, err := h.st.TouchRunnerV(ctx, r.id, "shell", nil, r.v, 1); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -160,7 +160,7 @@ func TestRolloutAdvancesOneRunnerAtATime(t *testing.T) {
 		t.Errorf("second pass moved on to %q", again)
 	}
 	// It comes back upgraded: request cleared, drain lifted, next runner picked.
-	if _, err := h.st.TouchRunnerV(ctx, first, "shell", nil, "2.0.0"); err != nil {
+	if _, err := h.st.TouchRunnerV(ctx, first, "shell", nil, "2.0.0", 1); err != nil {
 		t.Fatal(err)
 	}
 	if st, _ := h.st.RunnerState(ctx, first); st.Draining || st.UpdateRequested {
@@ -170,7 +170,7 @@ func TestRolloutAdvancesOneRunnerAtATime(t *testing.T) {
 	if second == "" || second == first || second == "c" {
 		t.Errorf("second = %q", second)
 	}
-	_, _ = h.st.TouchRunnerV(ctx, second, "shell", nil, "2.0.0")
+	_, _ = h.st.TouchRunnerV(ctx, second, "shell", nil, "2.0.0", 1)
 	if last, _ := h.st.AdvanceRollout(ctx, time.Minute); last != "" {
 		t.Errorf("rollout should be complete, got %q", last)
 	}

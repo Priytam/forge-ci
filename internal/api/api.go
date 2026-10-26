@@ -117,6 +117,7 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 	srv.registerRunnerOpRoutes()
 	srv.registerStatusRoutes()
 	srv.registerHistoryRoutes()
+	srv.registerRunnerLiveRoutes()
 
 	return srv
 }
@@ -444,7 +445,7 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 	if s.logs != nil {
 		_, _ = io.WriteString(w, s.logs.Metrics().Render(s.logs.Backend()))
 	}
-	if load, err := s.store.GetRunnerLoad(r.Context()); err == nil {
+	if load, err := s.store.GetRunnerLoad(r.Context(), time.Now().Add(-24*time.Hour), time.Now()); err == nil {
 		_, _ = io.WriteString(w, renderQueueMetrics(load))
 	} else {
 		slog.Error("metrics: runner load", "err", err)
@@ -486,9 +487,15 @@ func renderQueueMetrics(l *store.RunnerLoad) string {
 
 // runnerLoad serves the runner load page: queue depth per required tag set
 // (with how many eligible runners are online/busy) and what each runner is
-// doing.
+// doing, with per-runner jobs and busy time over ?range= (24h|7d|30d|custom
+// &from&to, as the history), so the table follows the page's range picker.
 func (s *Server) runnerLoad(w http.ResponseWriter, r *http.Request) {
-	load, err := s.store.GetRunnerLoad(r.Context())
+	rg, err := parseRangeQuery(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	load, err := s.store.GetRunnerLoad(r.Context(), rg.From, rg.To)
 	if err != nil {
 		slog.Error("runner load", "err", err)
 		writeErr(w, http.StatusInternalServerError, "failed to load runner load")

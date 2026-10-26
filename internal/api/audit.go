@@ -75,7 +75,7 @@ func (s *Server) registerAuditRoutes() {
 }
 
 // listAuditLog returns a page of audit entries, newest first, admin-only.
-// Filterable by ?repo and ?actor; paginated by ?limit (default 50, cap 200) and
+// Filterable by ?repo, ?actor, ?target and ?action (a prefix); paginated by ?limit (default 50, cap 200) and
 // ?offset. Secret detail is never stored, so responses are secret-free.
 func (s *Server) listAuditLog(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
@@ -85,6 +85,8 @@ func (s *Server) listAuditLog(w http.ResponseWriter, r *http.Request) {
 	entries, err := s.store.ListAudit(r.Context(), store.AuditFilter{
 		Repo:   r.URL.Query().Get("repo"),
 		Actor:  r.URL.Query().Get("actor"),
+		Target: r.URL.Query().Get("target"),
+		Action: r.URL.Query().Get("action"),
 		Limit:  limit,
 		Offset: offset,
 	})

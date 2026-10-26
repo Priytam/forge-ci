@@ -77,18 +77,36 @@ func (r Range) bucketStart(t time.Time) time.Time {
 	return t.UTC().Truncate(r.Bucket)
 }
 
-// HistoryBucket is one point of the runner history.
+// HistoryBucket is one point of the runner history. Percentiles are null
+// when the bucket has nothing to measure (no job started / none finished),
+// and NoData marks a bucket the history doesn't cover (an hour not rolled up
+// yet, or before rollups began) — a gap, not a zero.
 type HistoryBucket struct {
 	At          time.Time `json:"at"`
+	NoData      bool      `json:"no_data,omitempty"`
 	JobsStarted int       `json:"jobs_started"`
 	BusySeconds int       `json:"busy_seconds"`
 	BusySlots   float64   `json:"busy_slots"` // busy_seconds / bucket seconds
-	WaitP50     float64   `json:"wait_p50"`   // queued_at → started_at, seconds
-	WaitP95     float64   `json:"wait_p95"`
-	DurationP50 float64   `json:"duration_p50"` // started_at → finished_at, seconds
-	DurationP95 float64   `json:"duration_p95"`
+	WaitP50     *float64  `json:"wait_p50"`   // queued_at → started_at, seconds
+	WaitP95     *float64  `json:"wait_p95"`
+	DurationP50 *float64  `json:"duration_p50"` // started_at → finished_at, seconds
+	DurationP95 *float64  `json:"duration_p95"`
 	Finished    int       `json:"finished"`
 	Failed      int       `json:"failed"`
+}
+
+// HistorySummary is the whole range in one figure per measure (the KPI
+// tiles): exact percentiles for live ranges, job-weighted hourly ones from
+// rollups.
+type HistorySummary struct {
+	JobsStarted int      `json:"jobs_started"`
+	BusySeconds int      `json:"busy_seconds"`
+	WaitP50     *float64 `json:"wait_p50"`
+	WaitP95     *float64 `json:"wait_p95"`
+	DurationP50 *float64 `json:"duration_p50"`
+	DurationP95 *float64 `json:"duration_p95"`
+	Finished    int      `json:"finished"`
+	Failed      int      `json:"failed"`
 }
 
 // HistoryFilter narrows the history.
@@ -98,50 +116,91 @@ type HistoryFilter struct {
 	Job    string // job name
 }
 
-// RunnerHistory returns the dense bucket series for a range.
-func (s *Store) RunnerHistory(ctx context.Context, r Range, f HistoryFilter) ([]HistoryBucket, error) {
+// weighted accumulates job-weighted means of hourly percentiles.
+type weighted struct{ sum, n float64 }
+
+func (w *weighted) add(v float64, n int) {
+	w.sum += v * float64(n)
+	w.n += float64(n)
+}
+
+func (w weighted) value() *float64 {
+	if w.n == 0 {
+		return nil
+	}
+	v := w.sum / w.n
+	return &v
+}
+
+// RunnerHistory returns the dense bucket series for a range and its summary.
+func (s *Store) RunnerHistory(ctx context.Context, r Range, f HistoryFilter) ([]HistoryBucket, HistorySummary, error) {
 	byAt := map[time.Time]*HistoryBucket{}
-	if r.useRollups() && f.Repo == "" && f.Job == "" {
+	var sum HistorySummary
+	covered := map[time.Time]bool{} // rollup hours present; live ranges cover everything
+	rollups := r.useRollups() && f.Repo == "" && f.Job == ""
+	if rollups {
+		type acc struct{ w50, w95, d50, d95 weighted }
+		accs := map[time.Time]*acc{}
+		var total acc
 		rows, err := s.pool.Query(ctx,
-			`SELECT hour, jobs_started, busy_seconds, wait_p50, wait_p95, dur_p50, dur_p95, finished, failed
+			`SELECT hour, runner_id, jobs_started, busy_seconds, wait_p50, wait_p95, dur_p50, dur_p95, finished, failed
 			 FROM job_stats_hourly
-			 WHERE hour >= $1 AND hour < $2 AND runner_id = $3`, r.From, r.To, f.Runner)
+			 WHERE hour >= $1 AND hour < $2 AND (runner_id = $3 OR runner_id = '')`, r.From, r.To, f.Runner)
 		if err != nil {
-			return nil, err
+			return nil, sum, err
 		}
 		defer rows.Close()
 		for rows.Next() {
 			var h time.Time
+			var runner string
 			var b HistoryBucket
 			var w50, w95, d50, d95 float64
-			if err := rows.Scan(&h, &b.JobsStarted, &b.BusySeconds, &w50, &w95, &d50, &d95, &b.Finished, &b.Failed); err != nil {
-				return nil, err
+			if err := rows.Scan(&h, &runner, &b.JobsStarted, &b.BusySeconds, &w50, &w95, &d50, &d95, &b.Finished, &b.Failed); err != nil {
+				return nil, sum, err
 			}
 			at := r.bucketStart(h)
-			acc := byAt[at]
-			if acc == nil {
-				acc = &HistoryBucket{At: at}
-				byAt[at] = acc
+			// Every rolled-up hour has an all-runners ('') row, even an
+			// empty one: that is what says the hour is covered.
+			if runner == "" {
+				covered[at] = true
 			}
-			// Percentiles of hourly percentiles: weighted by jobs started.
-			n := float64(acc.JobsStarted + b.JobsStarted)
-			if n > 0 {
-				acc.WaitP50 = (acc.WaitP50*float64(acc.JobsStarted) + w50*float64(b.JobsStarted)) / n
-				acc.WaitP95 = (acc.WaitP95*float64(acc.JobsStarted) + w95*float64(b.JobsStarted)) / n
-				acc.DurationP50 = (acc.DurationP50*float64(acc.JobsStarted) + d50*float64(b.JobsStarted)) / n
-				acc.DurationP95 = (acc.DurationP95*float64(acc.JobsStarted) + d95*float64(b.JobsStarted)) / n
+			if runner != f.Runner {
+				continue
 			}
-			acc.JobsStarted += b.JobsStarted
-			acc.BusySeconds += b.BusySeconds
-			acc.Finished += b.Finished
-			acc.Failed += b.Failed
+			bucket := byAt[at]
+			if bucket == nil {
+				bucket = &HistoryBucket{At: at}
+				byAt[at] = bucket
+				accs[at] = &acc{}
+			}
+			// Percentiles of hourly percentiles: waits weighted by jobs
+			// started, durations by jobs finished.
+			a := accs[at]
+			for _, x := range []*acc{a, &total} {
+				x.w50.add(w50, b.JobsStarted)
+				x.w95.add(w95, b.JobsStarted)
+				x.d50.add(d50, b.Finished)
+				x.d95.add(d95, b.Finished)
+			}
+			bucket.WaitP50, bucket.WaitP95 = a.w50.value(), a.w95.value()
+			bucket.DurationP50, bucket.DurationP95 = a.d50.value(), a.d95.value()
+			bucket.JobsStarted += b.JobsStarted
+			bucket.BusySeconds += b.BusySeconds
+			bucket.Finished += b.Finished
+			bucket.Failed += b.Failed
+			sum.JobsStarted += b.JobsStarted
+			sum.BusySeconds += b.BusySeconds
+			sum.Finished += b.Finished
+			sum.Failed += b.Failed
 		}
 		if err := rows.Err(); err != nil {
-			return nil, err
+			return nil, sum, err
 		}
+		sum.WaitP50, sum.WaitP95 = total.w50.value(), total.w95.value()
+		sum.DurationP50, sum.DurationP95 = total.d50.value(), total.d95.value()
 	} else {
 		conds := []string{"j.started_at >= $1", "j.started_at < $2"}
-		args := []any{r.From, r.To, r.Bucket.Seconds()}
+		args := []any{r.From, r.To}
 		if f.Runner != "" {
 			args = append(args, f.Runner)
 			conds = append(conds, fmt.Sprintf("j.runner_id = $%d", len(args)))
@@ -154,46 +213,57 @@ func (s *Store) RunnerHistory(ctx context.Context, r Range, f HistoryFilter) ([]
 			args = append(args, f.Job)
 			conds = append(conds, fmt.Sprintf("j.name = $%d", len(args)))
 		}
-		rows, err := s.pool.Query(ctx, fmt.Sprintf(`
-			SELECT to_timestamp(floor(EXTRACT(EPOCH FROM j.started_at) / $3) * $3) AS b,
-			       count(*),
+		// Duration percentiles skip unfinished jobs (NULL), so a bucket
+		// whose jobs are all still running has none.
+		measures := `count(*),
 			       COALESCE(sum(EXTRACT(EPOCH FROM (COALESCE(j.finished_at, now()) - j.started_at)))::int, 0),
-			       COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (j.started_at - j.queued_at))), 0),
-			       COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (j.started_at - j.queued_at))), 0),
-			       COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (j.finished_at - j.started_at))), 0),
-			       COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (j.finished_at - j.started_at))), 0),
+			       percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (j.started_at - j.queued_at))),
+			       percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (j.started_at - j.queued_at))),
+			       percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (j.finished_at - j.started_at))),
+			       percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (j.finished_at - j.started_at))),
 			       count(*) FILTER (WHERE j.status IN ('success','failed')),
-			       count(*) FILTER (WHERE j.status = 'failed')
+			       count(*) FILTER (WHERE j.status = 'failed')`
+		where := strings.Join(conds, " AND ")
+		bucket := fmt.Sprintf("$%d", len(args)+1)
+		rows, err := s.pool.Query(ctx, fmt.Sprintf(`
+			SELECT to_timestamp(floor(EXTRACT(EPOCH FROM j.started_at) / %[1]s) * %[1]s) AS b, %[2]s
 			FROM jobs j JOIN pipelines p ON p.id = j.pipeline_id
-			WHERE %s AND j.started_at IS NOT NULL
-			GROUP BY 1 ORDER BY 1`, strings.Join(conds, " AND ")), args...)
+			WHERE %[3]s AND j.started_at IS NOT NULL
+			GROUP BY 1 ORDER BY 1`, bucket, measures, where), append(args, r.Bucket.Seconds())...)
 		if err != nil {
-			return nil, err
+			return nil, sum, err
 		}
 		defer rows.Close()
 		for rows.Next() {
 			var b HistoryBucket
 			if err := rows.Scan(&b.At, &b.JobsStarted, &b.BusySeconds, &b.WaitP50, &b.WaitP95, &b.DurationP50, &b.DurationP95, &b.Finished, &b.Failed); err != nil {
-				return nil, err
+				return nil, sum, err
 			}
 			b.At = b.At.UTC()
 			byAt[b.At] = &b
 		}
 		if err := rows.Err(); err != nil {
-			return nil, err
+			return nil, sum, err
+		}
+		if err := s.pool.QueryRow(ctx, fmt.Sprintf(`
+			SELECT %s FROM jobs j JOIN pipelines p ON p.id = j.pipeline_id
+			WHERE %s AND j.started_at IS NOT NULL`, measures, where), args...).
+			Scan(&sum.JobsStarted, &sum.BusySeconds, &sum.WaitP50, &sum.WaitP95, &sum.DurationP50, &sum.DurationP95, &sum.Finished, &sum.Failed); err != nil {
+			return nil, sum, err
 		}
 	}
-	// Dense series: every bucket in the range, zeros where nothing ran.
+	// Dense series: every bucket in the range — zeros where nothing ran,
+	// NoData where the rollups don't reach.
 	out := []HistoryBucket{}
 	for at := r.bucketStart(r.From); at.Before(r.To); at = at.Add(r.Bucket) {
 		b := byAt[at]
 		if b == nil {
-			b = &HistoryBucket{At: at}
+			b = &HistoryBucket{At: at, NoData: rollups && !covered[at]}
 		}
 		b.BusySlots = float64(b.BusySeconds) / r.Bucket.Seconds()
 		out = append(out, *b)
 	}
-	return out, nil
+	return out, sum, nil
 }
 
 // JobsInBucket lists the jobs a history point was made of (hover → list).

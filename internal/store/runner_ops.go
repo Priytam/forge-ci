@@ -19,25 +19,28 @@ type RunnerState struct {
 	UpdateRequested bool
 }
 
-// TouchRunnerV records a runner's contact (with its version) and returns its
-// state. A runner that reconnects with the version it was asked to update
-// to has its update request cleared.
-func (s *Store) TouchRunnerV(ctx context.Context, id, executor string, tags []string, version string) (RunnerState, error) {
+// TouchRunnerV records a runner's contact (with its version and job slots)
+// and returns its state. A runner that reconnects with the version it was
+// asked to update to has its update request cleared.
+func (s *Store) TouchRunnerV(ctx context.Context, id, executor string, tags []string, version string, concurrency int) (RunnerState, error) {
 	if tags == nil {
 		tags = []string{}
 	}
+	if concurrency < 1 {
+		concurrency = 1
+	}
 	var st RunnerState
 	err := s.pool.QueryRow(ctx,
-		`INSERT INTO runners (id, executor, tags, version)
-		 VALUES ($1,$2,$3,$4)
+		`INSERT INTO runners (id, executor, tags, version, concurrency)
+		 VALUES ($1,$2,$3,$4,$5)
 		 ON CONFLICT (id) DO UPDATE
 		   SET last_contact_at = now(), executor = EXCLUDED.executor, tags = EXCLUDED.tags,
-		       version = EXCLUDED.version,
+		       version = EXCLUDED.version, concurrency = EXCLUDED.concurrency,
 		       update_requested_at = CASE WHEN runners.update_requested_at IS NOT NULL AND runners.version <> EXCLUDED.version
 		                                  AND EXCLUDED.version <> '' THEN NULL ELSE runners.update_requested_at END,
 		       draining = CASE WHEN runners.update_requested_at IS NOT NULL AND runners.version <> EXCLUDED.version
 		                       AND EXCLUDED.version <> '' THEN FALSE ELSE runners.draining END
-		 RETURNING paused, draining, update_requested_at IS NOT NULL`, id, executor, tags, version).
+		 RETURNING paused, draining, update_requested_at IS NOT NULL`, id, executor, tags, version, concurrency).
 		Scan(&st.Paused, &st.Draining, &st.UpdateRequested)
 	return st, err
 }

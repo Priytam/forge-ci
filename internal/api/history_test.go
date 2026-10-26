@@ -15,6 +15,14 @@ import (
 	"github.com/priytamjeepandey/forge-ci/internal/store"
 )
 
+// fv reads an optional measure; -1 stands for "none" (null).
+func fv(p *float64) float64 {
+	if p == nil {
+		return -1
+	}
+	return *p
+}
+
 func TestParseRange(t *testing.T) {
 	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
 	for _, c := range []struct {
@@ -53,7 +61,7 @@ func TestRunnerHistoryLiveAndRollups(t *testing.T) {
 	_, _ = h.db.Exec(ctx, `UPDATE jobs SET status='success', runner_id='r1', queued_at=$2::timestamptz, started_at=$2::timestamptz + interval '30 seconds', finished_at=$2::timestamptz + interval '90 seconds' WHERE pipeline_id=$1 AND name='a'`, p.ID, base)
 	_, _ = h.db.Exec(ctx, `UPDATE jobs SET status='failed', runner_id='r1', queued_at=$2::timestamptz, started_at=$2::timestamptz + interval '90 seconds', finished_at=$2::timestamptz + interval '690 seconds' WHERE pipeline_id=$1 AND name='b'`, p.ID, base)
 	rg, _ := store.ParseRange("24h", "", "", "", time.Now())
-	buckets, err := h.st.RunnerHistory(ctx, rg, store.HistoryFilter{Runner: "r1"})
+	buckets, _, err := h.st.RunnerHistory(ctx, rg, store.HistoryFilter{Runner: "r1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +74,7 @@ func TestRunnerHistoryLiveAndRollups(t *testing.T) {
 			hit = &buckets[i]
 		}
 	}
-	if hit == nil || hit.JobsStarted != 2 || hit.WaitP50 != 60 || hit.WaitP95 < 85 || hit.DurationP95 < 570 || hit.Failed != 1 || hit.BusySeconds != 660 {
+	if hit == nil || hit.JobsStarted != 2 || fv(hit.WaitP50) != 60 || fv(hit.WaitP95) < 85 || fv(hit.DurationP95) < 570 || hit.Failed != 1 || hit.BusySeconds != 660 {
 		t.Errorf("bucket = %+v", hit)
 	}
 	// Rollups cover the same hour; a 30-day range reads them.
@@ -74,7 +82,7 @@ func TestRunnerHistoryLiveAndRollups(t *testing.T) {
 		t.Fatal(err)
 	}
 	rg30, _ := store.ParseRange("30d", "", "", "1h", time.Now())
-	rolled, err := h.st.RunnerHistory(ctx, rg30, store.HistoryFilter{Runner: "r1"})
+	rolled, _, err := h.st.RunnerHistory(ctx, rg30, store.HistoryFilter{Runner: "r1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +92,7 @@ func TestRunnerHistoryLiveAndRollups(t *testing.T) {
 			again = &rolled[i]
 		}
 	}
-	if again == nil || again.JobsStarted != 2 || again.WaitP50 != 60 || again.BusySeconds != 660 {
+	if again == nil || again.JobsStarted != 2 || fv(again.WaitP50) != 60 || again.BusySeconds != 660 {
 		t.Errorf("rollup bucket = %+v", again)
 	}
 	// Drill-down lists the jobs behind the point; the API serves both.

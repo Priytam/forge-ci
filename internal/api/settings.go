@@ -202,15 +202,10 @@ func (s *Server) deleteVariable(w http.ResponseWriter, r *http.Request) {
 // ---- runners ----
 
 func (s *Server) listRunners(w http.ResponseWriter, r *http.Request) {
-	runners, err := s.store.ListRunners(r.Context())
+	runners, err := s.runnersView(r.Context())
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "failed to list runners")
 		return
-	}
-	bundled := bundledRunnerVersion()
-	for i := range runners {
-		v := runners[i].Version
-		runners[i].Outdated = bundled != "" && bundled != "dev" && v != "" && v != "dev" && v != bundled
 	}
 	writeJSON(w, http.StatusOK, runners)
 }

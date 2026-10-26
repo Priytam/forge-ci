@@ -280,6 +280,10 @@ type Runner struct {
 	Draining        bool   `json:"draining,omitempty"`
 	UpdateRequested bool   `json:"update_requested,omitempty"`
 	RunningJobs     int    `json:"running_jobs"`
+	// Concurrency is the runner's job slots. Stale: not seen for a day —
+	// left out of capacity and tag counts, and removable.
+	Concurrency int  `json:"concurrency"`
+	Stale       bool `json:"stale"`
 }
 
 // ArtifactInfo is artifact metadata for list/download endpoints.
@@ -368,6 +372,9 @@ type AcquireRequest struct {
 	Executor string   `json:"executor"`
 	Tags     []string `json:"tags"`
 	Version  string   `json:"version,omitempty"` // runner build version
+	// Concurrency is how many jobs the runner runs in parallel (its slots);
+	// older runners omit it and count as 1.
+	Concurrency int `json:"concurrency,omitempty"`
 }
 
 type CompleteRequest struct {

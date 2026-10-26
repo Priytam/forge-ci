@@ -33,7 +33,7 @@ func (s *Server) runnerHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	f := store.HistoryFilter{Runner: q.Get("runner"), Repo: q.Get("repo"), Job: q.Get("job")}
-	buckets, err := s.store.RunnerHistory(r.Context(), rg, f)
+	buckets, summary, err := s.store.RunnerHistory(r.Context(), rg, f)
 	if err != nil {
 		slog.Error("runner history", "err", err)
 		writeErr(w, http.StatusInternalServerError, "failed to load history")
@@ -41,7 +41,7 @@ func (s *Server) runnerHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"range":  map[string]any{"from": rg.From, "to": rg.To, "bucket_seconds": int(rg.Bucket.Seconds()), "label": rg.Label},
-		"filter": f, "buckets": buckets,
+		"filter": f, "buckets": buckets, "summary": summary,
 	})
 }
 

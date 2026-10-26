@@ -1045,3 +1045,8 @@ CREATE TABLE IF NOT EXISTS pipeline_stats_hourly (
     PRIMARY KEY (hour, repo)
 );
 CREATE INDEX IF NOT EXISTS jobs_started_at_idx ON jobs (started_at) WHERE started_at IS NOT NULL;
+
+-- Runners page (batch 8): a runner's job slots, so capacity is online ×
+-- concurrency rather than a runner count.
+ALTER TABLE runners ADD COLUMN IF NOT EXISTS concurrency INT NOT NULL DEFAULT 1;
+CREATE INDEX IF NOT EXISTS audit_log_target_idx ON audit_log (target);

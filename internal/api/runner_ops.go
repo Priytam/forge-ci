@@ -18,6 +18,7 @@ func (s *Server) registerRunnerOpRoutes() {
 	m.HandleFunc("GET /api/v1/runners/rollout", s.getRollout)
 	m.HandleFunc("POST /api/v1/runners/rollout", s.startRollout)
 	m.HandleFunc("DELETE /api/v1/runners/rollout", s.stopRollout)
+	m.HandleFunc("DELETE /api/v1/runners/{id}", s.deleteRunner)
 }
 
 func (s *Server) runnerAction(w http.ResponseWriter, r *http.Request, action string, fn func(id string) error) {
@@ -47,6 +48,28 @@ func (s *Server) resumeRunner(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) upgradeRunner(w http.ResponseWriter, r *http.Request) {
 	s.runnerAction(w, r, "upgrade", func(id string) error { return s.store.RequestRunnerUpdate(r.Context(), id) })
+}
+
+// deleteRunner removes a runner that is offline and idle (a stale
+// registration); an online or busy runner is refused with 409.
+func (s *Server) deleteRunner(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	switch err := s.store.DeleteRunner(r.Context(), id); {
+	case errors.Is(err, store.ErrNotFound):
+		writeErr(w, http.StatusNotFound, "runner not found")
+		return
+	case errors.Is(err, store.ErrRunnerActive):
+		writeErr(w, http.StatusConflict, "runner is online or running jobs; drain and stop it first")
+		return
+	case err != nil:
+		writeErr(w, http.StatusInternalServerError, "failed to remove runner")
+		return
+	}
+	s.audit(r, "runner.remove", id, "", "ok", nil)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) getRollout(w http.ResponseWriter, r *http.Request) {

@@ -64,7 +64,14 @@ func (s *Store) SchemaStatus(ctx context.Context) (SchemaStatus, error) {
 	return st, json.Unmarshal(raw, &st)
 }
 
+// recordSchemaStatus notes the version that applied the migrations; a start
+// on a different version than the last is a deploy, kept in the audit log so
+// charts can mark it.
 func (s *Store) recordSchemaStatus(ctx context.Context, version string) {
+	if prev, err := s.SchemaStatus(ctx); err == nil && prev.Version != "" && prev.Version != version {
+		_ = s.InsertAudit(ctx, AuditEntry{Actor: "system", Action: "server.upgrade", Target: version,
+			Detail: map[string]any{"from": prev.Version}})
+	}
 	raw, _ := json.Marshal(SchemaStatus{AppliedAt: time.Now(), Version: version})
 	_, _ = s.pool.Exec(ctx,
 		`INSERT INTO platform_settings (key, value) VALUES ('schema_status',$1)

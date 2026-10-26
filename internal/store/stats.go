@@ -101,7 +101,7 @@ func (s *Store) DashboardStatsRange(ctx context.Context, r Range) (*DashboardSta
 		return nil, err
 	}
 	st.Pipelines = buckets
-	hist, err := s.RunnerHistory(ctx, r, HistoryFilter{})
+	hist, _, err := s.RunnerHistory(ctx, r, HistoryFilter{})
 	if err != nil {
 		return nil, err
 	}
@@ -115,7 +115,7 @@ func (s *Store) DashboardStatsRange(ctx context.Context, r Range) (*DashboardSta
 	// The same-length window before this one.
 	prev := Range{From: r.From.Add(-r.To.Sub(r.From)), To: r.From, Bucket: r.Bucket, Label: r.Label}
 	if pb, pf, ps, err := s.PipelineSeries(ctx, prev); err == nil {
-		ph, _ := s.RunnerHistory(ctx, prev, HistoryFilter{})
+		ph, _, _ := s.RunnerHistory(ctx, prev, HistoryFilter{})
 		pj := 0
 		for _, b := range ph {
 			pj += b.JobsStarted

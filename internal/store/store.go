@@ -1236,7 +1236,7 @@ func capCommitMessage(msg string) string {
 // protected refs and environment scope) overlaid by job-level YAML variables.
 // Returns (nil, nil) when the queue is empty.
 func (s *Store) AcquireJob(ctx context.Context, req proto.AcquireRequest) (*proto.RunnerJob, error) {
-	state, err := s.TouchRunnerV(ctx, req.RunnerID, req.Executor, req.Tags, req.Version)
+	state, err := s.TouchRunnerV(ctx, req.RunnerID, req.Executor, req.Tags, req.Version, req.Concurrency)
 	if err != nil {
 		return nil, err
 	}

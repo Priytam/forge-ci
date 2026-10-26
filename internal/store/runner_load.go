@@ -29,12 +29,13 @@ type RunnerLoadRow struct {
 	Online        bool      `json:"online"`
 	LastContactAt time.Time `json:"last_contact_at"`
 	Running       int       `json:"running"`
+	Concurrency   int       `json:"concurrency"`
 	// RunningJobs: up to 5 jobs it is running now.
 	RunningJobs []RunnerJobRef `json:"running_jobs"`
-	// Jobs24h / BusySeconds24h: finished jobs and time spent running them in
-	// the last 24 hours (utilisation = BusySeconds24h / 86400 per slot).
-	Jobs24h        int `json:"jobs_24h"`
-	BusySeconds24h int `json:"busy_seconds_24h"`
+	// Jobs / BusySeconds: jobs started, and time spent running jobs, within
+	// the load's range (utilisation = BusySeconds / (range seconds × slots)).
+	Jobs        int `json:"jobs"`
+	BusySeconds int `json:"busy_seconds"`
 }
 
 // RunnerJobRef points at a running job.
@@ -49,6 +50,9 @@ type RunnerJobRef struct {
 // RunnerLoad is the runner load page: per-tag queue depth and per-runner
 // activity.
 type RunnerLoad struct {
+	// From / To: the range per-runner Jobs and BusySeconds cover.
+	From    time.Time       `json:"from"`
+	To      time.Time       `json:"to"`
 	Queues  []QueueStat     `json:"queues"`
 	Runners []RunnerLoadRow `json:"runners"`
 	Pending int             `json:"pending"`
@@ -74,26 +78,27 @@ func covers(have, need []string) bool {
 	return true
 }
 
-// GetRunnerLoad computes queue depth per required tag set and per-runner load.
-func (s *Store) GetRunnerLoad(ctx context.Context) (*RunnerLoad, error) {
-	out := &RunnerLoad{Queues: []QueueStat{}, Runners: []RunnerLoadRow{}}
+// GetRunnerLoad computes queue depth per required tag set and per-runner load,
+// with each runner's jobs and busy time over [from, to).
+func (s *Store) GetRunnerLoad(ctx context.Context, from, to time.Time) (*RunnerLoad, error) {
+	out := &RunnerLoad{From: from, To: to, Queues: []QueueStat{}, Runners: []RunnerLoadRow{}}
 
+	// Busy time is each job's run clipped to the range, running jobs included.
 	rrows, err := s.pool.Query(ctx,
-		`SELECT r.id, r.executor, r.tags, r.paused, r.last_contact_at,
+		`SELECT r.id, r.executor, r.tags, r.paused, r.last_contact_at, r.concurrency,
 		        (SELECT count(*) FROM jobs j WHERE j.runner_id = r.id AND j.status = 'running'),
-		        (SELECT count(*) FROM jobs j WHERE j.runner_id = r.id AND j.finished_at > now() - interval '24 hours'
-		           AND j.started_at IS NOT NULL),
-		        COALESCE((SELECT sum(EXTRACT(EPOCH FROM (j.finished_at - GREATEST(j.started_at, now() - interval '24 hours'))))::int
-		                  FROM jobs j WHERE j.runner_id = r.id AND j.finished_at > now() - interval '24 hours'
-		                    AND j.started_at IS NOT NULL), 0)
-		 FROM runners r ORDER BY r.last_contact_at DESC`)
+		        (SELECT count(*) FROM jobs j WHERE j.runner_id = r.id AND j.started_at >= $1 AND j.started_at < $2),
+		        COALESCE((SELECT sum(EXTRACT(EPOCH FROM (LEAST(COALESCE(j.finished_at, now()), $2) - GREATEST(j.started_at, $1))))::int
+		                  FROM jobs j WHERE j.runner_id = r.id AND j.started_at < $2
+		                    AND COALESCE(j.finished_at, now()) > $1), 0)
+		 FROM runners r ORDER BY r.last_contact_at DESC`, from, to)
 	if err != nil {
 		return nil, err
 	}
 	for rrows.Next() {
 		var r RunnerLoadRow
-		if err := rrows.Scan(&r.ID, &r.Executor, &r.Tags, &r.Paused, &r.LastContactAt, &r.Running,
-			&r.Jobs24h, &r.BusySeconds24h); err != nil {
+		if err := rrows.Scan(&r.ID, &r.Executor, &r.Tags, &r.Paused, &r.LastContactAt, &r.Concurrency, &r.Running,
+			&r.Jobs, &r.BusySeconds); err != nil {
 			rrows.Close()
 			return nil, err
 		}
