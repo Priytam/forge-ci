@@ -20,7 +20,7 @@ export const STATUS_LABEL: Record<string, string> = {
   failed: "Failed",
   running: "Running",
   pending: "Queued",
-  blocked: "Needs approval",
+  blocked: "Waiting",
   created: "Created",
   canceled: "Canceled",
   skipped: "Skipped",

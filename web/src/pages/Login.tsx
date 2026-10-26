@@ -70,7 +70,10 @@ export default function Login() {
     <div className="login-wrap">
       <div className="card login-card glow glow-neutral">
         <div className="login-brand">
-          <span className="brand-mark">⚙</span> Forge CI
+          <span className="login-mark" aria-hidden="true">
+            F
+          </span>{" "}
+          Forge CI
         </div>
         <p className="muted login-sub">Sign in to continue</p>
 

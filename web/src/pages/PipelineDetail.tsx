@@ -149,8 +149,15 @@ function runStatus(status: string, jobs: Job[]) {
       return out("danger", "blocked", `${failed.length || "Some"} of ${total} jobs failed`, failed.length ? names(failed) : undefined);
     case "canceled":
       return out("neutral", "closed", "Canceled", `${finished.length} of ${total} jobs had finished`);
-    case "blocked":
-      return out("warning", "pause", "Waiting for approval", waiting.length ? `Needs a go-ahead: ${names(waiting)}` : undefined);
+    case "blocked": {
+      const manual = waiting.length > 0 && waiting.every((j) => j.manual);
+      return out(
+        "warning",
+        "pause",
+        manual ? "Waiting for someone to start a job" : "Waiting for approval",
+        waiting.length ? `${manual ? "Press play on" : "Needs a go-ahead"}: ${names(waiting)}` : undefined
+      );
+    }
     case "running":
       return out("accent", "activity", "Running", `${finished.length} of ${total} jobs done`);
     default:

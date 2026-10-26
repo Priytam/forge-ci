@@ -43,6 +43,7 @@ import {
 import LintPanel from "../components/LintPanel";
 import { usePoll } from "../hooks/usePoll";
 import RepoHeader from "../components/RepoHeader";
+import Icon from "../components/Icon";
 
 const MASKED_PLACEHOLDER = "********************";
 const ROLES = ["admin", "owner", "developer"];
@@ -58,14 +59,25 @@ function Section({
 }) {
   const [open, setOpen] = useState(false);
   return (
-    <section className="card settings-section">
-      <div className="settings-head">
+    <section className={open ? "card settings-section settings-open" : "card settings-section"}>
+      <div
+        className="settings-head"
+        onClick={(e) => {
+          // Links in the description open their page, not the section.
+          if (!(e.target as HTMLElement).closest("a")) setOpen((o) => !o);
+        }}
+      >
         <div className="settings-head-text">
           <h2>{title}</h2>
           <div className="muted settings-desc">{description}</div>
         </div>
-        <button type="button" className="btn" onClick={() => setOpen((o) => !o)}>
-          {open ? "Collapse" : "Expand"}
+        <button
+          type="button"
+          className="icon-btn settings-toggle"
+          aria-expanded={open}
+          aria-label={open ? `Collapse ${title}` : `Expand ${title}`}
+        >
+          <Icon name="chevron" size={16} />
         </button>
       </div>
       {open && <div className="settings-body">{children}</div>}
