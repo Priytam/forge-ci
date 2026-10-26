@@ -367,7 +367,7 @@ the dev experience):
 | `OIDC_AUDIENCE` | `aud` claim of minted OIDC tokens (set per cloud, e.g. `sts.amazonaws.com` for AWS) | `forge-ci` |
 | `FRONTEND_URL` | dashboard origin (post-login redirect + CSRF allow-list; commit-status `target_url` base) | `http://localhost:5173` |
 | `COMMIT_STATUS` | `on` \| `off` — write pipeline status back to the origin VCS (GitHub commit status / Bitbucket build status). Only acts on connected repos authenticated by a token (or a GitHub App) with commit-status scope; `off` disables globally | `on` |
-| `CODE_REVIEW` | `on` \| `off` — the code-review inbox: webhook ingest, change refreshes and the conditional reconcile ([docs/code-review.md](docs/code-review.md)); `off` stops all of it | `on` |
+| `CODE_REVIEW` | `on` \| `off` — code review: webhook ingest, change refreshes, the conditional reconcile, merge-gate evaluation and queued provider writes ([docs/code-review.md](docs/code-review.md)); `off` stops all of it | `on` |
 | `GITHUB_API_BASE` | override the GitHub API host — used for **commit-status write-back**, **code review** and **GitHub App installation-token minting**. For testing against a stub; leave unset in production | `https://api.github.com` |
 | `REDIS_URL` | Redis for the high-volume log tier (live buffer + pub/sub fan-out), e.g. `redis://localhost:6379/0` | — |
 | `LOG_BACKEND` | `redis` \| `postgres`; empty auto-selects redis when `REDIS_URL` is set+reachable, else postgres | — (auto) |
@@ -448,7 +448,7 @@ provides the fallback CI. Full walkthrough: [docs/self-hosted-ci.md](docs/self-h
 - [Runner autoscaling (Kubernetes, Docker host, any cloud via exec)](docs/autoscaling.md)
 - [Runner operations: drain, upgrade, lost jobs, maintenance mode](docs/runner-operations.md)
 - [Observability: history, time ranges, webhook health](docs/observability.md)
-- [Code review: one inbox of pull/merge requests across hosts, near-zero API footprint](docs/code-review.md)
+- [Code review: inbox, merge gate enforced on the host, approve & merge from Forge; near-zero API footprint](docs/code-review.md)
 - [Notifications: Slack, Teams, webhooks, email; approve by link](docs/notifications.md)
 - [High-volume log architecture (Redis live buffer, blob archive, SSE)](docs/log-ingestion-design.md)
 - [Roles, membership & approval rules](docs/rbac-approvals.md)

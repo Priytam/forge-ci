@@ -43,6 +43,10 @@ type ChangeSummary struct {
 	ChangesWanted  int        `json:"changes_requested"`
 	PipelineID     *int64     `json:"pipeline_id,omitempty"`
 	PipelineStatus string     `json:"pipeline_status,omitempty"`
+	// GateState is the merge gate on the head (pass | pending | fail); empty
+	// when no merge rule applies.
+	GateState   string `json:"gate_state,omitempty"`
+	GateSummary string `json:"gate_summary,omitempty"`
 }
 
 // ChangeRevision is one push to a change.
@@ -91,7 +95,8 @@ const changeSummaryCols = `
 	c.id, c.repo, c.provider, c.number, c.title, c.author, c.source_branch, c.target_branch,
 	c.state, c.draft, c.head_sha, c.base_sha, c.labels, c.url, c.created_at, c.updated_at, c.synced_at,
 	(SELECT count(*) FROM change_revisions r WHERE r.change_id = c.id),
-	COALESCE(v.approvals, 0), COALESCE(v.wanted, 0), p.id, COALESCE(p.status, '')`
+	COALESCE(v.approvals, 0), COALESCE(v.wanted, 0), p.id, COALESCE(p.status, ''),
+	COALESCE(gr.state, ''), COALESCE(gr.summary, '')`
 
 const changeSummaryJoins = `
 	LEFT JOIN LATERAL (
@@ -104,13 +109,14 @@ const changeSummaryJoins = `
 	LEFT JOIN LATERAL (
 	    SELECT id, status FROM pipelines WHERE repo = c.repo AND sha = c.head_sha AND c.head_sha <> ''
 	    ORDER BY id DESC LIMIT 1
-	) p ON TRUE`
+	) p ON TRUE
+	LEFT JOIN gate_results gr ON gr.change_id = c.id AND gr.head_sha = c.head_sha`
 
 func scanChangeSummary(row pgx.Row, c *ChangeSummary) error {
 	return row.Scan(&c.ID, &c.Repo, &c.Provider, &c.Number, &c.Title, &c.Author, &c.SourceBranch,
 		&c.TargetBranch, &c.State, &c.Draft, &c.HeadSHA, &c.BaseSHA, &c.Labels, &c.URL,
 		&c.CreatedAt, &c.UpdatedAt, &c.SyncedAt, &c.Revisions, &c.Approvals, &c.ChangesWanted,
-		&c.PipelineID, &c.PipelineStatus)
+		&c.PipelineID, &c.PipelineStatus, &c.GateState, &c.GateSummary)
 }
 
 // ListChanges is the inbox: one indexed query across every repo and host.
@@ -177,7 +183,7 @@ func (s *Store) GetChangeDetail(ctx context.Context, id int64) (*ChangeDetail, e
 	err := row.Scan(&d.ID, &d.Repo, &d.Provider, &d.Number, &d.Title, &d.Author, &d.SourceBranch,
 		&d.TargetBranch, &d.State, &d.Draft, &d.HeadSHA, &d.BaseSHA, &d.Labels, &d.URL,
 		&d.CreatedAt, &d.UpdatedAt, &d.SyncedAt, &d.Revisions, &d.Approvals, &d.ChangesWanted,
-		&d.PipelineID, &d.PipelineStatus, &d.Body, &d.RefreshError)
+		&d.PipelineID, &d.PipelineStatus, &d.GateState, &d.GateSummary, &d.Body, &d.RefreshError)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -270,15 +276,15 @@ func (s *Store) ApplyChange(ctx context.Context, repo, provider string, ch *vcs.
 	var id int64
 	err = tx.QueryRow(ctx,
 		`INSERT INTO changes (repo, provider, number, title, body, author, source_branch, target_branch,
-		                      state, draft, head_sha, base_sha, labels, url, created_at, updated_at, synced_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16, now())
+		                      state, draft, head_sha, base_sha, labels, url, created_at, updated_at, synced_at, gate_dirty_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16, now(), now())
 		 ON CONFLICT (repo, number) DO UPDATE SET
 		     provider = EXCLUDED.provider, title = EXCLUDED.title, body = EXCLUDED.body,
 		     author = EXCLUDED.author, source_branch = EXCLUDED.source_branch,
 		     target_branch = EXCLUDED.target_branch, state = EXCLUDED.state, draft = EXCLUDED.draft,
 		     head_sha = EXCLUDED.head_sha, base_sha = EXCLUDED.base_sha, labels = EXCLUDED.labels,
 		     url = EXCLUDED.url, created_at = COALESCE(EXCLUDED.created_at, changes.created_at),
-		     updated_at = EXCLUDED.updated_at, synced_at = now()
+		     updated_at = EXCLUDED.updated_at, synced_at = now(), gate_dirty_at = now()
 		 WHERE changes.updated_at IS NULL OR EXCLUDED.updated_at IS NULL
 		    OR EXCLUDED.updated_at >= changes.updated_at
 		 RETURNING id`,

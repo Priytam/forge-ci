@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { getChange, relativeTime, shortSha, type Capabilities, type ChangeDetail as Detail } from "../api";
+import { getChange, relativeTime, shortSha, type ChangePage } from "../api";
 import StatusBadge from "../components/StatusBadge";
 import ChangeStateBadge from "../components/ChangeStateBadge";
 import Avatar from "../components/Avatar";
+import MergeGate from "../components/MergeGate";
 import { useChangeStream } from "../hooks/useChangeStream";
 
 const VERDICT: Record<string, string> = {
@@ -20,16 +21,14 @@ const VERDICT: Record<string, string> = {
  */
 export default function ChangeDetail() {
   const { id } = useParams();
-  const [change, setChange] = useState<Detail | null>(null);
-  const [caps, setCaps] = useState<Capabilities | null>(null);
+  const [page, setPage] = useState<ChangePage | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(() => {
     if (!id) return;
     getChange(id)
       .then((r) => {
-        setChange(r.change);
-        setCaps(r.capabilities);
+        setPage(r);
         setError(null);
       })
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
@@ -38,7 +37,8 @@ export default function ChangeDetail() {
   useChangeStream(load, id ? Number(id) : undefined);
 
   if (error) return <div className="error-banner">{error}</div>;
-  if (!change || !caps) return <div className="muted">Loading…</div>;
+  if (!page) return <div className="muted">Loading…</div>;
+  const { change, capabilities: caps } = page;
 
   return (
     <div>
@@ -65,7 +65,9 @@ export default function ChangeDetail() {
         <div className="error-banner">Last sync with the host failed: {change.refresh_error}. Showing the last good copy.</div>
       )}
 
-      <div className="card settings-form">
+      <MergeGate page={page} onChanged={load} />
+
+      <div className="card settings-form" style={{ marginTop: 16 }}>
         <h2>Checks</h2>
         {change.pipeline_id ? (
           <p>

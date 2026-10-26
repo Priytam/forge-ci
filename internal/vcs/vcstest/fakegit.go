@@ -102,3 +102,14 @@ func (g *FakeGit) Unrelated(*testing.T) (http.Header, []byte, bool) {
 
 func (g *FakeGit) RateLimit(int, int, time.Time) {}
 func (g *FakeGit) RejectNext(int, time.Duration) {}
+
+func (g *FakeGit) Head(t *testing.T, id string) string {
+	out := g.git(t, g.work, "ls-remote", g.bare, "refs/heads/change/"+id)
+	sha, _, _ := strings.Cut(out, "\t")
+	return sha
+}
+
+// A plain git server has no status checks and no merge API.
+func (g *FakeGit) Protect(...string)                       {}
+func (g *FakeGit) Check(*testing.T, string, string) string { return "" }
+func (g *FakeGit) HostMerge(*testing.T, string) error      { return nil }

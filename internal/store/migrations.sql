@@ -1150,3 +1150,110 @@ CREATE TABLE IF NOT EXISTS provider_call_stats (
     calls     BIGINT      NOT NULL DEFAULT 0,
     PRIMARY KEY (hour, provider, class, result, read_path)
 );
+
+-- Code review (batch 7, phase B): merge rules, the gate, provider writes.
+-- A rule applies to changes of one repo ('' = every repo) whose target
+-- branch matches branch_pattern (glob). No matching rule = no gate: nothing
+-- is published, so turning code review on never changes a host's checks.
+CREATE TABLE IF NOT EXISTS merge_policies (
+    id                         BIGSERIAL   PRIMARY KEY,
+    repo                       TEXT        NOT NULL DEFAULT '',
+    branch_pattern             TEXT        NOT NULL DEFAULT '*',
+    required_approvals         INT         NOT NULL DEFAULT 1,
+    approver_roles             TEXT[]      NOT NULL DEFAULT '{admin,owner,developer}',
+    required_group             TEXT        NOT NULL DEFAULT '',
+    required_group_approvals   INT         NOT NULL DEFAULT 0,
+    allow_self_approval        BOOLEAN     NOT NULL DEFAULT FALSE,
+    dismiss_on_push            BOOLEAN     NOT NULL DEFAULT TRUE,
+    block_on_changes_requested BOOLEAN     NOT NULL DEFAULT TRUE,
+    require_ci                 BOOLEAN     NOT NULL DEFAULT TRUE,
+    required_jobs              TEXT[]      NOT NULL DEFAULT '{}',
+    required_labels            TEXT[]      NOT NULL DEFAULT '{}',
+    blocked_labels             TEXT[]      NOT NULL DEFAULT '{}',
+    ticket_pattern             TEXT        NOT NULL DEFAULT '',
+    freeze_windows             JSONB       NOT NULL DEFAULT '[]',
+    timezone                   TEXT        NOT NULL DEFAULT 'UTC',
+    updated_by                 TEXT        NOT NULL DEFAULT '',
+    updated_at                 TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (repo, branch_pattern)
+);
+
+-- Who a host login is in Forge (admin-maintained until accounts can be
+-- linked by OAuth): makes self-approval, approver groups and roles work for
+-- reviews given on the host. login is stored lowercased.
+CREATE TABLE IF NOT EXISTS host_identities (
+    provider   TEXT        NOT NULL,
+    login      TEXT        NOT NULL,
+    email      TEXT        NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (provider, login)
+);
+
+-- The gate's verdict per change and head commit; written only when it
+-- changes. published_state is what the host's forge/merge-gate shows.
+CREATE TABLE IF NOT EXISTS gate_results (
+    change_id       BIGINT      NOT NULL REFERENCES changes(id) ON DELETE CASCADE,
+    head_sha        TEXT        NOT NULL,
+    policy_id       BIGINT,
+    state           TEXT        NOT NULL CHECK (state IN ('pass','pending','fail')),
+    summary         TEXT        NOT NULL DEFAULT '',
+    rules           JSONB       NOT NULL DEFAULT '[]',
+    evaluated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    published_state TEXT        NOT NULL DEFAULT '',
+    published_at    TIMESTAMPTZ,
+    PRIMARY KEY (change_id, head_sha)
+);
+
+-- Re-evaluate a change's gate when its inputs move (webhook, review, CI,
+-- rule edit) or when a freeze window opens/closes (gate_recheck_at).
+ALTER TABLE changes ADD COLUMN IF NOT EXISTS gate_dirty_at   TIMESTAMPTZ;
+ALTER TABLE changes ADD COLUMN IF NOT EXISTS gate_recheck_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS changes_head_idx ON changes (repo, head_sha) WHERE state = 'open';
+CREATE INDEX IF NOT EXISTS changes_gate_due_idx ON changes (gate_dirty_at) WHERE gate_dirty_at IS NOT NULL;
+
+-- A CI job changing state marks the open changes on that commit dirty.
+-- Statement-level and a no-op while no change is open.
+CREATE OR REPLACE FUNCTION forge_jobs_mark_gates() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM changes WHERE state = 'open' LIMIT 1) THEN
+        RETURN NULL;
+    END IF;
+    UPDATE changes c SET gate_dirty_at = now()
+    FROM (SELECT DISTINCT p.repo, p.sha FROM changed j JOIN pipelines p ON p.id = j.pipeline_id) x
+    WHERE c.state = 'open' AND c.repo = x.repo AND c.head_sha = x.sha;
+    RETURN NULL;
+END
+$$;
+CREATE OR REPLACE TRIGGER jobs_mark_gates_ins AFTER INSERT ON jobs
+    REFERENCING NEW TABLE AS changed
+    FOR EACH STATEMENT EXECUTE FUNCTION forge_jobs_mark_gates();
+CREATE OR REPLACE TRIGGER jobs_mark_gates_upd AFTER UPDATE ON jobs
+    REFERENCING NEW TABLE AS changed
+    FOR EACH STATEMENT EXECUTE FUNCTION forge_jobs_mark_gates();
+
+-- Every provider write goes through this outbox: saved at once, sent by a
+-- worker under the credential's budget, retried with backoff. idem_key
+-- makes a double click or a retry one row; a newer gate publish for the
+-- same change supersedes an unsent older one.
+CREATE TABLE IF NOT EXISTS provider_outbox (
+    id              BIGSERIAL   PRIMARY KEY,
+    idem_key        TEXT        NOT NULL UNIQUE,
+    kind            TEXT        NOT NULL,            -- publish_gate | merge
+    repo            TEXT        NOT NULL,
+    change_id       BIGINT      REFERENCES changes(id) ON DELETE CASCADE,
+    class           TEXT        NOT NULL,            -- user | webhook | reconcile
+    payload         JSONB       NOT NULL DEFAULT '{}',
+    state           TEXT        NOT NULL DEFAULT 'pending'
+        CHECK (state IN ('pending','done','failed','superseded')),
+    attempts        INT         NOT NULL DEFAULT 0,
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    lease_until     TIMESTAMPTZ,
+    last_error      TEXT        NOT NULL DEFAULT '',
+    result          JSONB       NOT NULL DEFAULT '{}',
+    requested_by    TEXT        NOT NULL DEFAULT '',
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    done_at         TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS provider_outbox_due_idx ON provider_outbox (next_attempt_at) WHERE state = 'pending';
+CREATE INDEX IF NOT EXISTS provider_outbox_change_idx ON provider_outbox (change_id, id DESC);

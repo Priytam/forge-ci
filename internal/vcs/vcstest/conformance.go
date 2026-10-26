@@ -39,6 +39,15 @@ type Host interface {
 	RateLimit(remaining, limit int, reset time.Time)
 	// RejectNext refuses the next request with status and Retry-After.
 	RejectNext(status int, retryAfter time.Duration)
+	// Head is the change's current head sha on the host.
+	Head(t *testing.T, id string) string
+	// Protect makes the host require these status contexts before merging
+	// (branch protection). Hosts without status checks ignore it.
+	Protect(contexts ...string)
+	// Check is the state of a status context on sha ("" when none).
+	Check(t *testing.T, sha, context string) string
+	// HostMerge is a person clicking Merge in the host's own UI.
+	HostMerge(t *testing.T, id string) error
 }
 
 // Harness names the plugin under test and builds a fresh fake host per test.
@@ -213,6 +222,9 @@ func RunChangeSource(t *testing.T, h Harness) {
 		}
 	})
 
+	if caps.StatusChecks || len(caps.MergeMethods) > 0 {
+		runWriter(t, h, caps)
+	}
 	if !caps.Changes {
 		return // rate limits only exist where there is an API
 	}
@@ -235,6 +247,93 @@ func RunChangeSource(t *testing.T, h Harness) {
 		var rl *vcs.RateLimitedError
 		if !errors.As(err, &rl) || rl.RetryAfter != 30*time.Second {
 			t.Errorf("rate-limited GetChange err = %v, want RateLimitedError(30s)", err)
+		}
+	})
+}
+
+// runWriter is the write half of the suite: the merge gate is published and
+// enforced on the host, and Forge merges only the head it approved.
+func runWriter(t *testing.T, h Harness, caps vcs.Capabilities) {
+	ctx := context.Background()
+	w := vcs.ChangeWriterFor(h.Provider)
+	if w == nil {
+		t.Fatalf("%s declares status checks or merge methods but has no ChangeWriter", h.Provider)
+	}
+	if !caps.StatusChecks || len(caps.MergeMethods) == 0 {
+		t.Fatalf("%s: status checks and merging ship together (the gate must be enforceable): %+v", h.Provider, caps)
+	}
+
+	t.Run("gate blocks a merge on the host until it passes", func(t *testing.T) {
+		host := h.New(t)
+		c, _ := newClient()
+		repo := host.Repo()
+		host.Protect(vcs.GateContext)
+		id, _ := host.Open(t, "Gated")
+		head := host.Head(t, id)
+		if err := w.PublishCheck(ctx, c, repo, head, vcs.CheckResult{State: "pending", Description: "1 of 2 approvals"}); err != nil {
+			t.Fatal(err)
+		}
+		if got := host.Check(t, head, vcs.GateContext); got != "pending" {
+			t.Fatalf("published gate = %q, want pending", got)
+		}
+		if err := host.HostMerge(t, id); err == nil {
+			t.Fatal("the host merged while the gate was pending")
+		}
+		// Re-publishing the same result is harmless (outbox retries).
+		for i := 0; i < 2; i++ {
+			if err := w.PublishCheck(ctx, c, repo, head, vcs.CheckResult{State: "success", Description: "All merge rules pass"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := host.HostMerge(t, id); err != nil {
+			t.Errorf("the host refused a merge after the gate passed: %v", err)
+		}
+	})
+
+	t.Run("merge with expected head", func(t *testing.T) {
+		host := h.New(t)
+		c, _ := newClient()
+		repo := host.Repo()
+		host.Protect(vcs.GateContext)
+		id, stored := host.Open(t, "Merge me")
+		approved := host.Head(t, id)
+		if err := w.PublishCheck(ctx, c, repo, approved, vcs.CheckResult{State: "success"}); err != nil {
+			t.Fatal(err)
+		}
+		head := host.Push(t, id) // someone pushes after approval
+		_, err := w.Merge(ctx, c, repo, id, vcs.MergeOpts{Method: caps.MergeMethods[0], ExpectedHead: approved})
+		if !errors.Is(err, vcs.ErrHeadMoved) {
+			t.Fatalf("merge of a stale head err = %v, want ErrHeadMoved", err)
+		}
+		_, err = w.Merge(ctx, c, repo, id, vcs.MergeOpts{Method: caps.MergeMethods[0], ExpectedHead: head})
+		if !errors.Is(err, vcs.ErrNotMergeable) {
+			t.Fatalf("merge without a passing gate err = %v, want ErrNotMergeable", err)
+		}
+		if err := w.PublishCheck(ctx, c, repo, head, vcs.CheckResult{State: "success"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Merge(ctx, c, repo, id, vcs.MergeOpts{Method: caps.MergeMethods[0], ExpectedHead: head}); err != nil {
+			t.Fatalf("merge: %v", err)
+		}
+		src := vcs.ChangeSourceFor(h.Provider)
+		ch, err := src.GetChange(ctx, c, repo, id, stored)
+		if err != nil || ch.State != "merged" {
+			t.Errorf("after merge: %+v %v, want merged", ch, err)
+		}
+	})
+
+	t.Run("writes refused on the read path", func(t *testing.T) {
+		host := h.New(t)
+		c, rec := newClient()
+		id, _ := host.Open(t, "x")
+		err := w.PublishCheck(vcs.ReadPath(ctx), c, host.Repo(), host.Head(t, id), vcs.CheckResult{State: "success"})
+		if !errors.Is(err, vcs.ErrReadPath) || host.Check(t, host.Head(t, id), vcs.GateContext) != "" {
+			t.Errorf("read-path publish err = %v", err)
+		}
+		for _, call := range rec.all() {
+			if call.Result != "refused" {
+				t.Errorf("read-path write reached the host: %+v", call)
+			}
 		}
 	})
 }

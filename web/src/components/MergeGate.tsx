@@ -1,0 +1,128 @@
+import { useEffect, useState } from "react";
+import { getMe, mergeChange, relativeTime, reviewChange, type ChangePage } from "../api";
+
+const MARK: Record<string, string> = { pass: "✓", pending: "…", fail: "✗" };
+
+/**
+ * Forge's rules between the change and its merge: each rule's progress, the
+ * caller's review buttons, and Merge. What is offered depends on the host's
+ * capabilities and the caller's permissions, never on which host it is.
+ * Writes are saved at once and reach the host through the outbox, so the
+ * page shows them as queued until the host confirms.
+ */
+export default function MergeGate({ page, onChanged }: { page: ChangePage; onChanged: () => void }) {
+  const { change, capabilities: caps, gate, actions, permissions } = page;
+  const [me, setMe] = useState<string | null | undefined>(undefined);
+  const [reviewer, setReviewer] = useState("");
+  const [comment, setComment] = useState("");
+  const [method, setMethod] = useState(caps.merge_methods[0] ?? "");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  useEffect(() => {
+    void getMe().then((u) => setMe(u?.email ?? null));
+  }, []);
+
+  const open = change.state === "open";
+  const who = (me ?? reviewer).toLowerCase();
+  const mine = change.reviews.find((r) => r.source === "forge" && r.reviewer === who && r.verdict !== "dismissed");
+  const merge = actions.find((a) => a.kind === "merge");
+  const merging = merge?.state === "pending";
+  const gateOK = !gate || gate.state === "pass";
+
+  const run = async (fn: () => Promise<unknown>, ok: string) => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      await fn();
+      setMsg({ ok: true, text: ok });
+      setComment("");
+      onChanged();
+    } catch (e) {
+      setMsg({ ok: false, text: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setBusy(false);
+    }
+  };
+  const review = (verdict: "approve" | "request_changes" | "dismiss", ok: string) =>
+    run(() => reviewChange(change.id, verdict, comment, me ? undefined : reviewer), ok);
+
+  return (
+    <div className="card settings-form">
+      <h2>
+        Merge gate{" "}
+        {gate ? (
+          <span className={gate.state === "pass" ? "" : gate.state === "fail" ? "error-text" : "muted"}>· {gate.summary}</span>
+        ) : (
+          <span className="muted">· no merge rule applies to {change.target_branch}</span>
+        )}
+      </h2>
+      {gate && (
+        <ul className="gate-rules">
+          {gate.rules.map((r) => (
+            <li key={r.id} className={`gate-rule gate-${r.state}`}>
+              <span className="gate-mark">{MARK[r.state]}</span> <b>{r.label}</b> <span className="muted">— {r.detail}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {gate && caps.status_checks && (
+        <p className="muted">
+          {gate.published_state === gate.state
+            ? `The host shows this as forge/merge-gate (updated ${relativeTime(gate.published_at ?? gate.evaluated_at)}); require that check in branch protection so merges on the host wait for it.`
+            : "Publishing this result to the host…"}
+        </p>
+      )}
+
+      {open && permissions.can_review && (
+        <div className="gate-actions">
+          {me === null && (
+            <label className="field">
+              <span>Reviewing as (sign-in is off)</span>
+              <input value={reviewer} onChange={(e) => setReviewer(e.target.value)} placeholder="you@company.com" />
+            </label>
+          )}
+          <label className="field">
+            <span>Comment (optional)</span>
+            <input value={comment} onChange={(e) => setComment(e.target.value)} placeholder="Looks good" />
+          </label>
+          <div className="form-actions">
+            <button className="btn btn-approve" disabled={busy} onClick={() => void review("approve", "Approved.")}>
+              Approve
+            </button>
+            <button className="btn btn-reject" disabled={busy} onClick={() => void review("request_changes", "Changes requested.")}>
+              Request changes
+            </button>
+            {mine && (
+              <button className="btn" disabled={busy} onClick={() => void review("dismiss", "Your review was withdrawn.")}>
+                Withdraw my review
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {open && caps.merge_methods.length > 0 && permissions.can_merge && (
+        <div className="form-actions" style={{ marginTop: 12 }}>
+          <select value={method} onChange={(e) => setMethod(e.target.value)} disabled={busy || merging}>
+            {caps.merge_methods.map((m) => (
+              <option key={m} value={m}>
+                {m === "merge" ? "Merge commit" : m === "squash" ? "Squash and merge" : "Rebase and merge"}
+              </option>
+            ))}
+          </select>
+          <button
+            className="btn btn-primary"
+            disabled={busy || merging || !gateOK || change.draft}
+            title={!gateOK ? gate?.summary : change.draft ? "The change is a draft" : undefined}
+            onClick={() => void run(() => mergeChange(change.id, change.head_sha, method), "Merge queued.")}
+          >
+            {merging ? "Merging…" : "Merge"}
+          </button>
+        </div>
+      )}
+      {merge?.state === "failed" && <div className="error-banner">Merge failed: {merge.last_error}</div>}
+      {merge?.state === "done" && change.state === "open" && <p className="muted">Merged on the host; waiting for it to confirm…</p>}
+      {msg && <div className={msg.ok ? "muted" : "error-banner"}>{msg.text}</div>}
+    </div>
+  );
+}

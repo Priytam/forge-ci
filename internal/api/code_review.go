@@ -34,6 +34,8 @@ func (s *Server) changeReadRoutes() map[string]http.HandlerFunc {
 		"GET /api/v1/changes/stream":           s.streamChanges,
 		"GET /api/v1/code-review/metrics":      s.codeReviewMetrics,
 		"GET /api/v1/code-review/capabilities": s.providerCapabilities,
+		"GET /api/v1/merge-policies":           s.listMergePolicies,
+		"GET /api/v1/host-identities":          s.listHostIdentities,
 	}
 }
 
@@ -41,6 +43,7 @@ func (s *Server) registerCodeReviewRoutes() {
 	for pattern, h := range s.changeReadRoutes() {
 		s.mux.HandleFunc(pattern, readPath(h))
 	}
+	s.registerCodeReviewWriteRoutes()
 }
 
 // readPath serves h with a read-path context.
@@ -127,7 +130,31 @@ func (s *Server) getChange(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "failed to load change")
 		return
 	}
-	writeJSONCached(w, r, map[string]any{"change": d, "capabilities": vcs.CapabilitiesOf(d.Provider)})
+	ctx := r.Context()
+	gate, err := s.store.GetGate(ctx, id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to load the merge gate")
+		return
+	}
+	actions, err := s.store.ChangeActions(ctx, id, 10)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to load actions")
+		return
+	}
+	// What the caller may do here — a hint for the UI; every write re-checks.
+	c := &store.ReviewTargetChange{ID: d.ID, Repo: d.Repo, Provider: d.Provider, Author: d.Author, TargetBranch: d.TargetBranch}
+	canReview := false
+	if who := s.reviewerFor(r, ""); who != "" {
+		if p, err := s.changePolicy(ctx, c); err == nil {
+			canReview, _, _ = s.mayReview(ctx, c, p, who)
+		}
+	} else {
+		canReview = !s.ssoEnforced(ctx) // open bootstrap mode names the reviewer
+	}
+	writeJSONCached(w, r, map[string]any{
+		"change": d, "capabilities": vcs.CapabilitiesOf(d.Provider), "gate": gate, "actions": actions,
+		"permissions": map[string]bool{"can_review": canReview, "can_merge": s.canOperate(r, d.Repo)},
+	})
 }
 
 // providerCapabilities lists what each host supports natively.
@@ -253,6 +280,9 @@ type codeReviewStats struct {
 	Budgets          []store.ProviderBudget    `json:"budgets"`
 	RefreshBacklog   int                       `json:"refresh_backlog"`
 	OldestRefreshS   float64                   `json:"oldest_refresh_seconds"`
+	OutboxBacklog    int                       `json:"outbox_backlog"`
+	OldestOutboxS    float64                   `json:"oldest_outbox_seconds"`
+	Gates            store.GateStats           `json:"gates"`
 }
 
 func (s *Server) loadCodeReviewStats(ctx context.Context) (*codeReviewStats, error) {
@@ -288,6 +318,14 @@ func (s *Server) loadCodeReviewStats(ctx context.Context) (*codeReviewStats, err
 		return nil, err
 	}
 	st.RefreshBacklog, st.OldestRefreshS = n, oldest.Seconds()
+	n, oldest, err = s.store.OutboxBacklog(ctx)
+	if err != nil {
+		return nil, err
+	}
+	st.OutboxBacklog, st.OldestOutboxS = n, oldest.Seconds()
+	if st.Gates, err = s.store.GateStatsSince(ctx, time.Now().Add(-24*time.Hour)); err != nil {
+		return nil, err
+	}
 	return st, nil
 }
 
@@ -335,5 +373,17 @@ func renderCodeReviewMetrics(st *codeReviewStats) string {
 	fmt.Fprintf(&b, "# HELP forge_changes_open Open changes across all repos.\n# TYPE forge_changes_open gauge\nforge_changes_open %d\n", st.OpenChanges)
 	fmt.Fprintf(&b, "# HELP forge_change_refresh_backlog Change refreshes due now.\n# TYPE forge_change_refresh_backlog gauge\nforge_change_refresh_backlog %d\n", st.RefreshBacklog)
 	fmt.Fprintf(&b, "# HELP forge_change_refresh_oldest_seconds Age of the oldest due change refresh.\n# TYPE forge_change_refresh_oldest_seconds gauge\nforge_change_refresh_oldest_seconds %.0f\n", st.OldestRefreshS)
+	fmt.Fprintf(&b, "# HELP forge_provider_outbox_backlog Provider writes (gate publishes, merges) waiting to be sent.\n# TYPE forge_provider_outbox_backlog gauge\nforge_provider_outbox_backlog %d\n", st.OutboxBacklog)
+	fmt.Fprintf(&b, "# HELP forge_provider_outbox_oldest_seconds Age of the oldest unsent provider write.\n# TYPE forge_provider_outbox_oldest_seconds gauge\nforge_provider_outbox_oldest_seconds %.0f\n", st.OldestOutboxS)
+	fmt.Fprintf(&b, "# HELP forge_gate_evaluations_24h Merge-gate verdicts that changed in the last 24h.\n# TYPE forge_gate_evaluations_24h gauge\nforge_gate_evaluations_24h %d\n", st.Gates.Evaluations)
+	b.WriteString("# HELP forge_gate_blocked_changes Open changes a merge rule is holding, by rule.\n# TYPE forge_gate_blocked_changes gauge\n")
+	rules := make([]string, 0, len(st.Gates.BlockedBy))
+	for id := range st.Gates.BlockedBy {
+		rules = append(rules, id)
+	}
+	sort.Strings(rules)
+	for _, id := range rules {
+		fmt.Fprintf(&b, "forge_gate_blocked_changes{rule=%q} %d\n", id, st.Gates.BlockedBy[id])
+	}
 	return b.String()
 }

@@ -48,6 +48,7 @@ export const NAV: NavSection[] = [
       { to: "/admin/environments", label: "Environments & branches", icon: "sliders", keywords: "registry aliases branch rules" },
       { to: "/admin/notifications", label: "Notifications", icon: "bell", keywords: "slack email approval alert" },
       { to: "/admin/approver-groups", label: "Approver groups", icon: "shield", keywords: "release managers approval group" },
+      { to: "/admin/merge-rules", label: "Merge rules", icon: "changes", keywords: "merge gate pull request approvals branch protection code review freeze" },
       { to: "/admin/service-accounts", label: "Service accounts", icon: "key", keywords: "robot bot automation token" },
       { to: "/admin/runner-tokens", label: "Runner tokens", icon: "key", keywords: "register runner" },
       { to: "/admin/sso", label: "Sign-in & identity", icon: "lock", keywords: "sso login oidc okta keycloak ldap active directory groups roles session google microsoft github" },
@@ -72,6 +73,7 @@ const ADMIN_TITLES: Record<string, string> = {
   environments: "Environments & branches",
   notifications: "Notifications",
   "approver-groups": "Approver groups",
+  "merge-rules": "Merge rules",
   "service-accounts": "Service accounts",
   about: "About & maintenance",
 };

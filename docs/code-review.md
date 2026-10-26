@@ -1,10 +1,12 @@
 # Code review in Forge
 
 Forge shows every open pull/merge request ("change") from every connected
-repo in one inbox, whichever host it lives on, so people don't need to open
-GitHub, GitLab, Bitbucket, Gitea, CodeCommit or a plain git server to see
-what is waiting. It is built so that hosting it, and the provider APIs it
-uses, cost next to nothing **by construction**:
+repo in one inbox, whichever host it lives on, lets people approve and merge
+there, and puts Forge's own rules between a change and its merge — enforced
+on the host too, so clicking Merge on GitHub waits for them. Nobody needs to
+open GitHub, GitLab, Bitbucket, Gitea, CodeCommit or a plain git server to
+see, approve or merge what is waiting. It is built so that hosting it, and
+the provider APIs it uses, cost next to nothing **by construction**:
 
 - **Pages never call a provider.** The inbox and change pages read Postgres
   only. Any provider call attempted while serving a page is refused and
@@ -23,25 +25,98 @@ uses, cost next to nothing **by construction**:
   or IAM role, overwritten by the host's own `X-RateLimit-*` headers. When a
   bucket runs low, the lowest-priority work waits first: backfill stops at
   50% left, reconcile at 20%, webhook refreshes at 5%. User actions never wait.
-- **No new service, database or VM.** The refresh worker runs inside
-  `forge-server`; the schema change is additive.
+- **Every write is queued.** Publishing the gate and merging go through an
+  outbox in Postgres: saved at once, sent by the worker under the budget,
+  retried with backoff, never duplicated (idempotency keys; a newer gate
+  supersedes an unsent older one; a merge retry first checks whether the
+  last attempt already merged).
+- **No new service, database or VM.** The refresh and outbox workers run
+  inside `forge-server`; the schema change is additive.
 
 Turn it all off with `CODE_REVIEW=off` on `forge-server`. Pages then show
 what is already stored and nothing is fetched.
 
-## What ships today (phase A)
+## What ships today (phases A and B)
 
 | | |
 |---|---|
-| **Changes** inbox (sidebar → Changes) | open / merged / closed / all, filter by repo, search by title or `#number`; CI status of the head commit, approvals and "changes requested" per change; live updates |
-| Change page | state, branches, description, labels, the Forge pipeline on the head commit, every review, every **revision** (each push is one, on every host) |
-| Hosts | **GitHub** (App or token) and **plain git** (Forge-native changes; creating them in the UI comes in phase F) |
-| About page | provider calls, 304 share, calls per open change, read-path calls, refresh backlog, every budget |
+| **Changes** inbox (sidebar → Changes) | open / merged / closed / all, filter by repo, search by title or `#number`; CI status of the head commit, the **merge gate** (ready / waiting / blocked), approvals and "changes requested" per change; live updates |
+| Change page | the merge gate rule by rule, **Approve / Request changes / Withdraw**, **Merge** (merge / squash / rebase as the host allows), state, branches, description, labels, the Forge pipeline on the head commit, every review, every **revision** (each push is one, on every host) |
+| **Merge rules** (Admin → Merge rules) | rules per repo and target branch, and which host login is which Forge user |
+| Hosts | **GitHub** (App or token) and **plain git** (Forge-native changes; creating and merging them in the UI comes in phase F) |
+| About page | provider calls, 304 share, calls per open change, read-path calls, refresh and write backlogs, gates and what blocks them, every budget |
 
-Coming next, in order: approve and merge from Forge with Forge's rules
-enforced on the host (B), diffs (C), line comments synced both ways (D),
-GitLab / Bitbucket / Gitea / CodeCommit (E), and Forge-native changes, code
-owners and a merge queue (F).
+Coming next, in order: diffs (C), line comments synced both ways and
+reviews posted as the reviewer (D), GitLab / Bitbucket / Gitea / CodeCommit
+(E), and Forge-native changes, code owners and a merge queue (F).
+
+## Merge rules and the gate
+
+A rule applies to the changes of one repo (or every repo) whose **target
+branch** matches its pattern (`main`, `release/*`). A repo's own rule beats a
+rule for every repo, an exact branch beats a pattern, a longer pattern beats
+a shorter one. **A change no rule matches has no gate**: nothing is
+published to its host, so adding Forge never changes a repo's checks until
+you write a rule for it.
+
+| Rule | Passes when | Otherwise |
+|---|---|---|
+| Approvals | N people approve (each person once, their latest verdict) | waiting |
+| Approval from a group | at least M of them are in the approver group | waiting |
+| No changes requested | nobody's latest verdict is "request changes" | **blocked** |
+| CI | the newest Forge pipeline on the head commit passed, and every *required job* in it | waiting while it runs, **blocked** when it failed |
+| Labels | every required label is there and no blocking one (`do-not-merge`) is | waiting / **blocked** |
+| Linked ticket | the regular expression matches the title, description or branch | **blocked** |
+| Merge window | now is outside every weekly freeze window (`fri 18:00 - mon 09:00`, in the rule's timezone) | waiting until the window ends |
+| Draft | the change is not a draft | waiting |
+
+Who counts:
+
+- **Approvers** need one of the rule's repo roles (default admin, owner,
+  developer) or membership of its approver group. A repo with no members
+  runs in bootstrap mode: anyone counts (as for deploy approvals).
+- **Reviews given on the host** count once their login is linked to a Forge
+  user (Admin → Merge rules → Host logins), which is also how "no
+  self-approval" and approver groups recognise people across hosts. The gate
+  says which approvals it did not count and why (own change, earlier
+  revision, not linked, no approver role). Linking by OAuth comes in phase D.
+- **Re-approve after push** (on by default): an approval made on an earlier
+  head does not count.
+
+The gate is re-evaluated only when an input moves — a webhook, a review, a CI
+job changing state, a rule or login edit — or when a freeze window opens or
+closes. A changed verdict is queued for publishing as the commit status
+**`forge/merge-gate`** on the head commit (success / pending / failure, with
+the reason and a link to the change in Forge).
+
+### Enforce it on GitHub
+
+1. In the repo: **Settings → Branches → Branch protection rule** for the
+   target branch (or a ruleset): **Require status checks to pass** and add
+   **`forge/merge-gate`** (it appears in the list once Forge has published it
+   on any commit).
+2. From then on GitHub's own Merge button stays disabled until the gate
+   passes — Forge's rules hold even for people who never open Forge.
+3. Forge does not change branch protection itself (that would need the
+   *Administration* permission); an admin sets it once.
+
+GitHub App permissions for phase B: **Commit statuses: Read & write** (the
+gate), **Pull requests: Read & write** and **Contents: Read & write** (merging
+from Forge). Without the write permissions the gate still works; Merge from
+Forge then fails with GitHub's reason on the change page.
+
+### Approve and merge from Forge
+
+- **Approve / Request changes / Withdraw** record a verdict in Forge on the
+  current head, at once. They count in Forge's gate; they are not posted to
+  GitHub as reviews yet (phase D posts them as the reviewer).
+- **Merge** needs a repo role (as for retrying pipelines) and a passing gate.
+  It merges **exactly the head you were looking at**: if someone pushed
+  since, Forge refuses (and GitHub would too). The merge is queued and sent
+  once the passing gate has reached the host; the page shows "Merging…",
+  then the merged change — or the host's reason if it refused.
+- Removing a rule that governed a change publishes a passing gate ("No Forge
+  merge rules apply") so the host is never left blocked.
 
 ## Setting it up
 
@@ -121,6 +196,9 @@ zero; they cover the last 24 hours (gauges).
 | `forge_provider_budget_remaining{credential,provider}` / `forge_provider_budget_capacity` | what is left of each credential's window. `credential` is `github-app:<installation id>`, `github:token:<fingerprint>` (never the token) or `<provider>:anon:<host>` |
 | `forge_changes_open` | open changes across all repos |
 | `forge_change_refresh_backlog` / `forge_change_refresh_oldest_seconds` | refreshes due now and the oldest one's age. A backlog that keeps growing means a budget is exhausted or a host is down |
+| `forge_provider_outbox_backlog` / `forge_provider_outbox_oldest_seconds` | gate publishes and merges waiting to be sent. Should drain within seconds; an old item means the host refuses writes (check the change page's action error) |
+| `forge_gate_evaluations_24h` | gate verdicts that changed |
+| `forge_gate_blocked_changes{rule}` | open changes each rule is holding right now (`approvals`, `ci`, `freeze`, …) |
 
 At Travafa scale (≈15 repos, ≈40 open changes, ≈300 change events a day)
 expect ≈300 refreshes plus ≈1,400 reconciles a day, most of them 304s: well
@@ -139,15 +217,34 @@ responses carry an `ETag` and answer `304` to `If-None-Match`.
   (`{"id": N}`) per update.
 - `GET /api/v1/code-review/metrics` — the About page numbers.
 - `GET /api/v1/code-review/capabilities` — capabilities per provider.
+- `GET /api/v1/merge-policies`, `GET /api/v1/host-identities` — rules and
+  login links (the latter admin-only).
+
+The change page's `GET /api/v1/changes/{id}` also returns `gate` (state,
+summary, `rules[]`, what the host shows), `actions` (queued and finished
+writes) and `permissions` (`can_review`, `can_merge`).
+
+Writes (session or API token; CSRF rules as everywhere):
+
+- `POST /api/v1/changes/{id}/reviews` `{verdict: approve|request_changes|dismiss, body}`
+- `POST /api/v1/changes/{id}/merge` `{expected_head, method}` → `202 {action}`
+  (`409` when the head moved, the gate does not pass, or the change is a draft)
+- `PUT /api/v1/merge-policies` (admin) — create or replace the rule for
+  `(repo, branch_pattern)`; omitted booleans default to CI required,
+  re-approve after push, changes requested block. `DELETE /api/v1/merge-policies/{id}`.
+- `PUT /api/v1/host-identities` `{provider, login, email}` (admin),
+  `DELETE /api/v1/host-identities/{provider}/{login}`.
 
 ## For plugin authors
 
 A host plugs in by implementing `vcs.ChangeSource` (`internal/vcs/review.go`)
 and declaring `Capabilities`; it makes HTTP calls only through
 `vcs.ChangeClient`, which enforces the read-path guard and the accounting.
-A provider is done when it passes the shared conformance suite
-(`internal/vcs/vcstest`, run by `internal/vcs/conformance_test.go`): event
-normalisation and idempotent replay, get-change after push / review / close,
-unknown changes, conditional listing, read-path refusal and rate-limit
-headers. The suite branches on capabilities, never on the provider's name,
+Writes implement `vcs.ChangeWriter` (`PublishCheck`, `Merge` with an
+expected head). A provider is done when it passes the shared conformance
+suite (`internal/vcs/vcstest`, run by `internal/vcs/conformance_test.go`):
+event normalisation and idempotent replay, get-change after push / review /
+close, unknown changes, conditional listing, read-path refusal, rate-limit
+headers, the published gate blocking a merge on the host until it passes,
+and merge-with-expected-head. The suite branches on capabilities, never on the provider's name,
 and fails if a plugin implements `ChangeSource` without a harness.
