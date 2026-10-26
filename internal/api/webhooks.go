@@ -742,6 +742,9 @@ func (s *Server) bitbucketWebhook(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Code review: merge request, review and comment events update the change
+	// whether or not they also start a pipeline.
+	s.ingestChanges(r, "bitbucket", body)
 	switch r.Header.Get("X-Event-Key") {
 	case "", "repo:push":
 		s.bitbucketPush(w, r, body)

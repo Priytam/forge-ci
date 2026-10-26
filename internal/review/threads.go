@@ -147,10 +147,13 @@ func (s *Service) postComment(ctx context.Context, o store.OutboxItem, w vcs.Thr
 		s.finishWrite(ctx, o, "pending", nil, err, time.Now().Add(30*time.Second), true)
 		return
 	}
-	req := vcs.CommentRequest{}
+	req := vcs.CommentRequest{ThreadID: c.ThreadExt}
+	if c.Path != "" {
+		req.Anchor = &vcs.ThreadAnchor{Path: c.Path, Side: c.Side, Line: c.Line, StartLine: c.StartLine, CommitSHA: c.CommitSHA}
+	}
 	switch {
 	case c.Path != "" && c.IsRoot:
-		req.Anchor = &vcs.ThreadAnchor{Path: c.Path, Side: c.Side, Line: c.Line, StartLine: c.StartLine, CommitSHA: c.CommitSHA}
+		req.ThreadID = ""
 	case c.Path != "":
 		if c.RootExt == "" {
 			// The thread's first comment is not on the host yet.
@@ -193,7 +196,7 @@ func (s *Service) postComment(ctx context.Context, o store.OutboxItem, w vcs.Thr
 	s.finishWrite(ctx, o, "done", map[string]string{"external_id": ext}, nil, time.Time{}, true)
 	// The host gives a new thread its id on the next read; webhooks would do
 	// it too, this makes resolve-right-after-commenting work without one.
-	if req.Anchor != nil {
+	if req.Anchor != nil && req.ReplyTo == "" {
 		_ = s.store.RequestChangeRefresh(ctx, c.Repo, c.Provider, c.Number, store.PriorityWebhook, debounce, false)
 	}
 }
@@ -201,7 +204,7 @@ func (s *Service) postComment(ctx context.Context, o store.OutboxItem, w vcs.Thr
 func (s *Service) resolveThread(ctx context.Context, o store.OutboxItem, w vcs.ThreadWriter) {
 	var p ResolvePayload
 	_ = json.Unmarshal(o.Payload, &p)
-	ext, resolved, _, repo, provider, err := s.store.ThreadForResolve(ctx, p.ThreadID)
+	ext, resolved, number, repo, provider, err := s.store.ThreadForResolve(ctx, p.ThreadID)
 	if errors.Is(err, store.ErrNotFound) {
 		s.finishWrite(ctx, o, "done", map[string]string{"note": "thread deleted"}, nil, time.Time{}, true)
 		return
@@ -228,7 +231,7 @@ func (s *Service) resolveThread(ctx context.Context, o store.OutboxItem, w vcs.T
 	}
 	// Resolving is idempotent on the host; the thread's current flag wins
 	// (several toggles while queued send only the last).
-	if err := w.ResolveThread(s.callCtx(ctx, o.Class, cred), s.client, ref, ext, resolved); err != nil {
+	if err := w.ResolveThread(s.callCtx(ctx, o.Class, cred), s.client, ref, number, ext, resolved); err != nil {
 		s.retryOrFail(ctx, o, err, cred, ref.Provider)
 		return
 	}

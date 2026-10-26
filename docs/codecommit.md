@@ -237,6 +237,7 @@ simply shows no link. See
 | Var | Component | Purpose |
 | --- | --- | --- |
 | `CODECOMMIT_API_BASE` | server | override the CodeCommit endpoint (testing) |
+| `CODECOMMIT_FORGE_ARN` | server | the identity Forge calls CodeCommit as, so code review skips its own approval; unset = asked of STS once ([code-review.md](code-review.md#aws-codecommit)) |
 | `FORGE_AWS_ROLE_ARN` | runner | override the role assumed for the clone |
 | `FORGE_AWS_AUTH` | runner | `instance` pins the ambient credential chain |
 | `AWS_REGION`, `AWS_PROFILE`, … | both | standard AWS SDK configuration |

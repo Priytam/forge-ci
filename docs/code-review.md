@@ -36,21 +36,20 @@ the provider APIs it uses, cost next to nothing **by construction**:
 Turn it all off with `CODE_REVIEW=off` on `forge-server`. Pages then show
 what is already stored and nothing is fetched.
 
-## What ships today (phases A–D)
+## What ships today (phases A–E)
 
 | | |
 |---|---|
 | **Changes** inbox (sidebar → Changes) | open / merged / closed / all, filter by repo, search by title or `#number`; CI status of the head commit, the **merge gate** (ready / waiting / blocked), approvals and "changes requested" per change; live updates |
 | **Files changed** (change page) | every file's diff, unified or side by side; the whole change against its target, or **changes since revision N**; "changes since you last looked"; lock files, vendored and other generated files, binaries and very large diffs collapsed until opened |
-| **Comments** | comment on any line of the diff (with **suggested changes**), reply, resolve and reopen; the change's conversation; threads that left the diff listed as outdated — **synced both ways** with GitHub |
+| **Comments** | comment on any line of the diff (with **suggested changes**), reply, resolve and reopen; the change's conversation; threads that left the diff listed as outdated — **synced both ways** with GitHub, GitLab, Bitbucket, Gitea and CodeCommit (where a host lacks a feature, Forge keeps it; see [the host table](#what-each-host-supports)) |
 | **Linked accounts** (user menu → Linked accounts) | link your GitHub account and your comments, reviews and merges are made as you |
 | Change page | the merge gate rule by rule, **Approve / Request changes / Withdraw**, **Merge** (merge / squash / rebase as the host allows), state, branches, description, labels, the Forge pipeline on the head commit, every review, every **revision** (each push is one, on every host) |
 | **Merge rules** (Admin → Merge rules) | rules per repo and target branch, and which host login is which Forge user |
-| Hosts | **GitHub** (App or token) and **plain git** (Forge-native changes; creating and merging them in the UI comes in phase F) |
+| Hosts | **GitHub** (App or token), **GitLab**, **Bitbucket Cloud**, **Gitea / Forgejo**, **AWS CodeCommit**, and **plain git** (Forge-native changes; creating and merging them in the UI comes in phase F) |
 | About page | provider calls, 304 share, calls per open change, read-path calls, refresh and write backlogs, gates and what blocks them, every budget |
 
-Coming next, in order: GitLab / Bitbucket / Gitea / CodeCommit
-(E), and Forge-native changes, code owners and a merge queue (F).
+Coming next: Forge-native changes, code owners and a merge queue (F).
 
 ## Diffs
 
@@ -77,8 +76,10 @@ Forge never asks a host's API for a diff. Every diff comes from git:
 - **Retention.** Diffs nobody has opened for 30 days and that no open change
   shows are deleted; opening one again recomputes it.
 
-Hosts: GitHub (via `refs/pull/<n>/head`, so forks and deleted branches work)
-and plain git. The others arrive with their plugins (phase E).
+Hosts: GitHub and Gitea (via `refs/pull/<n>/head`), GitLab (via
+`refs/merge-requests/<n>/head`) — so forks and deleted branches work —
+Bitbucket (the source branch, so not fork pull requests) and plain git.
+CodeCommit has no diffs yet.
 
 If a runner cannot compute a diff (the commits were force-pushed away, the
 repo cannot be reached), the page says why and offers **Try again**.
@@ -234,10 +235,128 @@ Forge stores them and re-reads the two branch tips with a single
 the plumbing — model, refresh, revisions — is already in place and covered by
 the same conformance suite as GitHub.
 
-### GitLab, Bitbucket, Gitea, CodeCommit
+### What each host supports
 
-Phase E. Until then their changes don't appear in the inbox; their pipelines
-are unaffected.
+Every host goes through the same plugin contract and passes the same
+conformance suite. Where a host lacks a feature, the page leaves out that
+control or Forge keeps the state itself. The page never pretends the host
+does something it doesn't.
+
+| | GitHub | GitLab | Bitbucket Cloud | Gitea / Forgejo | CodeCommit |
+|---|---|---|---|---|---|
+| Gate on the host | commit status | commit status | build status | commit status | **Forge's approval** |
+| Merge from Forge | merge / squash / rebase | merge / squash | merge / squash / fast-forward | merge / squash / rebase | merge / squash / fast-forward |
+| Line comments, replies | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Resolve on the host | ✓ | ✓ | ✓ | — Forge keeps it | — Forge keeps it |
+| Suggested changes render | ✓ | ✓ | as text | as text | as text |
+| Reviews posted to the host | ✓ (as the reviewer, with a linked account) | approve (request changes posts a comment) | approve / request changes | ✓ | — the verdict stays in Forge |
+| Diffs (runner mirror) | ✓ | ✓ | ✓ (not fork PRs) | ✓ | — not yet |
+| Reconcile list | conditional (`304`, free) | one list call | one list call | one list call | ids only |
+| Calls per refresh | 1 | 3 | 2 (+1 per extra page of comments, +1 per new head) | 3 (+1 per review with comments) | 3 |
+
+Each host has its own token bucket. The rate-limit headers that GitHub and
+GitLab send set the bucket; on the other hosts Forge's own count does. On
+hosts other than GitHub, Forge writes with the repo's token and names the
+person in the comment ("— ashwin@acme.io via Forge"). A
+`429` from any host (CodeCommit: `ThrottlingException`) pauses that bucket.
+
+### GitLab
+
+1. **Token.** The repo's connection token (Repos → Add repository) needs the
+   `api` scope, with the Developer role or higher. Without write access the
+   inbox still works; the gate, comments and merges then fail with GitLab's
+   reason.
+2. **Webhook.** In **Settings → Webhooks**, add
+   `https://<forge-host>/api/v1/webhooks/gitlab` and tick **Merge request
+   events** and **Comments** (keep **Push events** for pipelines).
+3. **Enforce the gate.** In **Settings → Merge requests**, turn on
+   **Pipelines must succeed**. Forge publishes `forge/merge-gate` as an
+   external status on the head commit, and GitLab holds the Merge button until
+   that status succeeds.
+
+### Bitbucket Cloud
+
+1. **Token.** Use a repository or workspace access token with **Pull
+   requests: Write** and **Repositories: Write**.
+2. **Webhook.** In **Repository settings → Webhooks**, add
+   `https://<forge-host>/api/v1/webhooks/bitbucket` with the **Pull Request**
+   triggers: created, updated, approved, approval removed, changes request
+   created and removed, merged, declined, and comment created, updated,
+   deleted, resolved and reopened.
+3. **Enforce the gate.** In **Branch restrictions**, add a merge check on the
+   target branch: **Minimum number of successful builds for the last commit
+   with no failed builds and no in progress builds**. A pending gate is an
+   in-progress build and a failed gate is a failed build, so either one holds
+   the merge. Enforcing merge checks needs Bitbucket Premium. On other plans
+   the check only warns.
+4. Bitbucket's merge call takes no expected head. Forge re-reads the pull
+   request right before merging and refuses if the head has moved, which
+   leaves a window of about one round trip. A pull request from a fork
+   has no diffs in Forge, because the runner mirror fetches branches from the
+   repo itself.
+
+### Gitea / Forgejo
+
+1. **Token.** Use an access token with **repository: Read and Write** and
+   **issue: Read and Write** (pull request comments are issue comments).
+2. **Webhook.** Add a Gitea webhook pointing at
+   `https://<forge-host>/api/v1/webhooks/gitea` with the **Pull Request**,
+   **Pull Request Review** and **Pull Request Comment** events. Forgejo and
+   Gogs headers are accepted too.
+3. **Enforce the gate.** In **Settings → Branches → Branch protection**, turn
+   on **Enable status check** and add `forge/merge-gate`.
+4. Gitea has no API to resolve a conversation. Resolving in Forge marks the
+   thread resolved in Forge only.
+
+### AWS CodeCommit
+
+CodeCommit has no commit statuses, so **the gate is an approval**. When
+Forge's rules pass, Forge approves the pull request as its own IAM identity.
+When they stop passing (a new push, a lost approval), Forge revokes that
+approval. An approval rule that requires Forge's approval makes CodeCommit
+enforce the gate.
+
+1. **Register the repo** as in [codecommit.md](codecommit.md). Code review
+   uses the control plane's identity, which is the repo's `aws_role_arn` if it
+   has one and the server's own identity otherwise.
+2. **Permissions.** Add the following to the control plane's policy on the
+   repo: `codecommit:ListPullRequests`, `GetPullRequest`,
+   `GetPullRequestApprovalStates`, `UpdatePullRequestApprovalState`,
+   `GetCommentsForPullRequest`, `PostCommentForPullRequest`,
+   `PostCommentReply`, `MergePullRequestByThreeWay`,
+   `MergePullRequestBySquash` and `MergePullRequestByFastForward`.
+3. **Events.** Add `"CodeCommit Comment on Pull Request"` to the EventBridge
+   rule's `detail-type` list, next to the two types it already has.
+4. **Enforce the gate.** Create an approval rule template and associate it
+   with the repo:
+
+   ```bash
+   aws codecommit create-approval-rule-template \
+     --approval-rule-template-name forge-merge-gate \
+     --approval-rule-template-content '{
+       "Version": "2018-11-08",
+       "DestinationReferences": ["refs/heads/main"],
+       "Statements": [{"Type": "Approvers", "NumberOfApprovalsNeeded": 1,
+         "ApprovalPoolMembers": ["arn:aws:sts::123456789012:assumed-role/forge-repo-role/*"]}]
+     }'
+   aws codecommit associate-approval-rule-template-with-repository \
+     --approval-rule-template-name forge-merge-gate --repository-name tablespace-api
+   ```
+
+   The pool member is the identity Forge calls CodeCommit as. If Forge uses
+   an assumed role, give the role ARN with a `/*` session wildcard.
+5. **Forge's identity.** Forge asks STS once who it is, so that it can leave
+   its own approval out of the reviews it shows. Set `CODECOMMIT_FORGE_ARN`
+   on the server to skip that call, or when `sts:GetCallerIdentity` is
+   denied.
+6. **Limits:**
+   - Approve and Request changes in Forge count in Forge's gate but aren't
+     posted to CodeCommit. Linked accounts don't apply here.
+   - Threads can't be resolved on CodeCommit, so Forge keeps the flag.
+   - The list call returns ids only, so reconcile finds new and closed pull
+     requests and events keep the rest current.
+   - CodeCommit changes have no diffs in Forge yet: the runner's mirror
+     would need signed task URLs.
 
 ## How a change stays current
 

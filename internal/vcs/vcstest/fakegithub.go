@@ -733,3 +733,6 @@ func (f *FakeGitHub) HostConversation(t *testing.T, id, login, body string) {
 	p.convo = append(p.convo, fakeComment{id: 5000 + f.commentSeq, login: login, body: body, created: time.Now().UTC().Truncate(time.Second)})
 	f.touch(p)
 }
+
+// RateHeaders: GitHub sends X-RateLimit-* on every response.
+func (f *FakeGitHub) RateHeaders() bool { return true }

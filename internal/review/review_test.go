@@ -29,6 +29,7 @@ func baseDSN() string {
 type harness struct {
 	t    *testing.T
 	gh   *vcstest.FakeGitHub
+	host vcstest.Host // gh, or the fake another host's tests run on
 	st   *store.Store
 	db   *pgx.Conn
 	svc  *Service
@@ -39,6 +40,15 @@ type harness struct {
 func newHarness(t *testing.T) *harness {
 	t.Helper()
 	gh := vcstest.NewFakeGitHub(t)
+	h := newHarnessOn(t, gh, proto.RepoRegistration{})
+	h.gh = gh
+	return h
+}
+
+// newHarnessOn connects acme/shop (or the host's own repo name) to host; reg
+// adds what the provider's registration needs beyond the fake's RepoRef.
+func newHarnessOn(t *testing.T, host vcstest.Host, reg proto.RepoRegistration) *harness {
+	t.Helper()
 	t.Setenv("FORGE_SECRET_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	ctx := context.Background()
 	admin, err := pgx.Connect(ctx, baseDSN())
@@ -66,9 +76,9 @@ func newHarness(t *testing.T) *harness {
 		_, _ = admin.Exec(ctx, "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)")
 		admin.Close(ctx)
 	})
-	repo := gh.Repo()
-	if err := st.RegisterRepo(ctx, proto.RepoRegistration{Repo: repo.Repo, Provider: "github",
-		CloneURL: repo.CloneURL, Token: repo.Token, DefaultBranch: "main"}); err != nil {
+	repo := host.Repo()
+	reg.Repo, reg.Provider, reg.CloneURL, reg.Token, reg.DefaultBranch = repo.Repo, repo.Provider, repo.CloneURL, repo.Token, "main"
+	if err := st.RegisterRepo(ctx, reg); err != nil {
 		t.Fatal(err)
 	}
 	old := debounce
@@ -78,13 +88,13 @@ func newHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &harness{t: t, gh: gh, st: st, db: db, svc: New(st), ctx: ctx, cred: cred}
+	return &harness{t: t, host: host, st: st, db: db, svc: New(st), ctx: ctx, cred: cred}
 }
 
 func (h *harness) ingest(id, kind string) int {
 	h.t.Helper()
-	hdr, body, _ := h.gh.Delivery(h.t, id, kind)
-	n, err := Ingest(h.ctx, h.st, "github", hdr, body)
+	hdr, body, _ := h.host.Delivery(h.t, id, kind)
+	n, err := Ingest(h.ctx, h.st, h.host.Repo().Provider, hdr, body)
 	if err != nil {
 		h.t.Fatal(err)
 	}

@@ -13,12 +13,12 @@ import (
 // requiring forge/merge-gate), a one-approval rule for main, and syncs it.
 func (h *harness) gated(title string) (hostID string, changeID int64) {
 	h.t.Helper()
-	h.gh.Protect(vcs.GateContext)
-	if _, err := h.st.UpsertMergePolicy(h.ctx, store.MergePolicy{Repo: vcstestRepo, BranchPattern: "main",
+	h.host.Protect(vcs.GateContext)
+	if _, err := h.st.UpsertMergePolicy(h.ctx, store.MergePolicy{Repo: h.host.Repo().Repo, BranchPattern: "main",
 		RequiredApprovals: 1, DismissOnPush: true, BlockOnChangesRequested: true}); err != nil {
 		h.t.Fatal(err)
 	}
-	id, _ := h.gh.Open(h.t, title)
+	id, _ := h.host.Open(h.t, title)
 	h.ingest(id, "change")
 	h.svc.RefreshDue(h.ctx)
 	list := h.open()

@@ -54,6 +54,9 @@ func (s *Server) gitlabWebhook(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Code review: merge request, review and comment events update the change
+	// whether or not they also start a pipeline.
+	s.ingestChanges(r, "gitlab", body)
 	delivery := r.Header.Get("X-Gitlab-Event-UUID")
 	if delivery == "" {
 		delivery = r.Header.Get("Idempotency-Key")
@@ -209,6 +212,9 @@ func (s *Server) giteaWebhook(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Code review: merge request, review and comment events update the change
+	// whether or not they also start a pipeline.
+	s.ingestChanges(r, "gitea", body)
 	delivery := header("Delivery")
 	switch header("Event") {
 	case "push":

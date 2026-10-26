@@ -372,7 +372,10 @@ func (s *Service) reconcile(ctx context.Context, claim store.ReconcileClaim) {
 	for _, r := range refs {
 		seen[r.ID] = true
 		have, ok := stored[r.ID]
-		if !ok || have.HeadSHA != r.HeadSHA || have.UpdatedAt.Unix() != r.UpdatedAt.Unix() {
+		// Hosts that list ids only (no head, no time) are refreshed by their
+		// events; the list then only finds new and closed changes.
+		idsOnly := r.HeadSHA == "" && r.UpdatedAt.IsZero()
+		if !ok || (!idsOnly && (!vcs.SameCommit(have.HeadSHA, r.HeadSHA) || have.UpdatedAt.Unix() != r.UpdatedAt.Unix())) {
 			request(r.ID)
 			stale++
 		}

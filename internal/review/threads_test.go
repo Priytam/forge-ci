@@ -12,10 +12,10 @@ import (
 	"github.com/priytamjeepandey/forge-ci/internal/vcs/vcstest"
 )
 
-// synced opens a pull request on the fake GitHub and syncs it into Forge.
+// synced opens a pull request on the fake host and syncs it into Forge.
 func (h *harness) synced(title string) (hostID string, changeID int64) {
 	h.t.Helper()
-	id, _ := h.gh.Open(h.t, title)
+	id, _ := h.host.Open(h.t, title)
 	h.ingest(id, "change")
 	h.svc.RefreshDue(h.ctx)
 	for _, c := range h.open() {
@@ -62,7 +62,7 @@ func (h *harness) lineComment(changeID int64, who, body string) (threadID, comme
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	if err := QueueComment(h.ctx, h.st, changeID, vcstestRepo, cid, who); err != nil {
+	if err := QueueComment(h.ctx, h.st, changeID, h.host.Repo().Repo, cid, who); err != nil {
 		h.t.Fatal(err)
 	}
 	return tid, cid

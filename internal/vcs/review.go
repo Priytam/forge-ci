@@ -88,20 +88,23 @@ type ThreadAnchor struct {
 	CommitSHA string
 }
 
-// CommentRequest is one comment to post: a new thread (Anchor set), a reply
-// (ReplyTo is a comment id in the thread), or else a conversation comment.
-// Body already carries Forge's idempotency marker.
+// CommentRequest is one comment to post. A reply names the thread
+// (ThreadID, the host's thread id) and its first comment (ReplyTo); a new
+// line thread has only Anchor; neither is a conversation comment. Replies
+// also carry their thread's Anchor, for hosts whose replies are new comments
+// on the same line. Body already carries Forge's idempotency marker.
 type CommentRequest struct {
-	Body    string
-	Anchor  *ThreadAnchor
-	ReplyTo string
+	Body     string
+	Anchor   *ThreadAnchor
+	ReplyTo  string
+	ThreadID string
 }
 
 // ThreadWriter posts comments and reviews and resolves threads. Hosts with
 // Capabilities.Threads implement it; elsewhere threads live in Forge only.
 type ThreadWriter interface {
 	PostComment(ctx context.Context, c *ChangeClient, repo RepoRef, id string, req CommentRequest) (externalID string, err error)
-	ResolveThread(ctx context.Context, c *ChangeClient, repo RepoRef, threadID string, resolved bool) error
+	ResolveThread(ctx context.Context, c *ChangeClient, repo RepoRef, id, threadID string, resolved bool) error
 	// PostReview submits a verdict (approve | request_changes | comment).
 	PostReview(ctx context.Context, c *ChangeClient, repo RepoRef, id, verdict, body, commitSHA string) (externalID string, err error)
 }
@@ -185,6 +188,11 @@ type Capabilities struct {
 	// Diffs: Forge can mirror the host with plain git and diff locally (set
 	// for every provider that is Mirrorable; never from a diff API).
 	Diffs bool `json:"diffs"`
+	// ConditionalList: the change list answers 304 when nothing changed (the
+	// reconcile is then free); otherwise it costs one call per repo.
+	ConditionalList bool `json:"conditional_list"`
+	// Reviews: people can approve on the host with their own linked account.
+	Reviews bool `json:"reviews"`
 }
 
 // Mirrorable is implemented by hosts Forge can mirror with plain git. It
@@ -231,6 +239,9 @@ type CheckResult struct {
 	State       string // success | pending | failure
 	Description string // one line (hosts cap it; GitHub at 140 characters)
 	TargetURL   string // the change page in Forge
+	// ChangeID names the change, for hosts that gate a change rather than a
+	// commit (CodeCommit: Forge's approval on the pull request).
+	ChangeID string
 }
 
 // MergeOpts is a merge request. ExpectedHead makes it safe: the host refuses
@@ -396,8 +407,10 @@ type CallInfo struct {
 // refuses read-path calls, reads rate-limit headers and reports each call to
 // OnCall, so accounting and budgets cannot be bypassed by a plugin.
 type ChangeClient struct {
-	client     *http.Client
-	githubBase string
+	client        *http.Client
+	githubBase    string
+	bitbucketBase string
+	cc            ccClients // CodeCommit API clients
 	// OnCall, when set, is told about every call (including refused ones).
 	OnCall func(ctx context.Context, info CallInfo)
 
@@ -409,8 +422,10 @@ type ChangeClient struct {
 // the Fetcher, so tests point it at a stub).
 func NewChangeClient() *ChangeClient {
 	return &ChangeClient{
-		client:     &http.Client{Timeout: 20 * time.Second},
-		githubBase: apiBase("GITHUB_API_BASE", "https://api.github.com"),
+		client:        &http.Client{Timeout: 20 * time.Second},
+		githubBase:    apiBase("GITHUB_API_BASE", "https://api.github.com"),
+		bitbucketBase: apiBase("BITBUCKET_API_BASE", "https://api.bitbucket.org"),
+		cc:            ccClients{noRetry: true},
 	}
 }
 
@@ -548,4 +563,43 @@ func nextLink(h http.Header) string {
 		return strings.Trim(strings.TrimSpace(segs[0]), "<>")
 	}
 	return ""
+}
+
+// jsonCall sends a JSON request through do() and decodes the answer into
+// out (when not nil). headers carry the host's auth.
+func (c *ChangeClient) jsonCall(ctx context.Context, provider, method, url string, headers map[string]string, in, out any) error {
+	var body io.Reader
+	if in != nil {
+		b, _ := json.Marshal(in)
+		body = strings.NewReader(string(b))
+	}
+	req, err := http.NewRequest(method, url, body)
+	if err != nil {
+		return err
+	}
+	if in != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("Accept", "application/json")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := c.do(ctx, provider, req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if out == nil || resp.StatusCode == http.StatusNoContent {
+		return nil
+	}
+	return json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(out)
+}
+
+// SameCommit reports whether two commit ids name the same commit, allowing
+// either to be abbreviated (at least 7 characters).
+func SameCommit(a, b string) bool {
+	if len(a) < len(b) {
+		a, b = b, a
+	}
+	return len(b) >= 7 && strings.HasPrefix(a, b)
 }

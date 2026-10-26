@@ -110,6 +110,9 @@ func CodeCommitHTTPSCloneURL(region, repo string) string {
 type ccClients struct {
 	mu sync.Mutex
 	m  map[string]*codecommit.Client
+	// noRetry: one attempt per call; the caller budgets and backs off itself
+	// (code review's outbox and refresh worker).
+	noRetry bool
 }
 
 // client returns a CodeCommit client for the given AWS context.
@@ -156,6 +159,9 @@ func (c *ccClients) client(ctx context.Context, region, roleARN, profile string)
 	cl := codecommit.NewFromConfig(cfg, func(o *codecommit.Options) {
 		if base != "" {
 			o.BaseEndpoint = aws.String(strings.TrimSuffix(base, "/"))
+		}
+		if c.noRetry {
+			o.RetryMaxAttempts = 1
 		}
 	})
 	if c.m == nil {

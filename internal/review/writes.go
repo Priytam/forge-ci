@@ -248,8 +248,14 @@ func (s *Service) send(ctx context.Context, o store.OutboxItem) {
 			s.finishWrite(ctx, o, "failed", nil, err, time.Time{}, true)
 			return
 		}
+		number := ""
+		if o.ChangeID != nil {
+			if c, err := s.store.ChangeForAction(ctx, *o.ChangeID); err == nil {
+				number = c.Number
+			}
+		}
 		err := w.PublishCheck(cctx, s.client, ref, p.SHA,
-			vcs.CheckResult{State: p.State, Description: p.Description, TargetURL: p.TargetURL})
+			vcs.CheckResult{State: p.State, Description: p.Description, TargetURL: p.TargetURL, ChangeID: number})
 		if err != nil {
 			s.retryOrFail(ctx, o, err, cred, ref.Provider)
 			return

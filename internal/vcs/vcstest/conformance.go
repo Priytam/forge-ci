@@ -53,6 +53,8 @@ type Host interface {
 	HostThread(t *testing.T, id, login, body string) string
 	// CommentsOn lists every comment on the change as "login: body".
 	CommentsOn(t *testing.T, id string) []string
+	// RateHeaders reports whether the host sends rate-limit headers.
+	RateHeaders() bool
 }
 
 // Harness names the plugin under test and builds a fresh fake host per test.
@@ -192,23 +194,29 @@ func RunChangeSource(t *testing.T, h Harness) {
 			}
 			return
 		}
-		if err != nil || !complete || len(refs) != 1 || refs[0].ID != id || refs[0].HeadSHA == "" {
+		if err != nil || !complete || len(refs) != 1 || refs[0].ID != id {
 			t.Fatalf("list = %+v complete=%v err=%v", refs, complete, err)
 		}
-		if v == (vcs.Validators{}) {
-			t.Fatal("list returned no validators: reconcile could never be conditional")
-		}
-		if _, _, _, err := src.ListOpenChanges(ctx, c, repo, v); !errors.Is(err, vcs.ErrNotModified) {
-			t.Fatalf("unchanged list err = %v, want ErrNotModified", err)
-		}
-		calls := rec.all()
-		if last := calls[len(calls)-1]; last.Result != "not_modified" {
-			t.Errorf("unchanged list reported as %q, want not_modified", last.Result)
+		if caps.ConditionalList {
+			if v == (vcs.Validators{}) {
+				t.Fatal("list returned no validators: reconcile could never be conditional")
+			}
+			if _, _, _, err := src.ListOpenChanges(ctx, c, repo, v); !errors.Is(err, vcs.ErrNotModified) {
+				t.Fatalf("unchanged list err = %v, want ErrNotModified", err)
+			}
+			calls := rec.all()
+			if last := calls[len(calls)-1]; last.Result != "not_modified" {
+				t.Errorf("unchanged list reported as %q, want not_modified", last.Result)
+			}
 		}
 		head := host.Push(t, id)
 		refs, _, _, err = src.ListOpenChanges(ctx, c, repo, v)
-		if err != nil || len(refs) != 1 || refs[0].HeadSHA != head {
+		if err != nil || len(refs) != 1 || (refs[0].HeadSHA != "" && !vcs.SameCommit(refs[0].HeadSHA, head)) {
 			t.Errorf("after push: list = %+v err = %v, want head %s", refs, err, head)
+		}
+		host.Close(t, id)
+		if refs, _, complete, err := src.ListOpenChanges(ctx, c, repo, vcs.Validators{}); err != nil || !complete || len(refs) != 0 {
+			t.Errorf("after close: list = %+v complete=%v err=%v, want empty", refs, complete, err)
 		}
 	})
 
@@ -242,21 +250,25 @@ func RunChangeSource(t *testing.T, h Harness) {
 		host := h.New(t)
 		c, rec := newClient()
 		id, stored := host.Open(t, "Budgeted")
-		reset := time.Now().Add(30 * time.Minute).Truncate(time.Second)
-		host.RateLimit(42, 5000, reset)
-		if _, err := src.GetChange(ctx, c, host.Repo(), id, stored); err != nil {
-			t.Fatal(err)
+		if host.RateHeaders() {
+			reset := time.Now().Add(30 * time.Minute).Truncate(time.Second)
+			host.RateLimit(42, 5000, reset)
+			if _, err := src.GetChange(ctx, c, host.Repo(), id, stored); err != nil {
+				t.Fatal(err)
+			}
+			calls := rec.all()
+			got := calls[len(calls)-1].Rate
+			if got == nil || got.Remaining != 42 || got.Limit != 5000 || !got.Reset.Equal(reset) {
+				t.Errorf("rate info = %+v, want 42/5000 reset %v", got, reset)
+			}
 		}
-		calls := rec.all()
-		got := calls[len(calls)-1].Rate
-		if got == nil || got.Remaining != 42 || got.Limit != 5000 || !got.Reset.Equal(reset) {
-			t.Errorf("rate info = %+v, want 42/5000 reset %v", got, reset)
-		}
+		// Every host can refuse for load; the plugin must say so, with when to
+		// come back (the host's Retry-After when it sends one).
 		host.RejectNext(http.StatusTooManyRequests, 30*time.Second)
 		_, err := src.GetChange(ctx, c, host.Repo(), id, stored)
 		var rl *vcs.RateLimitedError
-		if !errors.As(err, &rl) || rl.RetryAfter != 30*time.Second {
-			t.Errorf("rate-limited GetChange err = %v, want RateLimitedError(30s)", err)
+		if !errors.As(err, &rl) || rl.RetryAfter <= 0 || (host.RateHeaders() && rl.RetryAfter != 30*time.Second) {
+			t.Errorf("rate-limited GetChange err = %v, want RateLimitedError", err)
 		}
 	})
 }
@@ -280,7 +292,7 @@ func runWriter(t *testing.T, h Harness, caps vcs.Capabilities) {
 		host.Protect(vcs.GateContext)
 		id, _ := host.Open(t, "Gated")
 		head := host.Head(t, id)
-		if err := w.PublishCheck(ctx, c, repo, head, vcs.CheckResult{State: "pending", Description: "1 of 2 approvals"}); err != nil {
+		if err := w.PublishCheck(ctx, c, repo, head, vcs.CheckResult{State: "pending", Description: "1 of 2 approvals", ChangeID: id}); err != nil {
 			t.Fatal(err)
 		}
 		if got := host.Check(t, head, vcs.GateContext); got != "pending" {
@@ -291,7 +303,7 @@ func runWriter(t *testing.T, h Harness, caps vcs.Capabilities) {
 		}
 		// Re-publishing the same result is harmless (outbox retries).
 		for i := 0; i < 2; i++ {
-			if err := w.PublishCheck(ctx, c, repo, head, vcs.CheckResult{State: "success", Description: "All merge rules pass"}); err != nil {
+			if err := w.PublishCheck(ctx, c, repo, head, vcs.CheckResult{State: "success", Description: "All merge rules pass", ChangeID: id}); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -307,7 +319,7 @@ func runWriter(t *testing.T, h Harness, caps vcs.Capabilities) {
 		host.Protect(vcs.GateContext)
 		id, stored := host.Open(t, "Merge me")
 		approved := host.Head(t, id)
-		if err := w.PublishCheck(ctx, c, repo, approved, vcs.CheckResult{State: "success"}); err != nil {
+		if err := w.PublishCheck(ctx, c, repo, approved, vcs.CheckResult{State: "success", ChangeID: id}); err != nil {
 			t.Fatal(err)
 		}
 		head := host.Push(t, id) // someone pushes after approval
@@ -319,7 +331,7 @@ func runWriter(t *testing.T, h Harness, caps vcs.Capabilities) {
 		if !errors.Is(err, vcs.ErrNotMergeable) {
 			t.Fatalf("merge without a passing gate err = %v, want ErrNotMergeable", err)
 		}
-		if err := w.PublishCheck(ctx, c, repo, head, vcs.CheckResult{State: "success"}); err != nil {
+		if err := w.PublishCheck(ctx, c, repo, head, vcs.CheckResult{State: "success", ChangeID: id}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := w.Merge(ctx, c, repo, id, vcs.MergeOpts{Method: caps.MergeMethods[0], ExpectedHead: head}); err != nil {
@@ -336,7 +348,7 @@ func runWriter(t *testing.T, h Harness, caps vcs.Capabilities) {
 		host := h.New(t)
 		c, rec := newClient()
 		id, _ := host.Open(t, "x")
-		err := w.PublishCheck(vcs.ReadPath(ctx), c, host.Repo(), host.Head(t, id), vcs.CheckResult{State: "success"})
+		err := w.PublishCheck(vcs.ReadPath(ctx), c, host.Repo(), host.Head(t, id), vcs.CheckResult{State: "success", ChangeID: id})
 		if !errors.Is(err, vcs.ErrReadPath) || host.Check(t, host.Head(t, id), vcs.GateContext) != "" {
 			t.Errorf("read-path publish err = %v", err)
 		}
@@ -356,8 +368,8 @@ func runThreads(t *testing.T, h Harness, caps vcs.Capabilities) {
 	ctx := context.Background()
 	w := vcs.ThreadWriterFor(h.Provider)
 	src := vcs.ChangeSourceFor(h.Provider)
-	if w == nil || !caps.Resolve {
-		t.Fatalf("%s declares threads but has no ThreadWriter or no resolve", h.Provider)
+	if w == nil {
+		t.Fatalf("%s declares threads but has no ThreadWriter", h.Provider)
 	}
 	find := func(ch *vcs.Change, uid string) (vcs.Thread, vcs.Comment, bool) {
 		for _, th := range ch.Threads {
@@ -376,24 +388,37 @@ func runThreads(t *testing.T, h Harness, caps vcs.Capabilities) {
 		repo := host.Repo()
 		id, stored := host.Open(t, "Discuss")
 		head := host.Head(t, id)
-		cid, err := w.PostComment(ctx, c, repo, id, vcs.CommentRequest{Body: vcs.Mark("Why not a map?", "aa11bb22"),
-			Anchor: &vcs.ThreadAnchor{Path: "app.go", Side: "new", Line: 3, CommitSHA: head}})
+		anchor := &vcs.ThreadAnchor{Path: "app.go", Side: "new", Line: 3, CommitSHA: head}
+		cid, err := w.PostComment(ctx, c, repo, id, vcs.CommentRequest{Body: vcs.Mark("Why not a map?", "aa11bb22"), Anchor: anchor})
 		if err != nil || cid == "" {
 			t.Fatalf("new thread: %q %v", cid, err)
 		}
-		if _, err := w.PostComment(ctx, c, repo, id, vcs.CommentRequest{Body: vcs.Mark("Good point", "cc33dd44"), ReplyTo: cid}); err != nil {
+		// A reply names the thread as the host knows it (from a read).
+		ch, err := src.GetChange(ctx, c, repo, id, stored)
+		if err != nil {
+			t.Fatal(err)
+		}
+		root, rootComment, ok := find(ch, "aa11bb22")
+		if !ok {
+			t.Fatalf("new thread not read back: %+v", ch.Threads)
+		}
+		if _, err := w.PostComment(ctx, c, repo, id, vcs.CommentRequest{Body: vcs.Mark("Good point", "cc33dd44"),
+			Anchor: anchor, ReplyTo: rootComment.ExternalID, ThreadID: root.ExternalID}); err != nil {
 			t.Fatalf("reply: %v", err)
 		}
 		if _, err := w.PostComment(ctx, c, repo, id, vcs.CommentRequest{Body: vcs.Mark("Ready for another look", "ee55ff66")}); err != nil {
 			t.Fatalf("conversation: %v", err)
 		}
-		ch, err := src.GetChange(ctx, c, repo, id, stored)
+		ch, err = src.GetChange(ctx, c, repo, id, stored)
 		if err != nil {
 			t.Fatal(err)
 		}
 		th, cm, ok := find(ch, "aa11bb22")
-		if !ok || cm.ExternalID != cid || th.Path != "app.go" || th.Line != 3 || th.Side != "new" || len(th.Comments) != 2 {
+		if !ok || th.Path != "app.go" || th.Line != 3 || th.Side != "new" || len(th.Comments) != 2 {
 			t.Fatalf("thread = %+v (found %v)", th, ok)
+		}
+		if _, reply, _ := find(ch, "cc33dd44"); th.Comments[1].ExternalID != reply.ExternalID {
+			t.Errorf("the reply is not in the thread: %+v", th)
 		}
 		if body, _ := vcs.Unmark(cm.Body); body != "Why not a map?" {
 			t.Errorf("body = %q", body)
@@ -401,14 +426,17 @@ func runThreads(t *testing.T, h Harness, caps vcs.Capabilities) {
 		if conv, _, ok := find(ch, "ee55ff66"); !ok || conv.ExternalID != vcs.ConversationThread || conv.Path != "" {
 			t.Errorf("conversation comment = %+v %v", conv, ok)
 		}
-		if err := w.ResolveThread(ctx, c, repo, th.ExternalID, true); err != nil {
+		if !caps.Resolve {
+			return // Forge keeps the resolved flag itself
+		}
+		if err := w.ResolveThread(ctx, c, repo, id, th.ExternalID, true); err != nil {
 			t.Fatal(err)
 		}
 		ch, _ = src.GetChange(ctx, c, repo, id, stored)
 		if th, _, _ := find(ch, "aa11bb22"); !th.Resolved {
 			t.Error("resolve did not reach the host")
 		}
-		if err := w.ResolveThread(ctx, c, repo, th.ExternalID, false); err != nil {
+		if err := w.ResolveThread(ctx, c, repo, id, th.ExternalID, false); err != nil {
 			t.Fatal(err)
 		}
 		ch, _ = src.GetChange(ctx, c, repo, id, stored)
@@ -437,6 +465,9 @@ func runThreads(t *testing.T, h Harness, caps vcs.Capabilities) {
 		}
 	})
 
+	if !caps.Reviews {
+		return
+	}
 	t.Run("post review", func(t *testing.T) {
 		host := h.New(t)
 		c, _ := newClient()

@@ -3,6 +3,13 @@ import { getMe, mergeChange, relativeTime, reviewChange, type ChangePage } from 
 
 const MARK: Record<string, string> = { pass: "✓", pending: "…", fail: "✗" };
 
+const METHOD_LABELS: Record<string, string> = {
+  merge: "Merge commit",
+  squash: "Squash and merge",
+  rebase: "Rebase and merge",
+  fast_forward: "Fast-forward",
+};
+
 /**
  * Forge's rules between the change and its merge: each rule's progress, the
  * caller's review buttons, and Merge. What is offered depends on the host's
@@ -106,7 +113,7 @@ export default function MergeGate({ page, onChanged }: { page: ChangePage; onCha
           <select value={method} onChange={(e) => setMethod(e.target.value)} disabled={busy || merging}>
             {caps.merge_methods.map((m) => (
               <option key={m} value={m}>
-                {m === "merge" ? "Merge commit" : m === "squash" ? "Squash and merge" : "Rebase and merge"}
+                {METHOD_LABELS[m] ?? m}
               </option>
             ))}
           </select>

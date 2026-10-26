@@ -20,7 +20,7 @@ import (
 func (githubProvider) Capabilities() Capabilities {
 	return Capabilities{
 		Changes: true, Threads: true, Suggestions: true, Resolve: true, Drafts: true,
-		MergeMethods: []string{"merge", "squash", "rebase"}, StatusChecks: true,
+		MergeMethods: []string{"merge", "squash", "rebase"}, StatusChecks: true, ConditionalList: true, Reviews: true,
 	}
 }
 
@@ -526,6 +526,8 @@ func (githubProvider) PostComment(ctx context.Context, c *ChangeClient, repo Rep
 	var url string
 	payload := map[string]any{"body": req.Body}
 	switch {
+	case req.ReplyTo != "":
+		url = fmt.Sprintf("%s/pulls/%s/comments/%s/replies", base, id, req.ReplyTo)
 	case req.Anchor != nil:
 		url = fmt.Sprintf("%s/pulls/%s/comments", base, id)
 		side := "RIGHT"
@@ -537,8 +539,6 @@ func (githubProvider) PostComment(ctx context.Context, c *ChangeClient, repo Rep
 		if req.Anchor.StartLine > 0 && req.Anchor.StartLine < req.Anchor.Line {
 			payload["start_line"], payload["start_side"] = req.Anchor.StartLine, side
 		}
-	case req.ReplyTo != "":
-		url = fmt.Sprintf("%s/pulls/%s/comments/%s/replies", base, id, req.ReplyTo)
 	default:
 		url = fmt.Sprintf("%s/issues/%s/comments", base, id)
 	}
@@ -552,7 +552,7 @@ func (githubProvider) PostComment(ctx context.Context, c *ChangeClient, repo Rep
 }
 
 // ResolveThread resolves or reopens a review thread (GraphQL only).
-func (githubProvider) ResolveThread(ctx context.Context, c *ChangeClient, repo RepoRef, threadID string, resolved bool) error {
+func (githubProvider) ResolveThread(ctx context.Context, c *ChangeClient, repo RepoRef, _ string, threadID string, resolved bool) error {
 	mutation := "unresolveReviewThread"
 	if resolved {
 		mutation = "resolveReviewThread"

@@ -427,11 +427,11 @@ func (s *Store) MarkCommentFailed(ctx context.Context, c *CommentToSend, reason 
 }
 
 // ThreadForResolve returns a thread's host id and resolved flag, and its
-// change's repo and provider.
-func (s *Store) ThreadForResolve(ctx context.Context, threadID int64) (ext string, resolved bool, changeID int64, repo, provider string, err error) {
+// change's number, repo and provider.
+func (s *Store) ThreadForResolve(ctx context.Context, threadID int64) (ext string, resolved bool, number, repo, provider string, err error) {
 	err = s.pool.QueryRow(ctx,
-		`SELECT t.external_id, t.resolved, ch.id, ch.repo, ch.provider FROM change_threads t JOIN changes ch ON ch.id = t.change_id
-		 WHERE t.id = $1`, threadID).Scan(&ext, &resolved, &changeID, &repo, &provider)
+		`SELECT t.external_id, t.resolved, ch.number, ch.repo, ch.provider FROM change_threads t JOIN changes ch ON ch.id = t.change_id
+		 WHERE t.id = $1`, threadID).Scan(&ext, &resolved, &number, &repo, &provider)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = ErrNotFound
 	}

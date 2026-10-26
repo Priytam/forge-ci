@@ -117,3 +117,5 @@ func (g *FakeGit) HostMerge(*testing.T, string) error      { return nil }
 // A plain git server has no comments: threads on it live in Forge.
 func (g *FakeGit) HostThread(*testing.T, string, string, string) string { return "" }
 func (g *FakeGit) CommentsOn(*testing.T, string) []string               { return nil }
+
+func (g *FakeGit) RateHeaders() bool { return false }
