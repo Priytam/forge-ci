@@ -140,6 +140,13 @@ func (c repoConn) codeCommitRepo() (vcs.CodeCommitRepo, bool) {
 // returned only for building an authed clone URL / Authorization header — never
 // logged, never returned by Forge's own API.
 func (s *Store) resolveRepoAuth(ctx context.Context, repo string) (conn repoConn, found bool, err error) {
+	// A credential is only ever needed to call the host, and pages never
+	// call the host: refuse (and count) instead of minting a token.
+	if vcs.IsReadPath(ctx) {
+		_ = s.RecordProviderCall(context.WithoutCancel(ctx), vcs.CallInfo{
+			Provider: "credential", Class: "read", Result: "refused", ReadPath: true})
+		return repoConn{}, false, vcs.ErrReadPath
+	}
 	var encToken, appID, encKey, installID string
 	err = s.pool.QueryRow(ctx,
 		`SELECT provider, clone_url, token,

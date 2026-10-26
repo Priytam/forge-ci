@@ -69,7 +69,9 @@ connect it to your VCS:
    - Content type: `application/json`
    - Secret: the same `WEBHOOK_SECRET`
    - Events: *Push* — and, for PR pipelines, also *Pull requests*
-     (see [PR/MR-triggered pipelines](#prmr-triggered-pipelines))
+     (see [PR/MR-triggered pipelines](#prmr-triggered-pipelines)); for the
+     code-review inbox also *Pull request reviews*
+     (see [code-review.md](code-review.md#github))
 4. Push a commit. GitHub's "Recent Deliveries" should show **201**, and the
    pipeline appears under the repo card in Forge with the pusher recorded as
    `triggered_by` (which drives the self-approval rule).

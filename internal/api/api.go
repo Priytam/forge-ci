@@ -20,6 +20,7 @@ import (
 	"github.com/priytamjeepandey/forge-ci/internal/oidc"
 	"github.com/priytamjeepandey/forge-ci/internal/proto"
 	"github.com/priytamjeepandey/forge-ci/internal/store"
+	"github.com/priytamjeepandey/forge-ci/internal/vcs"
 )
 
 const (
@@ -34,12 +35,13 @@ const (
 )
 
 type Server struct {
-	store  *store.Store
-	blobs  blob.Store
-	logs   *logstore.Service // high-volume log tier (redis live buffer + blob archive, or postgres)
-	mux    *http.ServeMux
-	sso    ssoCache
-	policy policyCache // personal API token policy (api_tokens.go)
+	store   *store.Store
+	blobs   blob.Store
+	logs    *logstore.Service // high-volume log tier (redis live buffer + blob archive, or postgres)
+	mux     *http.ServeMux
+	sso     ssoCache
+	policy  policyCache // personal API token policy (api_tokens.go)
+	changes changeHub   // live change notifications for SSE pages (code_review.go)
 
 	runnerAuth       string // RUNNER_AUTH: "on" | "off"
 	maxJobLogBytes   int64  // MAX_JOB_LOG_BYTES
@@ -118,6 +120,7 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 	srv.registerStatusRoutes()
 	srv.registerHistoryRoutes()
 	srv.registerRunnerLiveRoutes()
+	srv.registerCodeReviewRoutes()
 
 	return srv
 }
@@ -452,6 +455,11 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 	}
 	if lat, err := s.store.RecentLatency(r.Context(), time.Hour); err == nil {
 		_, _ = io.WriteString(w, renderLatencyMetrics(lat))
+	}
+	if cr, err := s.loadCodeReviewStats(vcs.ReadPath(r.Context())); err == nil {
+		_, _ = io.WriteString(w, renderCodeReviewMetrics(cr))
+	} else {
+		slog.Error("metrics: code review", "err", err)
 	}
 }
 

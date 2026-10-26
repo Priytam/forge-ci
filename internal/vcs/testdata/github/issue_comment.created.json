@@ -1,0 +1,6 @@
+{
+  "action": "created",
+  "issue": {"number": 42, "pull_request": {"url": "https://api.github.com/repos/Letztrip/cos/pulls/42"}},
+  "comment": {"id": 99, "body": "ping", "user": {"login": "harish-travafa"}},
+  "repository": {"full_name": "Letztrip/cos"}
+}

@@ -1066,3 +1066,108 @@ CREATE TABLE IF NOT EXISTS runner_capacity_snapshots (
     oldest_wait_s   INT    NOT NULL DEFAULT 0,
     starved_tags    TEXT[] NOT NULL DEFAULT '{}'       -- tags with runners but no available slot
 );
+
+-- Code review (batch 7, phase A): pull/merge requests from every host in one
+-- model. Webhooks keep rows current; a refresh is claimed with a lease (like
+-- a job) and coalesced per change: requests while one is due or in flight
+-- ride along with it. Pages read only these tables — never the host.
+-- state is open | merged | closed; draft is separate (an open change can be
+-- a draft). number is the host's per-repo id (or Forge's, for native changes).
+CREATE TABLE IF NOT EXISTS changes (
+    id                   BIGSERIAL   PRIMARY KEY,
+    repo                 TEXT        NOT NULL,
+    provider             TEXT        NOT NULL,
+    number               TEXT        NOT NULL,
+    title                TEXT        NOT NULL DEFAULT '',
+    body                 TEXT        NOT NULL DEFAULT '',
+    author               TEXT        NOT NULL DEFAULT '',
+    source_branch        TEXT        NOT NULL DEFAULT '',
+    target_branch        TEXT        NOT NULL DEFAULT '',
+    state                TEXT        NOT NULL DEFAULT 'open'
+        CHECK (state IN ('open','merged','closed')),
+    draft                BOOLEAN     NOT NULL DEFAULT FALSE,
+    head_sha             TEXT        NOT NULL DEFAULT '',
+    base_sha             TEXT        NOT NULL DEFAULT '',
+    merge_base_sha       TEXT        NOT NULL DEFAULT '',
+    labels               TEXT[]      NOT NULL DEFAULT '{}',
+    url                  TEXT        NOT NULL DEFAULT '',
+    created_at           TIMESTAMPTZ,
+    updated_at           TIMESTAMPTZ,          -- the host's last update
+    synced_at            TIMESTAMPTZ,          -- last write from the host (NULL: placeholder)
+    last_event_at        TIMESTAMPTZ,          -- last webhook for this change
+    refresh_due_at       TIMESTAMPTZ,
+    refresh_requested_at TIMESTAMPTZ,
+    refresh_priority     INT         NOT NULL DEFAULT 0,
+    refresh_lease_until  TIMESTAMPTZ,
+    refresh_attempts     INT         NOT NULL DEFAULT 0,
+    refresh_error        TEXT        NOT NULL DEFAULT '',
+    UNIQUE (repo, number)
+);
+CREATE INDEX IF NOT EXISTS changes_inbox_idx ON changes (state, updated_at DESC);
+CREATE INDEX IF NOT EXISTS changes_refresh_idx ON changes (refresh_due_at) WHERE refresh_due_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS pipelines_repo_sha_idx ON pipelines (repo, sha, id DESC);
+
+-- Every push is a revision, even on hosts that don't model one, so "changes
+-- since revision N" works everywhere.
+CREATE TABLE IF NOT EXISTS change_revisions (
+    change_id BIGINT      NOT NULL REFERENCES changes(id) ON DELETE CASCADE,
+    number    INT         NOT NULL,
+    head_sha  TEXT        NOT NULL,
+    base_sha  TEXT        NOT NULL DEFAULT '',
+    pushed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (change_id, number),
+    UNIQUE (change_id, head_sha)
+);
+
+-- Reviews: source 'host' rows mirror the host's list (replaced on each
+-- refresh); 'forge' rows are verdicts given in Forge.
+CREATE TABLE IF NOT EXISTS change_reviews (
+    id           BIGSERIAL   PRIMARY KEY,
+    change_id    BIGINT      NOT NULL REFERENCES changes(id) ON DELETE CASCADE,
+    source       TEXT        NOT NULL DEFAULT 'host',
+    external_id  TEXT        NOT NULL DEFAULT '',
+    reviewer     TEXT        NOT NULL,
+    verdict      TEXT        NOT NULL
+        CHECK (verdict IN ('approve','request_changes','comment','dismissed')),
+    body         TEXT        NOT NULL DEFAULT '',
+    commit_sha   TEXT        NOT NULL DEFAULT '',
+    submitted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (change_id, source, external_id)
+);
+
+-- Per-repo reconcile: the conditional list's validators and when to run it
+-- next (15 min while the repo has open changes, hours otherwise).
+CREATE TABLE IF NOT EXISTS change_sync (
+    repo               TEXT        PRIMARY KEY,
+    etag               TEXT        NOT NULL DEFAULT '',
+    last_modified      TEXT        NOT NULL DEFAULT '',
+    next_reconcile_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_reconciled_at TIMESTAMPTZ,
+    last_result        TEXT        NOT NULL DEFAULT '',
+    lease_until        TIMESTAMPTZ
+);
+
+-- Provider budget per credential (an App installation, a token, an IAM
+-- role): a token bucket in Postgres, row-locked, refilled continuously and
+-- overwritten by the host's own rate-limit headers when it sends them.
+CREATE TABLE IF NOT EXISTS provider_budgets (
+    credential TEXT             PRIMARY KEY,
+    provider   TEXT             NOT NULL,
+    capacity   INT              NOT NULL,
+    tokens     DOUBLE PRECISION NOT NULL,
+    window_s   INT              NOT NULL DEFAULT 3600,
+    reset_at   TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ      NOT NULL DEFAULT now()
+);
+
+-- Provider calls per hour by provider, class and result. read_path rows are
+-- calls refused while serving a page: the count must stay 0.
+CREATE TABLE IF NOT EXISTS provider_call_stats (
+    hour      TIMESTAMPTZ NOT NULL,
+    provider  TEXT        NOT NULL,
+    class     TEXT        NOT NULL,
+    result    TEXT        NOT NULL,
+    read_path BOOLEAN     NOT NULL DEFAULT FALSE,
+    calls     BIGINT      NOT NULL DEFAULT 0,
+    PRIMARY KEY (hour, provider, class, result, read_path)
+);

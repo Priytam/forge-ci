@@ -509,6 +509,9 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Code review first: pull request and review events update the change
+	// whether or not they also start a pipeline.
+	s.ingestChanges(r, "github", body)
 	switch r.Header.Get("X-GitHub-Event") {
 	case "", "push":
 		s.githubPush(w, r, body)

@@ -23,6 +23,7 @@ export const NAV: NavSection[] = [
     title: "Work",
     items: [
       { to: "/", label: "Repos", icon: "repos", keywords: "home repositories" },
+      { to: "/changes", label: "Changes", icon: "changes", keywords: "pull requests merge requests pr mr review inbox" },
       { to: "/pipelines", label: "Pipelines", icon: "pipelines", keywords: "runs builds" },
       { to: "/jobs", label: "Jobs", icon: "jobs", keywords: "running queued failed" },
       { to: "/environments", label: "Environments", icon: "environments", keywords: "deployments dev staging prod board" },
@@ -98,6 +99,8 @@ export function crumbsFor(pathname: string, search: string): Crumb[] {
     }
     case "pipelines":
       return b ? [{ label: "Pipelines", to: "/pipelines" }, { label: `#${b}` }] : [{ label: "Pipelines" }];
+    case "changes":
+      return b ? [{ label: "Changes", to: "/changes" }, { label: `Change ${b}` }] : [{ label: "Changes" }];
     case "jobs": {
       if (!b) return [{ label: "Jobs" }];
       const p = q.get("pipeline");

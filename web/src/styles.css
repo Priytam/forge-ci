@@ -5691,3 +5691,10 @@ kbd {
 .runner-card .meter-track {
   flex-basis: 40px;
 }
+
+/* Code review: a change's description, as written (markdown shown raw). */
+.change-body {
+  white-space: pre-wrap;
+  font: inherit;
+  margin: 0;
+}

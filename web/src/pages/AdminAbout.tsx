@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
-import { getAbout, getFailingWebhooks, getIsAdmin, relativeTime, setMaintenance, type AboutInfo, type WebhookHealth } from "../api";
+import { getAbout, getCodeReviewStats, getFailingWebhooks, getIsAdmin, relativeTime, setMaintenance, type AboutInfo, type CodeReviewStats, type WebhookHealth } from "../api";
 
 /** Admin: server and runner versions, migrations, uptime, maintenance mode. */
 export default function AdminAbout() {
@@ -9,8 +9,10 @@ export default function AdminAbout() {
   const [message, setMessage] = useState("");
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [failing, setFailing] = useState<WebhookHealth[]>([]);
+  const [review, setReview] = useState<CodeReviewStats | null>(null);
   const reload = useCallback(() => {
     void getFailingWebhooks().then(setFailing).catch(() => undefined);
+    void getCodeReviewStats().then(setReview).catch(() => undefined);
     void getAbout()
       .then((i) => {
         setInfo(i);
@@ -123,6 +125,8 @@ export default function AdminAbout() {
         )}
       </div>
 
+      {review && <CodeReviewCard stats={review} />}
+
       <form className="card settings-form" style={{ marginTop: 16 }}>
         <h2>Maintenance mode</h2>
         <p className="muted">
@@ -151,6 +155,63 @@ export default function AdminAbout() {
         </div>
         {msg && <div className={msg.ok ? "muted" : "error-banner"}>{msg.text}</div>}
       </form>
+    </div>
+  );
+}
+
+/** Provider API footprint of code review: what it cost, what is left, and
+ *  the read-path guard (pages must never call a provider). */
+function CodeReviewCard({ stats }: { stats: CodeReviewStats }) {
+  const byProvider = new Map<string, number>();
+  for (const c of stats.calls) if (!c.read_path) byProvider.set(c.provider, (byProvider.get(c.provider) ?? 0) + c.calls);
+  return (
+    <div className="card settings-form" style={{ marginTop: 16 }}>
+      <h2>Code review: provider API use ({stats.window_hours}h)</h2>
+      <table className="dense-table">
+        <tbody>
+          <tr>
+            <td className="muted">Provider calls</td>
+            <td>
+              {stats.total_calls}
+              {byProvider.size > 0 && (
+                <span className="muted"> ({Array.from(byProvider, ([p, n]) => `${p} ${n}`).join(", ")})</span>
+              )}
+            </td>
+          </tr>
+          <tr>
+            <td className="muted">Answered 304 (free on GitHub)</td>
+            <td>{Math.round(stats.not_modified_ratio * 100)}%</td>
+          </tr>
+          <tr>
+            <td className="muted">Calls per open change</td>
+            <td>
+              {stats.calls_per_open_change.toFixed(1)} <span className="muted">({stats.open_changes} open)</span>
+            </td>
+          </tr>
+          <tr>
+            <td className="muted">Calls attempted while serving a page</td>
+            <td>{stats.read_path_calls === 0 ? "0 (as designed)" : <span className="error-text">{stats.read_path_calls} — refused; this is a bug</span>}</td>
+          </tr>
+          <tr>
+            <td className="muted">Refreshes waiting</td>
+            <td>
+              {stats.refresh_backlog}
+              {stats.refresh_backlog > 0 && <span className="muted"> (oldest {Math.round(stats.oldest_refresh_seconds)}s)</span>}
+            </td>
+          </tr>
+          {stats.budgets.map((b) => (
+            <tr key={b.credential}>
+              <td className="muted">
+                Budget <span className="mono">{b.credential}</span>
+              </td>
+              <td>
+                {b.remaining} / {b.capacity} left ({Math.round((1 - b.remaining / Math.max(b.capacity, 1)) * 100)}% used)
+                {b.reset_at && <span className="muted"> · resets at {new Date(b.reset_at).toLocaleTimeString()}</span>}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
