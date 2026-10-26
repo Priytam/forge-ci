@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/priytamjeepandey/forge-ci/internal/blob"
 	"github.com/priytamjeepandey/forge-ci/internal/store"
 	"github.com/priytamjeepandey/forge-ci/internal/vcs"
 )
@@ -87,6 +88,7 @@ func Ingest(ctx context.Context, st *store.Store, provider string, hdr http.Head
 // Service runs the refresh worker and the reconcile.
 type Service struct {
 	store  *store.Store
+	blobs  blob.Store // diff storage (retention sweep)
 	client *vcs.ChangeClient
 	tick   time.Duration
 	batch  int
@@ -104,12 +106,14 @@ func New(st *store.Store) *Service {
 func (s *Service) Client() *vcs.ChangeClient { return s.client }
 
 // Loop runs the service until ctx ends (no-op when code review is off).
-func Loop(ctx context.Context, st *store.Store) {
+func Loop(ctx context.Context, st *store.Store, blobs blob.Store) {
 	if !Enabled() {
 		slog.Info("code review: disabled (CODE_REVIEW=off)")
 		return
 	}
-	New(st).Run(ctx)
+	s := New(st)
+	s.blobs = blobs
+	s.Run(ctx)
 }
 
 // Run drives refreshes, gate evaluations and queued writes every tick, and
@@ -139,6 +143,7 @@ func (s *Service) Run(ctx context.Context) {
 				if err := s.store.PruneProviderCallStats(ctx, statsKeep); err != nil {
 					slog.Warn("code review: prune call stats", "err", err)
 				}
+				ExpireDiffs(ctx, s.store, s.blobs)
 			}
 		}
 	}

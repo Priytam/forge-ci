@@ -5,6 +5,7 @@ import StatusBadge from "../components/StatusBadge";
 import ChangeStateBadge from "../components/ChangeStateBadge";
 import Avatar from "../components/Avatar";
 import MergeGate from "../components/MergeGate";
+import DiffView from "../components/DiffView";
 import { useChangeStream } from "../hooks/useChangeStream";
 
 const VERDICT: Record<string, string> = {
@@ -66,6 +67,7 @@ export default function ChangeDetail() {
       )}
 
       <MergeGate page={page} onChanged={load} />
+      {caps.diffs && <DiffView page={page} />}
 
       <div className="card settings-form" style={{ marginTop: 16 }}>
         <h2>Checks</h2>

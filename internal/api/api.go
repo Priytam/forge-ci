@@ -43,6 +43,9 @@ type Server struct {
 	policy  policyCache // personal API token policy (api_tokens.go)
 	changes changeHub   // live change notifications for SSE pages (code_review.go)
 
+	diffCache *byteLRU     // recently served diff blobs (diffs.go)
+	diffOpens *latencyRing // how long diff opens took on this instance
+
 	runnerAuth       string // RUNNER_AUTH: "on" | "off"
 	maxJobLogBytes   int64  // MAX_JOB_LOG_BYTES
 	maxArtifactBytes int64  // MAX_ARTIFACT_BYTES
@@ -61,6 +64,8 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 		maxArtifactBytes: envBytes("MAX_ARTIFACT_BYTES", defaultMaxArtifactByte),
 		maxCacheBytes:    envBytes("MAX_CACHE_BYTES", defaultMaxCacheByte),
 		maxWebhookBytes:  envBytes("WEBHOOK_MAX_BYTES", defaultMaxWebhookBytes),
+		diffCache:        newByteLRU(diffCacheBytes),
+		diffOpens:        newLatencyRing(1000),
 	}
 	srv.initRunnerAuth()
 	m := srv.mux
@@ -121,6 +126,7 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 	srv.registerHistoryRoutes()
 	srv.registerRunnerLiveRoutes()
 	srv.registerCodeReviewRoutes()
+	srv.registerRunnerTaskRoutes()
 
 	return srv
 }

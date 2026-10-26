@@ -286,6 +286,28 @@ job) and dedicated build hosts. With the docker/kubernetes executors each job
 starts in a fresh container, so prefer the registry cache
 (docs/docker-layer-cache.md) there.
 
+### Git mirrors for code-review diffs (runner tasks)
+
+Besides jobs, a runner takes small **tasks** in-process — outside its job
+slots and its executor: computing the diffs Forge shows on change pages
+([code-review.md](code-review.md#diffs)). For that it keeps one **blobless
+partial mirror** per repo on its own disk and fetches into it only when a
+diff names a commit it lacks (the git protocol, never a host API); file
+contents arrive lazily, only for the files a diff touches. A repo's diffs go
+to the runner that holds its mirror (affinity key `mirror:<repo>`) and to any
+runner after `MIRROR_AFFINITY_WAIT` (server, default 10s) or when that runner
+is offline; a lost mirror is rebuilt anywhere in seconds.
+
+| Runner env | Purpose | Default |
+|---|---|---|
+| `RUNNER_MIRROR_DIR` | where mirrors live | the user cache dir (`~/.cache/forge-runner/mirrors` on Linux) |
+| `RUNNER_TASKS` | `off` to never take tasks | on |
+
+Needs git 2.27+ on the runner host (`git version`); a runner without it logs
+that it will not compute diffs and takes jobs as before. The clone credential
+is minted per task, set on the mirror's remote only while the task runs and
+redacted from every error. Paused and draining runners take no tasks.
+
 ### Persistent per-runner BuildKit cache — not built yet
 
 A long-lived BuildKit daemon per runner (shared across jobs) would make

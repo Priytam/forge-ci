@@ -133,6 +133,9 @@ func main() {
 	slog.Info("forge-runner started", "id", *runnerID, "server", *server,
 		"executor", exec.Name(), "tags", tags, "concurrency", *conc, "drain_grace", grace)
 
+	// Runner tasks (diffs from a git mirror) run beside the job slots.
+	go taskLoop(drainCtx, c, *runnerID)
+
 	// The manager stays resident; each slot forks work per acquired job
 	// (with the kubernetes executor, that fork is an ephemeral pod).
 	var wg sync.WaitGroup

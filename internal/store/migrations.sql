@@ -1278,3 +1278,63 @@ CREATE TABLE IF NOT EXISTS provider_outbox (
 );
 CREATE INDEX IF NOT EXISTS provider_outbox_due_idx ON provider_outbox (next_attempt_at) WHERE state = 'pending';
 CREATE INDEX IF NOT EXISTS provider_outbox_change_idx ON provider_outbox (change_id, id DESC);
+
+-- Code review (batch 7, phase C): diffs from runner-held git mirrors.
+-- runner_tasks is a queue of small system work runners do in-process (not
+-- jobs: no pipeline, no executor, no job slot). affinity_key keeps a repo's
+-- mirror on the runner that holds it (runner_affinity, as for job caches).
+CREATE TABLE IF NOT EXISTS runner_tasks (
+    id           BIGSERIAL   PRIMARY KEY,
+    kind         TEXT        NOT NULL,
+    repo         TEXT        NOT NULL,
+    affinity_key TEXT        NOT NULL DEFAULT '',
+    dedupe_key   TEXT        NOT NULL UNIQUE,
+    payload      JSONB       NOT NULL DEFAULT '{}',
+    state        TEXT        NOT NULL DEFAULT 'pending'
+        CHECK (state IN ('pending','running','done','failed')),
+    runner_id    TEXT        NOT NULL DEFAULT '',
+    attempts     INT         NOT NULL DEFAULT 0,
+    queued_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    not_before   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    started_at   TIMESTAMPTZ,
+    finished_at  TIMESTAMPTZ,
+    lease_until  TIMESTAMPTZ,
+    error        TEXT        NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS runner_tasks_pending_idx ON runner_tasks (queued_at) WHERE state IN ('pending','running');
+
+-- One row per diff Forge knows: (from, to, mode) as asked — mode 'change'
+-- diffs from the merge base of from (target tip) and to (head), 'range'
+-- diffs the two commits. The bytes live in the blob store under blob_prefix
+-- (immutable: commits never change), the row says where and how big.
+CREATE TABLE IF NOT EXISTS change_diffs (
+    repo         TEXT        NOT NULL,
+    from_sha     TEXT        NOT NULL,
+    to_sha       TEXT        NOT NULL,
+    mode         TEXT        NOT NULL CHECK (mode IN ('change','range')),
+    state        TEXT        NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','ready','failed')),
+    merge_base   TEXT        NOT NULL DEFAULT '',
+    blob_prefix  TEXT        NOT NULL DEFAULT '',
+    chunks       INT         NOT NULL DEFAULT 0,
+    files        INT         NOT NULL DEFAULT 0,
+    additions    INT         NOT NULL DEFAULT 0,
+    deletions    INT         NOT NULL DEFAULT 0,
+    bytes        BIGINT      NOT NULL DEFAULT 0,
+    fetched      BOOLEAN     NOT NULL DEFAULT FALSE,
+    compute_ms   INT         NOT NULL DEFAULT 0,
+    error        TEXT        NOT NULL DEFAULT '',
+    requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    ready_at     TIMESTAMPTZ,
+    last_read_at TIMESTAMPTZ,
+    PRIMARY KEY (repo, from_sha, to_sha, mode)
+);
+CREATE INDEX IF NOT EXISTS change_diffs_ready_idx ON change_diffs (ready_at) WHERE state = 'ready';
+
+-- Diff page opens per hour: served ready (hit), had to compute (miss),
+-- still computing (pending) or failed.
+CREATE TABLE IF NOT EXISTS diff_read_stats (
+    hour   TIMESTAMPTZ NOT NULL,
+    result TEXT        NOT NULL,
+    reads  BIGINT      NOT NULL DEFAULT 0,
+    PRIMARY KEY (hour, result)
+);

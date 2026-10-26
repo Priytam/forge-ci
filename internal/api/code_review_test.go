@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/priytamjeepandey/forge-ci/internal/blob"
 	"github.com/priytamjeepandey/forge-ci/internal/proto"
 	"github.com/priytamjeepandey/forge-ci/internal/review"
 	"github.com/priytamjeepandey/forge-ci/internal/store"
@@ -37,7 +38,7 @@ func newReviewHarness(t *testing.T) *reviewHarness {
 		CloneURL: repo.CloneURL, Token: repo.Token, DefaultBranch: "main"}); err != nil {
 		t.Fatal(err)
 	}
-	return &reviewHarness{apiHarness: &apiHarness{t: t, st: st, db: db, srv: New(st, nil, nil)}, gh: gh}
+	return &reviewHarness{apiHarness: &apiHarness{t: t, st: st, db: db, srv: New(st, blob.NewLocal(t.TempDir()), nil)}, gh: gh}
 }
 
 // webhook posts a GitHub delivery through the real handler.
@@ -76,10 +77,18 @@ func (h *reviewHarness) seedChange() int64 {
 func TestChangeReadRoutesMakeNoProviderCalls(t *testing.T) {
 	h := newReviewHarness(t)
 	changeID := h.seedChange()
+	// A stored diff, so the blob route serves something real.
+	rng := strings.Repeat("a", 40) + ".." + strings.Repeat("b", 40)
+	key, _ := review.BlobKeyFromURL(review.RepoKey("acme/shop"), "change", rng, "manifest.json")
+	if _, err := h.srv.blobs.Put(context.Background(), key, strings.NewReader(`{"version":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	params := strings.NewReplacer("{id}", strconv.FormatInt(changeID, 10), "{repo}", review.RepoKey("acme/shop"),
+		"{mode}", "change", "{range}", rng, "{rest...}", "manifest.json")
 	before := h.gh.Requests()
 	for pattern := range h.srv.changeReadRoutes() {
 		method, path, _ := strings.Cut(pattern, " ")
-		path = strings.ReplaceAll(path, "{id}", strconv.FormatInt(changeID, 10))
+		path = params.Replace(path)
 		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 		req := httptest.NewRequest(method, path, nil).WithContext(ctx)
 		rec := httptest.NewRecorder()

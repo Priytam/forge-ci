@@ -306,6 +306,10 @@ func (s *Store) ApplyChange(ctx context.Context, repo, provider string, ch *vcs.
 			return 0, false, err
 		}
 	}
+	// Warm the diff before anyone opens the page (a no-op when it exists).
+	if err := requestChangeDiffTx(ctx, tx, repo, provider, ch); err != nil {
+		return 0, false, err
+	}
 	if ch.Reviews != nil {
 		keep := make([]string, 0, len(ch.Reviews))
 		for _, r := range ch.Reviews {

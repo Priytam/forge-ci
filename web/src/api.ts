@@ -2215,6 +2215,8 @@ export interface Capabilities {
   merge_methods: string[];
   /** the host can show and require forge/merge-gate on a commit */
   status_checks: boolean;
+  /** Forge can mirror the host with git and show diffs */
+  diffs: boolean;
 }
 
 /** One pull/merge request, from any host (an inbox row). */
@@ -2443,6 +2445,18 @@ export interface CodeReviewStats {
   oldest_refresh_seconds: number;
   outbox_backlog: number;
   oldest_outbox_seconds: number;
+  diffs: {
+    reads: Record<string, number>;
+    hit_ratio: number;
+    computed: number;
+    compute_p95_ms: number;
+    mirror_fetches: number;
+    stored_bytes: number;
+    task_backlog: number;
+    oldest_task_seconds: number;
+  };
+  diff_open_p95_ms: number;
+  diff_open_samples: number;
   gates: { evaluations: number; blocked_by: Record<string, number> };
 }
 
@@ -2466,4 +2480,72 @@ export function subscribeChanges(onChange: (id: number) => void): () => void {
     }
   });
   return () => es.close();
+}
+
+/** A diff's status: ready (with its immutable manifest URL), pending while a
+ *  runner computes it, failed, or unsupported on this host. */
+export interface DiffStatus {
+  status: "ready" | "pending" | "failed" | "unsupported";
+  mode: "change" | "range";
+  from: string;
+  to: string;
+  merge_base?: string;
+  files: number;
+  additions: number;
+  deletions: number;
+  error?: string;
+  manifest_url?: string;
+}
+
+export interface DiffFileEntry {
+  path: string;
+  old_path?: string;
+  status: "added" | "modified" | "deleted" | "renamed" | "copied" | "type_changed";
+  additions: number;
+  deletions: number;
+  binary?: boolean;
+  generated?: boolean;
+  too_large?: boolean;
+  /** the unified patch, inline when small */
+  patch?: string;
+  /** else: the chunk to fetch on expand, relative to the manifest */
+  chunk?: string;
+}
+
+export interface DiffManifest {
+  version: number;
+  mode: string;
+  from: string;
+  to: string;
+  merge_base: string;
+  additions: number;
+  deletions: number;
+  truncated?: boolean;
+  files: DiffFileEntry[];
+}
+
+/** The change's diff against its target, or between two of its revisions. */
+export function getChangeDiff(id: number, range?: { from: string; to: string }, retry = false): Promise<DiffStatus> {
+  const qs = new URLSearchParams();
+  if (range) {
+    qs.set("from", range.from);
+    qs.set("to", range.to);
+  }
+  if (retry) qs.set("retry", "1");
+  const q = qs.toString();
+  return getJSON(`/changes/${id}/diff${q ? `?${q}` : ""}`);
+}
+
+/** Manifests and chunks are immutable: the browser caches them forever. */
+export async function getDiffManifest(url: string): Promise<DiffManifest> {
+  const res = await fetch(url, { headers: { Accept: "application/json" } });
+  if (!res.ok) throw await parseError(res);
+  return (await res.json()) as DiffManifest;
+}
+
+export async function getDiffChunk(manifestUrl: string, chunk: string): Promise<string> {
+  const url = manifestUrl.replace(/manifest\.json$/, chunk);
+  const res = await fetch(url);
+  if (!res.ok) throw await parseError(res);
+  return res.text();
 }

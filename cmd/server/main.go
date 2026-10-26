@@ -60,8 +60,8 @@ func main() {
 	defer logs.Close()
 
 	go scheduler.New(st, blobs, logs).Run(ctx)
-	go autoscale.Loop(ctx, st) // runner pools (no-op until one is configured)
-	go review.Loop(ctx, st)    // code review: change refreshes + conditional reconcile
+	go autoscale.Loop(ctx, st)     // runner pools (no-op until one is configured)
+	go review.Loop(ctx, st, blobs) // code review: refreshes, reconcile, gates, writes, diff retention
 
 	srv := &http.Server{Addr: addr, Handler: api.New(st, blobs, logs)}
 	go func() {

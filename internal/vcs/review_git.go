@@ -99,3 +99,8 @@ func lsRemote(ctx context.Context, repo RepoRef, branches ...string) (map[string
 	}
 	return tips, nil
 }
+
+// MirrorRefs: a native change is its two branches.
+func (gitProvider) MirrorRefs(_, source, target string) []string {
+	return []string{headRef(source), headRef(target)}
+}
