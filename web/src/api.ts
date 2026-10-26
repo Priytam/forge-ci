@@ -2329,13 +2329,77 @@ export interface ChangeAction {
   done_at?: string;
 }
 
+export interface ThreadComment {
+  id: number;
+  author: string;
+  author_email?: string;
+  body: string;
+  source: "host" | "forge";
+  /** sent: on the host; pending: queued for it; failed: it refused; local: the host has no comments (Forge keeps it) */
+  state: "sent" | "pending" | "failed" | "local";
+  error?: string;
+  created_at: string;
+}
+
+/** A comment thread on a line of the diff, or the change's conversation (path ""). */
+export interface ChangeThread {
+  id: number;
+  path: string;
+  side: "new" | "old";
+  /** current line; 0 when outdated or not on a line */
+  line: number;
+  start_line?: number;
+  original_line?: number;
+  commit_sha?: string;
+  resolved: boolean;
+  outdated: boolean;
+  resolve_pending?: boolean;
+  source: "host" | "forge";
+  comments: ThreadComment[];
+}
+
 export interface ChangePage {
   change: ChangeDetail;
   capabilities: Capabilities;
   gate: GateResult | null;
   actions: ChangeAction[];
-  permissions: { can_review: boolean; can_merge: boolean };
+  threads: ChangeThread[];
+  permissions: { can_review: boolean; can_merge: boolean; can_comment: boolean };
 }
+
+/** Comment on a line (path, side, line) or, without them, on the conversation. */
+export function createThread(
+  changeId: number,
+  input: { path?: string; side?: "new" | "old"; line?: number; body: string; author?: string }
+): Promise<{ thread_id: number; comment_id: number }> {
+  return postJSON(`/changes/${changeId}/threads`, input);
+}
+
+export function replyThread(changeId: number, threadId: number, body: string, author?: string): Promise<{ comment_id: number }> {
+  return postJSON(`/changes/${changeId}/threads/${threadId}/comments`, { body, author });
+}
+
+export function resolveThread(changeId: number, threadId: number, resolved: boolean): Promise<unknown> {
+  return postJSON(`/changes/${changeId}/threads/${threadId}/resolve`, { resolved });
+}
+
+export interface HostLink {
+  provider: string;
+  login: string;
+  scopes: string;
+  created_at: string;
+}
+
+export function listHostLinks(): Promise<{ links: HostLink[]; github_linking: boolean }> {
+  return getJSON("/account/links");
+}
+
+export function unlinkHost(provider: string): Promise<void> {
+  return requestVoid("DELETE", `/account/links/${encodeURIComponent(provider)}`);
+}
+
+/** Where the "Link GitHub" button goes (a full-page OAuth redirect). */
+export const linkGitHubURL = `${BASE}/auth/link/github`;
 
 export function getChange(id: number | string): Promise<ChangePage> {
   return getJSON(`/changes/${id}`);

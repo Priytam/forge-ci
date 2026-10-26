@@ -46,6 +46,7 @@ func (s *Server) registerCodeReviewRoutes() {
 		s.mux.HandleFunc(pattern, readPath(h))
 	}
 	s.registerCodeReviewWriteRoutes()
+	s.registerThreadRoutes()
 }
 
 // readPath serves h with a read-path context.
@@ -153,9 +154,15 @@ func (s *Server) getChange(w http.ResponseWriter, r *http.Request) {
 	} else {
 		canReview = !s.ssoEnforced(ctx) // open bootstrap mode names the reviewer
 	}
+	threads, err := s.store.ChangeThreads(ctx, id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to load comments")
+		return
+	}
+	canWrite := s.canOperate(r, d.Repo)
 	writeJSONCached(w, r, map[string]any{
-		"change": d, "capabilities": vcs.CapabilitiesOf(d.Provider), "gate": gate, "actions": actions,
-		"permissions": map[string]bool{"can_review": canReview, "can_merge": s.canOperate(r, d.Repo)},
+		"change": d, "capabilities": vcs.CapabilitiesOf(d.Provider), "gate": gate, "actions": actions, "threads": threads,
+		"permissions": map[string]bool{"can_review": canReview, "can_merge": canWrite, "can_comment": canWrite},
 	})
 }
 

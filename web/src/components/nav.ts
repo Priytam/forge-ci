@@ -64,6 +64,7 @@ export const EXTRA_PAGES: NavItem[] = [
   { to: "/new", label: "Run pipeline", icon: "play", keywords: "start trigger new" },
   { to: "/repos/new", label: "Add repository", icon: "plus", keywords: "connect register" },
   { to: "/tokens", label: "API tokens", icon: "key", keywords: "personal access token" },
+  { to: "/account", label: "Linked accounts", icon: "key", keywords: "github link oauth account comment as me" },
 ];
 
 const ADMIN_TITLES: Record<string, string> = {
@@ -114,6 +115,8 @@ export function crumbsFor(pathname: string, search: string): Crumb[] {
       return [{ label: "Admin" }, { label: ADMIN_TITLES[b ?? ""] ?? b ?? "" }];
     case "tokens":
       return [{ label: "API tokens" }];
+    case "account":
+      return [{ label: "Linked accounts" }];
     case "templates":
       return [{ label: "Template catalog" }];
     case "new":

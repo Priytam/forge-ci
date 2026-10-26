@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,6 +43,91 @@ type Change struct {
 	// Reviews is the host's complete review list. nil means the source did not
 	// say (a webhook snapshot); an empty slice means there are none.
 	Reviews []Review
+	// Threads is the host's complete list of comment threads, the change's
+	// conversation included (Path "", ExternalID ConversationThread). nil
+	// means the source did not say.
+	Threads []Thread
+}
+
+// ConversationThread is the external id of a change's general discussion
+// (comments not on a line), kept as one thread.
+const ConversationThread = "conversation"
+
+// Thread is a comment thread: on a line of the diff (Path set) or the
+// change's conversation.
+type Thread struct {
+	ExternalID string // the host's thread id
+	Path       string
+	Side       string // new | old: which side of the diff Line counts in
+	Line       int    // current line (0 when outdated or not on a line)
+	StartLine  int    // first line of a multi-line comment (0 = single line)
+	// OriginalLine and OriginalCommit are where the thread was first left.
+	OriginalLine   int
+	OriginalCommit string
+	CommitSHA      string // commit Line refers to
+	Resolved       bool
+	Outdated       bool
+	Comments       []Comment
+}
+
+// Comment is one comment in a thread.
+type Comment struct {
+	ExternalID string
+	Author     string
+	Body       string
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+}
+
+// ThreadAnchor places a new thread on a line of the diff at CommitSHA.
+type ThreadAnchor struct {
+	Path      string
+	Side      string // new | old
+	Line      int
+	StartLine int
+	CommitSHA string
+}
+
+// CommentRequest is one comment to post: a new thread (Anchor set), a reply
+// (ReplyTo is a comment id in the thread), or else a conversation comment.
+// Body already carries Forge's idempotency marker.
+type CommentRequest struct {
+	Body    string
+	Anchor  *ThreadAnchor
+	ReplyTo string
+}
+
+// ThreadWriter posts comments and reviews and resolves threads. Hosts with
+// Capabilities.Threads implement it; elsewhere threads live in Forge only.
+type ThreadWriter interface {
+	PostComment(ctx context.Context, c *ChangeClient, repo RepoRef, id string, req CommentRequest) (externalID string, err error)
+	ResolveThread(ctx context.Context, c *ChangeClient, repo RepoRef, threadID string, resolved bool) error
+	// PostReview submits a verdict (approve | request_changes | comment).
+	PostReview(ctx context.Context, c *ChangeClient, repo RepoRef, id, verdict, body, commitSHA string) (externalID string, err error)
+}
+
+// ThreadWriterFor returns the host's thread writer, or nil.
+func ThreadWriterFor(provider string) ThreadWriter {
+	w, _ := Lookup(provider).(ThreadWriter)
+	return w
+}
+
+// Forge stamps every comment it posts with a hidden marker. When the host
+// echoes the comment back (webhook or refresh), Forge matches the marker to
+// its own copy instead of storing a duplicate, and a retry after a lost
+// response finds the comment already there.
+var markerRe = regexp.MustCompile(`\n*<!-- forge:([0-9a-f]{8,64}) -->\s*$`)
+
+// Mark appends uid's marker to body.
+func Mark(body, uid string) string { return body + "\n\n<!-- forge:" + uid + " -->" }
+
+// Unmark returns body without its marker and the marker's uid ("" if none).
+func Unmark(body string) (string, string) {
+	m := markerRe.FindStringSubmatchIndex(body)
+	if m == nil {
+		return body, ""
+	}
+	return body[:m[0]], body[m[2]:m[3]]
 }
 
 // Review is one verdict on a change.

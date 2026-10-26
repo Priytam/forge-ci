@@ -56,10 +56,15 @@ func TestGitHubNormalizeRecorded(t *testing.T) {
 		t.Errorf("review: %+v %v (a review payload must only trigger a refresh)", evs, err)
 	}
 
-	// Comments are ignored until threads ship; pushes never concern a change.
+	// A comment on a pull request's conversation refreshes the change; a
+	// comment on a plain issue concerns no change.
 	hdr, body = load("issue_comment.created.json", "issue_comment")
-	if evs, err := src.NormalizeEvent(hdr, body); err != nil || len(evs) != 0 {
+	if evs, err := src.NormalizeEvent(hdr, body); err != nil || len(evs) != 1 || evs[0].Kind != "comment" || evs[0].ChangeID != "42" {
 		t.Errorf("issue_comment: %+v %v", evs, err)
+	}
+	plain := []byte(`{"action":"created","issue":{"number":9},"comment":{"id":1},"repository":{"full_name":"Letztrip/cos"}}`)
+	if evs, err := src.NormalizeEvent(hdr, plain); err != nil || len(evs) != 0 {
+		t.Errorf("plain issue comment: %+v %v", evs, err)
 	}
 }
 

@@ -200,8 +200,9 @@ func (s *Service) finishWrite(ctx context.Context, o store.OutboxItem, state str
 }
 
 // retryOrFail retries a transient failure with backoff and gives up after
-// maxWriteTries; permanent failures stop at once.
-func (s *Service) retryOrFail(ctx context.Context, o store.OutboxItem, err error, cred, provider string) {
+// maxWriteTries; permanent failures stop at once. It reports whether the
+// write gave up for good.
+func (s *Service) retryOrFail(ctx context.Context, o store.OutboxItem, err error, cred, provider string) bool {
 	var rl *vcs.RateLimitedError
 	switch {
 	case errors.As(err, &rl):
@@ -210,13 +211,20 @@ func (s *Service) retryOrFail(ctx context.Context, o store.OutboxItem, err error
 		s.finishWrite(ctx, o, "pending", nil, err, until, false)
 	case vcs.Permanent(err) || o.Attempts+1 >= maxWriteTries:
 		s.finishWrite(ctx, o, "failed", nil, err, time.Time{}, true)
+		return true
 	default:
 		d := time.Duration(math.Min(float64(10*time.Minute), float64(5*time.Second)*math.Pow(2, float64(o.Attempts))))
 		s.finishWrite(ctx, o, "pending", nil, err, time.Now().Add(d), true)
 	}
+	return false
 }
 
 func (s *Service) send(ctx context.Context, o store.OutboxItem) {
+	switch o.Kind {
+	case KindPostComment, KindResolveThread, KindPostReview:
+		s.sendThreadWrite(ctx, o)
+		return
+	}
 	ref, cred, found, err := s.store.ReviewTarget(ctx, o.Repo)
 	if err != nil {
 		s.finishWrite(ctx, o, "pending", nil, err, time.Now().Add(30*time.Second), true)

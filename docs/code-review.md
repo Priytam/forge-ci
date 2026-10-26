@@ -36,19 +36,20 @@ the provider APIs it uses, cost next to nothing **by construction**:
 Turn it all off with `CODE_REVIEW=off` on `forge-server`. Pages then show
 what is already stored and nothing is fetched.
 
-## What ships today (phases A, B and C)
+## What ships today (phases A–D)
 
 | | |
 |---|---|
 | **Changes** inbox (sidebar → Changes) | open / merged / closed / all, filter by repo, search by title or `#number`; CI status of the head commit, the **merge gate** (ready / waiting / blocked), approvals and "changes requested" per change; live updates |
 | **Files changed** (change page) | every file's diff, unified or side by side; the whole change against its target, or **changes since revision N**; "changes since you last looked"; lock files, vendored and other generated files, binaries and very large diffs collapsed until opened |
+| **Comments** | comment on any line of the diff (with **suggested changes**), reply, resolve and reopen; the change's conversation; threads that left the diff listed as outdated — **synced both ways** with GitHub |
+| **Linked accounts** (user menu → Linked accounts) | link your GitHub account and your comments, reviews and merges are made as you |
 | Change page | the merge gate rule by rule, **Approve / Request changes / Withdraw**, **Merge** (merge / squash / rebase as the host allows), state, branches, description, labels, the Forge pipeline on the head commit, every review, every **revision** (each push is one, on every host) |
 | **Merge rules** (Admin → Merge rules) | rules per repo and target branch, and which host login is which Forge user |
 | Hosts | **GitHub** (App or token) and **plain git** (Forge-native changes; creating and merging them in the UI comes in phase F) |
 | About page | provider calls, 304 share, calls per open change, read-path calls, refresh and write backlogs, gates and what blocks them, every budget |
 
-Coming next, in order: line comments synced both ways and
-reviews posted as the reviewer (D), GitLab / Bitbucket / Gitea / CodeCommit
+Coming next, in order: GitLab / Bitbucket / Gitea / CodeCommit
 (E), and Forge-native changes, code owners and a merge queue (F).
 
 ## Diffs
@@ -81,6 +82,57 @@ and plain git. The others arrive with their plugins (phase E).
 
 If a runner cannot compute a diff (the commits were force-pushed away, the
 repo cannot be reached), the page says why and offers **Try again**.
+
+## Comments
+
+- **Where.** Hover a line in *Files changed* (the whole change at its head)
+  and click **+**; the old side's removed lines take comments too. *Suggest a
+  change* starts a GitHub-style suggestion block with the line's text, shown
+  in Forge as the proposed replacement. The *Conversation* card holds
+  comments on the change itself and every thread whose line is gone from the
+  current diff (**outdated**).
+- **Both ways.** Comments, replies and resolve/reopen made on GitHub arrive
+  with the same webhook-and-refresh as everything else (one GraphQL call reads
+  the change, its reviews and all its threads). Comments made in Forge are
+  saved at once ("sending to the host…") and posted through the outbox.
+- **Never twice.** Every comment Forge posts carries a hidden marker
+  (`<!-- forge:<id> -->`). When GitHub echoes it back, Forge recognises its
+  own comment instead of storing a copy; when an answer from GitHub is lost,
+  the retry first looks for the marker on GitHub and only posts if it is not
+  there.
+- **As whom.** With your GitHub account linked (*Linked accounts*), Forge
+  writes as you, with your own rate budget. Without, Forge's bot posts the
+  comment followed by "— you via Forge". A review (approve / request changes)
+  is posted to GitHub only for linked people — only your own account may
+  approve there; either way it counts in Forge's gate.
+- **Hosts without comments** (plain git today): threads are kept in Forge
+  ("in Forge") and Forge moves them itself when the change gets a new push:
+  a line that moved is followed, a line that was edited away makes its
+  thread outdated — the same meaning GitHub gives the word.
+
+Not yet: editing or deleting a comment from Forge (do it on GitHub; Forge
+follows), and comment notifications (GitHub sends its own).
+
+### Linking GitHub accounts (admin setup)
+
+Linking uses a GitHub **OAuth app** asking for the `repo` scope. Either:
+
+- the GitHub sign-in app you already use (Admin → Sign-in & identity →
+  GitHub): nothing to add — its callback URL
+  `https://<forge-host>/api/v1/auth/callback/github` also covers linking
+  (`.../github/link` is under it), or
+- a separate app: set `GITHUB_LINK_CLIENT_ID` and `GITHUB_LINK_CLIENT_SECRET`
+  on `forge-server`, with the callback URL
+  `https://<forge-host>/api/v1/auth/callback/github/link`.
+
+Tokens are encrypted at rest (`FORGE_SECRET_KEY`), used only for their
+owner's actions and removed by *Unlink*. A link also maps the GitHub login to
+the person, verified, which is what makes "no self-approval" and approver
+groups recognise reviews given on GitHub (the admin-maintained mapping on
+Admin → Merge rules remains for people who do not link).
+
+GitHub webhook events for comments: also tick **Pull request review
+comments**, **Pull request review threads** and **Issue comments**.
 
 ## Merge rules and the gate
 
@@ -269,9 +321,18 @@ Runner protocol (runner token): `POST /api/v1/runner/tasks/acquire`
 
 The change page's `GET /api/v1/changes/{id}` also returns `gate` (state,
 summary, `rules[]`, what the host shows), `actions` (queued and finished
-writes) and `permissions` (`can_review`, `can_merge`).
+writes), `threads` (every thread with its comments and their delivery
+state) and `permissions` (`can_review`, `can_merge`, `can_comment`).
 
-Writes (session or API token; CSRF rules as everywhere):
+Writes (session or API token; CSRF rules as everywhere; a repo role, as for
+retrying pipelines, when the repo has members):
+
+- `POST /api/v1/changes/{id}/threads` `{path, side: new|old, line, body}` — a
+  line comment; `{body}` alone comments on the conversation.
+- `POST /api/v1/changes/{id}/threads/{tid}/comments` `{body}` — reply.
+- `POST /api/v1/changes/{id}/threads/{tid}/resolve` `{resolved}`.
+- `GET /api/v1/auth/link/github` (starts linking), `GET /api/v1/account/links`,
+  `DELETE /api/v1/account/links/github`.
 
 - `POST /api/v1/changes/{id}/reviews` `{verdict: approve|request_changes|dismiss, body}`
 - `POST /api/v1/changes/{id}/merge` `{expected_head, method}` → `202 {action}`
@@ -288,10 +349,14 @@ A host plugs in by implementing `vcs.ChangeSource` (`internal/vcs/review.go`)
 and declaring `Capabilities`; it makes HTTP calls only through
 `vcs.ChangeClient`, which enforces the read-path guard and the accounting.
 Writes implement `vcs.ChangeWriter` (`PublishCheck`, `Merge` with an
-expected head). A provider is done when it passes the shared conformance
+expected head); hosts with comments also implement `vcs.ThreadWriter`
+(`PostComment` for a new line thread, a reply or a conversation comment;
+`ResolveThread`; `PostReview`) and return their threads from `GetChange`. A provider is done when it passes the shared conformance
 suite (`internal/vcs/vcstest`, run by `internal/vcs/conformance_test.go`):
 event normalisation and idempotent replay, get-change after push / review /
 close, unknown changes, conditional listing, read-path refusal, rate-limit
 headers, the published gate blocking a merge on the host until it passes,
-and merge-with-expected-head. The suite branches on capabilities, never on the provider's name,
+merge-with-expected-head, and — for hosts with threads — a comment round trip
+(new thread, reply, conversation, the marker coming back, resolve and reopen),
+host comments read, and posting a review. The suite branches on capabilities, never on the provider's name,
 and fails if a plugin implements `ChangeSource` without a harness.

@@ -1,15 +1,19 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   getChangeDiff,
   getDiffChunk,
   getDiffManifest,
   shortSha,
+  createThread,
+  getMe,
   type ChangePage,
+  type ChangeThread,
   type DiffFileEntry,
   type DiffManifest,
   type DiffStatus,
 } from "../api";
 import { useChangeStream } from "../hooks/useChangeStream";
+import Thread, { Composer } from "./Thread";
 
 /** One line of a parsed unified diff. */
 interface Line {
@@ -74,7 +78,63 @@ const STATUS: Record<string, string> = {
   type_changed: "type changed",
 };
 
-function FileDiff({ file, manifestUrl, split }: { file: DiffFileEntry; manifestUrl: string; split: boolean }) {
+/** Comment threads on a file's lines, and the box to start one. */
+export interface Annotations {
+  /** threads at (side, line) of this file */
+  at: (side: "new" | "old", line: number) => ChangeThread[];
+  /** comments can be started here (the whole change, at its head) */
+  canStart: boolean;
+  open: { side: "new" | "old"; line: number } | null;
+  start: (side: "new" | "old", line: number) => void;
+  renderThreads: (threads: ChangeThread[]) => ReactNode;
+  renderComposer: (side: "new" | "old", line: number, text: string) => ReactNode;
+}
+
+/** The thread and composer rows under one diff line. */
+function annotationRows(a: Annotations | undefined, side: "new" | "old", line: number | undefined, text: string, cols: number, key: string) {
+  if (!a || line === undefined) return null;
+  const ts = a.at(side, line);
+  const composing = a.open?.side === side && a.open.line === line;
+  if (!ts.length && !composing) return null;
+  return (
+    <tr key={key} className="diff-thread-row">
+      <td colSpan={cols}>
+        <div className="thread-wrap">
+          {ts.length > 0 && a.renderThreads(ts)}
+          {composing && a.renderComposer(side, line, text)}
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+/** A line number cell; with comments on, a commentable line carries the
+ *  "+" to start one. */
+function NoCell({ no, side, a, commentable }: { no?: number; side: "new" | "old"; a?: Annotations; commentable: boolean }) {
+  return (
+    <td className="diff-no">
+      {a?.canStart && commentable && no !== undefined && (
+        <button className="diff-comment-btn" title="Comment on this line" onClick={() => a.start(side, no)}>
+          +
+        </button>
+      )}
+      {no ?? ""}
+    </td>
+  );
+}
+
+function FileDiff({
+  file,
+  manifestUrl,
+  split,
+  annotations,
+}: {
+  file: DiffFileEntry;
+  manifestUrl: string;
+  split: boolean;
+  annotations?: Annotations;
+}) {
+  const a = annotations;
   const collapsedByDefault = !!(file.generated || file.binary || file.too_large || file.chunk);
   const [open, setOpen] = useState(!collapsedByDefault);
   const [patch, setPatch] = useState<string | null>(file.patch ?? null);
@@ -123,35 +183,44 @@ function FileDiff({ file, manifestUrl, split }: { file: DiffFileEntry; manifestU
             <table className={`diff-table${split ? " diff-split" : ""}`}>
               <tbody>
                 {split
-                  ? splitRows(lines).map(([l, r], i) =>
-                      l?.kind === "hunk" || l?.kind === "note" ? (
-                        <tr key={i} className={`diff-${l.kind}`}>
-                          <td colSpan={4}>{l.text}</td>
-                        </tr>
-                      ) : (
-                        <tr key={i}>
-                          <td className="diff-no">{l?.oldNo ?? ""}</td>
-                          <td className={`diff-code ${l && l.kind === "del" ? "diff-del" : ""}`}>{l?.text ?? ""}</td>
-                          <td className="diff-no">{r?.newNo ?? ""}</td>
-                          <td className={`diff-code ${r && r.kind === "add" ? "diff-add" : ""}`}>{r?.text ?? ""}</td>
-                        </tr>
-                      )
+                  ? splitRows(lines).flatMap(([l, r], i) =>
+                      l?.kind === "hunk" || l?.kind === "note"
+                        ? [
+                            <tr key={i} className={`diff-${l.kind}`}>
+                              <td colSpan={4}>{l.text}</td>
+                            </tr>,
+                          ]
+                        : [
+                            <tr key={i}>
+                              <NoCell no={l?.oldNo} side="old" a={a} commentable={l?.kind === "del"} />
+                              <td className={`diff-code ${l && l.kind === "del" ? "diff-del" : ""}`}>{l?.text ?? ""}</td>
+                              <NoCell no={r?.newNo} side="new" a={a} commentable={!!r} />
+                              <td className={`diff-code ${r && r.kind === "add" ? "diff-add" : ""}`}>{r?.text ?? ""}</td>
+                            </tr>,
+                            l && l.kind === "del" ? annotationRows(a, "old", l.oldNo, l.text, 4, `o${i}`) : null,
+                            r ? annotationRows(a, "new", r.newNo, r.text, 4, `n${i}`) : null,
+                          ]
                     )
-                  : lines.map((l, i) =>
-                      l.kind === "hunk" || l.kind === "note" ? (
-                        <tr key={i} className={`diff-${l.kind}`}>
-                          <td colSpan={3}>{l.text}</td>
-                        </tr>
-                      ) : (
-                        <tr key={i} className={`diff-${l.kind}`}>
-                          <td className="diff-no">{l.oldNo ?? ""}</td>
-                          <td className="diff-no">{l.newNo ?? ""}</td>
-                          <td className="diff-code">
-                            {l.kind === "add" ? "+" : l.kind === "del" ? "-" : " "}
-                            {l.text}
-                          </td>
-                        </tr>
-                      )
+                  : lines.flatMap((l, i) =>
+                      l.kind === "hunk" || l.kind === "note"
+                        ? [
+                            <tr key={i} className={`diff-${l.kind}`}>
+                              <td colSpan={3}>{l.text}</td>
+                            </tr>,
+                          ]
+                        : [
+                            <tr key={i} className={`diff-${l.kind}`}>
+                              <NoCell no={l.oldNo} side="old" a={a} commentable={l.kind === "del"} />
+                              <NoCell no={l.newNo} side="new" a={a} commentable={l.kind !== "del"} />
+                              <td className="diff-code">
+                                {l.kind === "add" ? "+" : l.kind === "del" ? "-" : " "}
+                                {l.text}
+                              </td>
+                            </tr>,
+                            l.kind === "del"
+                              ? annotationRows(a, "old", l.oldNo, l.text, 3, `t${i}`)
+                              : annotationRows(a, "new", l.newNo, l.text, 3, `t${i}`),
+                          ]
                     )}
               </tbody>
             </table>
@@ -168,8 +237,13 @@ const seenKey = (id: number) => `forge.change.${id}.seen`;
  * API), are computed once per pair of commits and cached by the browser for
  * good; while a runner computes one the page waits for the live update.
  */
-export default function DiffView({ page }: { page: ChangePage }) {
+export default function DiffView({ page, onChanged }: { page: ChangePage; onChanged: () => void }) {
   const { change } = page;
+  const [composing, setComposing] = useState<{ path: string; side: "new" | "old"; line: number } | null>(null);
+  const [me, setMe] = useState<string | null | undefined>(undefined);
+  useEffect(() => {
+    void getMe().then((u) => setMe(u?.email ?? null));
+  }, []);
   const revisions = [...change.revision_list].sort((a, b) => a.number - b.number);
   const latest = revisions[revisions.length - 1];
   const [since, setSince] = useState<string>(""); // "" = all changes; else the revision head to compare from
@@ -229,6 +303,33 @@ export default function DiffView({ page }: { page: ChangePage }) {
       }
     }
   }, [manifest, since, latest, change.id]);
+
+  // Threads sit on the lines of the whole change at its head; "since rN"
+  // views show the diff alone.
+  const showThreads = !since && status?.status === "ready" && status.to === change.head_sha;
+  const lineThreads = page.threads.filter((t) => t.path && !t.outdated && t.line > 0);
+  const annotationsFor = (path: string): Annotations => ({
+    at: (side, line) => lineThreads.filter((t) => t.path === path && t.side === side && t.line === line),
+    canStart: page.permissions.can_comment,
+    open: composing && composing.path === path ? composing : null,
+    start: (side, line) => setComposing({ path, side, line }),
+    renderThreads: (ts: ChangeThread[]) =>
+      ts.map((t) => (
+        <Thread key={t.id} changeId={change.id} thread={t} canComment={page.permissions.can_comment} needAuthor={me === null} onChanged={onChanged} />
+      )),
+    renderComposer: (side, line, text) => (
+      <Composer
+        placeholder={`Comment on line ${line}…`}
+        suggest={side === "new" ? text : undefined}
+        needAuthor={me === null}
+        onSubmit={async (body, author) => {
+          await createThread(change.id, { path, side, line, body, author });
+          onChanged();
+        }}
+        onCancel={() => setComposing(null)}
+      />
+    ),
+  });
 
   const toggleSplit = (v: boolean) => {
     setSplit(v);
@@ -291,7 +392,13 @@ export default function DiffView({ page }: { page: ChangePage }) {
           )}
           {manifest.files.length === 0 && <p className="muted">No file changes.</p>}
           {manifest.files.map((f) => (
-            <FileDiff key={f.path + (f.old_path ?? "")} file={f} manifestUrl={status.manifest_url!} split={split} />
+            <FileDiff
+              key={f.path + (f.old_path ?? "")}
+              file={f}
+              manifestUrl={status.manifest_url!}
+              split={split}
+              annotations={showThreads ? annotationsFor(f.path) : undefined}
+            />
           ))}
         </>
       )}

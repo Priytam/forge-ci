@@ -134,6 +134,7 @@ func (s *Service) Run(ctx context.Context) {
 			s.RefreshDue(ctx)
 			s.EvaluateGates(ctx)
 			s.SendOutbox(ctx)
+			s.ReanchorThreads(ctx)
 		case <-first:
 			s.ReconcileAll(ctx)
 		case <-rec.C:

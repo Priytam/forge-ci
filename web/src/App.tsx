@@ -29,6 +29,7 @@ import TestHistory from "./pages/TestHistory";
 import Changes from "./pages/Changes";
 import ChangeDetail from "./pages/ChangeDetail";
 import AdminMergeRules from "./pages/AdminMergeRules";
+import Account from "./pages/Account";
 import Shell from "./components/Shell";
 
 /** Sign-in renders bare; every other page sits inside the app shell. */
@@ -71,6 +72,7 @@ export default function App() {
           <Route path="/jobs" element={<Jobs />} />
           <Route path="/environments" element={<EnvironmentBoard />} />
           <Route path="/tokens" element={<ApiTokens />} />
+          <Route path="/account" element={<Account />} />
           <Route path="/pipelines/:id" element={<PipelineDetail />} />
           <Route path="/jobs/:id" element={<JobLog />} />
           <Route path="/new" element={<NewPipeline />} />

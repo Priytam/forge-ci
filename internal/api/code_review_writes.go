@@ -143,6 +143,15 @@ func (s *Server) reviewChange(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "failed to save review")
 		return
 	}
+	// A reviewer who linked their host account has the verdict posted as
+	// their own review there too (only they can approve on the host).
+	if (verdict == "approve" || verdict == "request_changes") && vcs.ThreadWriterFor(c.Provider) != nil {
+		if _, _, linked, err := s.store.UserHostToken(r.Context(), who, c.Provider); err == nil && linked {
+			if err := review.QueueReview(r.Context(), s.store, c.ID, c.Repo, who, verdict, strings.TrimSpace(req.Body), c.HeadSHA); err != nil {
+				slog.Error("code review: queue host review", "err", err)
+			}
+		}
+	}
 	s.audit(r, "change.review", c.Repo+"#"+c.Number, c.Repo, "ok", map[string]any{"verdict": verdict, "head": c.HeadSHA})
 	writeJSON(w, http.StatusOK, map[string]any{"reviewer": who, "verdict": verdict, "head_sha": c.HeadSHA})
 }

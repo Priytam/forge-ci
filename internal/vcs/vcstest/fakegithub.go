@@ -22,18 +22,128 @@ import (
 type FakeGitHub struct {
 	Server *httptest.Server
 
-	mu       sync.Mutex
-	pulls    map[int]*fakePull
-	next     int
-	version  int
-	seq      int
-	rate     [2]int // remaining, limit
-	reset    time.Time
-	reject   *rejection
-	requests int
-	delivery int
-	statuses map[string]map[string]fakeStatus // sha → context → status
-	required []string                         // branch protection: contexts that must be success
+	mu         sync.Mutex
+	pulls      map[int]*fakePull
+	next       int
+	version    int
+	seq        int
+	rate       [2]int // remaining, limit
+	reset      time.Time
+	reject     *rejection
+	requests   int
+	delivery   int
+	statuses   map[string]map[string]fakeStatus // sha → context → status
+	required   []string                         // branch protection: contexts that must be success
+	commentSeq int64
+	loseNext   bool              // apply the next write, then answer 502 (a lost response)
+	users      map[string]string // token → login; any other token is the App bot
+}
+
+// BotLogin is who writes with the repo's (App) token.
+const BotLogin = "forge-ci-travafa[bot]"
+
+// AddUser makes token act as login (a user who linked their account).
+func (f *FakeGitHub) AddUser(token, login string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.users[token] = login
+}
+
+// LoseNextResponse makes the next write succeed on the host but answer 502,
+// as when a response is lost after the host acted.
+func (f *FakeGitHub) LoseNextResponse() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.loseNext = true
+}
+
+func (f *FakeGitHub) login(r *http.Request) string {
+	if l, ok := f.users[strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")]; ok {
+		return l
+	}
+	return BotLogin
+}
+
+func (f *FakeGitHub) newComment(r *http.Request, body string) fakeComment {
+	f.commentSeq++
+	return fakeComment{id: 5000 + f.commentSeq, login: f.login(r), body: body, created: time.Now().UTC().Truncate(time.Second)}
+}
+
+// lost answers 502 when the response is to be lost; the write already happened.
+func (f *FakeGitHub) lost(w http.ResponseWriter) bool {
+	if !f.loseNext {
+		return false
+	}
+	f.loseNext = false
+	http.Error(w, `{"message":"Bad Gateway"}`, http.StatusBadGateway)
+	return true
+}
+
+// HostThread is someone commenting on a line on GitHub; returns the thread id.
+func (f *FakeGitHub) HostThread(t *testing.T, id, login, body string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p := f.pull(t, id)
+	f.commentSeq++
+	th := &fakeThread{id: fmt.Sprintf("PRRT_%d", f.commentSeq), path: "app.go", side: "RIGHT", line: 1, commit: p.head,
+		comments: []fakeComment{{id: 5000 + f.commentSeq, login: login, body: body, created: time.Now().UTC().Truncate(time.Second)}}}
+	p.threads = append(p.threads, th)
+	f.touch(p)
+	return th.id
+}
+
+// HostResolve resolves a thread on GitHub.
+func (f *FakeGitHub) HostResolve(t *testing.T, id, threadID string, resolved bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, th := range f.pull(t, id).threads {
+		if th.id == threadID {
+			th.resolved = resolved
+		}
+	}
+}
+
+// CommentsOn lists every comment body on the pull request, threads and
+// conversation, as "login: body".
+func (f *FakeGitHub) CommentsOn(t *testing.T, id string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p := f.pull(t, id)
+	var out []string
+	for _, th := range p.threads {
+		for _, c := range th.comments {
+			out = append(out, c.login+": "+c.body)
+		}
+	}
+	for _, c := range p.convo {
+		out = append(out, c.login+": "+c.body)
+	}
+	return out
+}
+
+// ThreadState returns a thread's resolved flag and comment count.
+func (f *FakeGitHub) ThreadState(t *testing.T, id, threadID string) (resolved bool, comments int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, th := range f.pull(t, id).threads {
+		if th.id == threadID {
+			return th.resolved, len(th.comments)
+		}
+	}
+	return false, 0
+}
+
+// ReviewsBy lists the reviews a login submitted, as GraphQL states.
+func (f *FakeGitHub) ReviewsBy(t *testing.T, id, login string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for _, rv := range f.pull(t, id).reviews {
+		if rv.login == login {
+			out = append(out, rv.state)
+		}
+	}
+	return out
 }
 
 type fakeStatus struct {
@@ -56,6 +166,25 @@ type fakePull struct {
 	updated   time.Time
 	reviews   []fakeReview
 	reviewSeq int64
+	threads   []*fakeThread
+	convo     []fakeComment // the conversation (issue comments)
+}
+
+type fakeThread struct {
+	id       string // GraphQL node id
+	path     string
+	side     string // RIGHT | LEFT
+	line     int
+	commit   string
+	resolved bool
+	comments []fakeComment
+}
+
+type fakeComment struct {
+	id      int64
+	login   string
+	body    string
+	created time.Time
 }
 
 type fakeReview struct {
@@ -72,7 +201,7 @@ const FakeRepo = "acme/shop"
 // NewFakeGitHub starts the fake and points GITHUB_API_BASE at it for the test.
 func NewFakeGitHub(t *testing.T) *FakeGitHub {
 	t.Helper()
-	f := &FakeGitHub{pulls: map[int]*fakePull{}, next: 1, rate: [2]int{4999, 5000}, statuses: map[string]map[string]fakeStatus{},
+	f := &FakeGitHub{pulls: map[int]*fakePull{}, next: 1, rate: [2]int{4999, 5000}, statuses: map[string]map[string]fakeStatus{}, users: map[string]string{},
 		reset: time.Now().Add(time.Hour).Truncate(time.Second)}
 	f.Server = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.Server.Close)
@@ -262,6 +391,10 @@ func (f *FakeGitHub) Delivery(t *testing.T, id, kind string) (http.Header, []byt
 	case "change":
 		hdr.Set("X-GitHub-Event", "pull_request")
 		payload["action"] = "synchronize"
+	case "comment":
+		hdr.Set("X-GitHub-Event", "pull_request_review_comment")
+		payload["action"] = "created"
+		payload["comment"] = map[string]any{"id": 1, "body": "x", "user": map[string]any{"login": "reviewer1"}}
 	case "review":
 		hdr.Set("X-GitHub-Event", "pull_request_review")
 		payload["action"] = "submitted"
@@ -307,6 +440,11 @@ func (f *FakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/repos/"+FakeRepo+"/pulls/") &&
 		strings.HasSuffix(r.URL.Path, "/merge"):
 		f.merge(w, r, strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/repos/"+FakeRepo+"/pulls/"), "/merge"))
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/repos/"+FakeRepo+"/pulls/"):
+		f.pullWrite(w, r, strings.Split(strings.TrimPrefix(r.URL.Path, "/repos/"+FakeRepo+"/pulls/"), "/"))
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/repos/"+FakeRepo+"/issues/") &&
+		strings.HasSuffix(r.URL.Path, "/comments"):
+		f.issueComment(w, r, strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/repos/"+FakeRepo+"/issues/"), "/comments"))
 	default:
 		http.NotFound(w, r)
 	}
@@ -319,9 +457,18 @@ func (f *FakeGitHub) graphql(w http.ResponseWriter, r *http.Request) {
 			Owner  string `json:"owner"`
 			Name   string `json:"name"`
 			Number int    `json:"number"`
+			ID     string `json:"id"`
 		} `json:"variables"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || !strings.Contains(req.Query, "pullRequest") {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad query", http.StatusBadRequest)
+		return
+	}
+	if strings.Contains(req.Query, "ReviewThread(") {
+		f.resolveMutation(w, req.Variables.ID, strings.Contains(req.Query, "mutation($id:ID!){resolveReviewThread"))
+		return
+	}
+	if !strings.Contains(req.Query, "pullRequest") {
 		http.Error(w, "bad query", http.StatusBadRequest)
 		return
 	}
@@ -347,9 +494,11 @@ func (f *FakeGitHub) graphql(w http.ResponseWriter, r *http.Request) {
 			"url":     "https://github.com/" + FakeRepo + "/pull/" + strconv.Itoa(p.number),
 			"isDraft": false, "createdAt": p.created, "updatedAt": p.updated,
 			"headRefName": p.headRef, "headRefOid": p.head, "baseRefName": "main", "baseRefOid": p.base,
-			"author":  map[string]any{"login": "author1"},
-			"labels":  map[string]any{"nodes": []any{}},
-			"reviews": map[string]any{"nodes": reviews},
+			"author":        map[string]any{"login": "author1"},
+			"labels":        map[string]any{"nodes": []any{}},
+			"reviews":       map[string]any{"nodes": reviews},
+			"reviewThreads": map[string]any{"nodes": f.threadNodes(p)},
+			"comments":      map[string]any{"nodes": commentNodes(p.convo, "")},
 		},
 	}}})
 }
@@ -422,4 +571,165 @@ func (f *FakeGitHub) merge(w http.ResponseWriter, r *http.Request, id string) {
 	p.state = "merged"
 	f.touch(p)
 	_ = json.NewEncoder(w).Encode(map[string]any{"sha": f.sha(), "merged": true, "message": "Pull Request successfully merged"})
+}
+
+func commentNodes(cs []fakeComment, commit string) []any {
+	out := []any{}
+	for _, c := range cs {
+		n := map[string]any{"databaseId": c.id, "body": c.body, "createdAt": c.created, "updatedAt": c.created,
+			"author": map[string]any{"login": c.login}}
+		if commit != "" {
+			n["commit"], n["originalCommit"] = map[string]any{"oid": commit}, map[string]any{"oid": commit}
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+func (f *FakeGitHub) threadNodes(p *fakePull) []any {
+	out := []any{}
+	for _, th := range p.threads {
+		outdated := th.commit != p.head
+		var line any = th.line
+		if outdated {
+			line = nil
+		}
+		out = append(out, map[string]any{"id": th.id, "isResolved": th.resolved, "isOutdated": outdated,
+			"path": th.path, "line": line, "startLine": nil, "originalLine": th.line, "diffSide": th.side,
+			"comments": map[string]any{"nodes": commentNodes(th.comments, th.commit)}})
+	}
+	return out
+}
+
+func (f *FakeGitHub) resolveMutation(w http.ResponseWriter, threadID string, resolved bool) {
+	w.Header().Set("Content-Type", "application/json")
+	for _, p := range f.pulls {
+		for _, th := range p.threads {
+			if th.id == threadID {
+				th.resolved = resolved
+				f.touch(p)
+				if f.lost(w) {
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"x": map[string]any{
+					"thread": map[string]any{"id": th.id, "isResolved": resolved}}}})
+				return
+			}
+		}
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"errors": []any{map[string]any{"type": "NOT_FOUND", "message": "no thread"}}})
+}
+
+// pullWrite handles POST pulls/{n}/comments, pulls/{n}/comments/{id}/replies
+// and pulls/{n}/reviews.
+func (f *FakeGitHub) pullWrite(w http.ResponseWriter, r *http.Request, parts []string) {
+	n, _ := strconv.Atoi(parts[0])
+	p, ok := f.pulls[n]
+	if !ok || len(parts) < 2 {
+		http.NotFound(w, r)
+		return
+	}
+	var in struct {
+		Body     string `json:"body"`
+		CommitID string `json:"commit_id"`
+		Path     string `json:"path"`
+		Line     int    `json:"line"`
+		Side     string `json:"side"`
+		Event    string `json:"event"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&in)
+	w.Header().Set("Content-Type", "application/json")
+	switch {
+	case len(parts) == 2 && parts[1] == "reviews":
+		state := map[string]string{"APPROVE": "APPROVED", "REQUEST_CHANGES": "CHANGES_REQUESTED", "COMMENT": "COMMENTED"}[in.Event]
+		p.reviewSeq++
+		rv := fakeReview{id: int64(p.number)*1000 + p.reviewSeq, login: f.login(r), state: state,
+			commit: in.CommitID, submitted: time.Now().UTC().Truncate(time.Second)}
+		p.reviews = append(p.reviews, rv)
+		f.touch(p)
+		if f.lost(w) {
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": rv.id})
+	case len(parts) == 2 && parts[1] == "comments":
+		if in.Path == "" || in.Line <= 0 || in.CommitID == "" {
+			http.Error(w, `{"message":"Validation Failed: path, line and commit_id are required"}`, http.StatusUnprocessableEntity)
+			return
+		}
+		c := f.newComment(r, in.Body)
+		p.threads = append(p.threads, &fakeThread{id: fmt.Sprintf("PRRT_%d", c.id), path: in.Path, side: in.Side,
+			line: in.Line, commit: in.CommitID, comments: []fakeComment{c}})
+		f.touch(p)
+		if f.lost(w) {
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": c.id})
+	case len(parts) == 4 && parts[1] == "comments" && parts[3] == "replies":
+		to, _ := strconv.ParseInt(parts[2], 10, 64)
+		for _, th := range p.threads {
+			for _, existing := range th.comments {
+				if existing.id == to {
+					c := f.newComment(r, in.Body)
+					th.comments = append(th.comments, c)
+					f.touch(p)
+					if f.lost(w) {
+						return
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"id": c.id})
+					return
+				}
+			}
+		}
+		http.NotFound(w, r)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (f *FakeGitHub) issueComment(w http.ResponseWriter, r *http.Request, id string) {
+	n, _ := strconv.Atoi(id)
+	p, ok := f.pulls[n]
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	var in struct {
+		Body string `json:"body"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&in)
+	c := f.newComment(r, in.Body)
+	p.convo = append(p.convo, c)
+	f.touch(p)
+	if f.lost(w) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"id": c.id})
+}
+
+// HostReply is someone replying in a thread on GitHub.
+func (f *FakeGitHub) HostReply(t *testing.T, id, threadID, login, body string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p := f.pull(t, id)
+	for _, th := range p.threads {
+		if th.id == threadID {
+			f.commentSeq++
+			th.comments = append(th.comments, fakeComment{id: 5000 + f.commentSeq, login: login, body: body,
+				created: time.Now().UTC().Truncate(time.Second).Add(time.Duration(f.commentSeq) * time.Second)})
+			f.touch(p)
+			return
+		}
+	}
+	t.Fatalf("fake github: no thread %s", threadID)
+}
+
+// HostConversation is someone commenting on the pull request's conversation.
+func (f *FakeGitHub) HostConversation(t *testing.T, id, login, body string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p := f.pull(t, id)
+	f.commentSeq++
+	p.convo = append(p.convo, fakeComment{id: 5000 + f.commentSeq, login: login, body: body, created: time.Now().UTC().Truncate(time.Second)})
+	f.touch(p)
 }

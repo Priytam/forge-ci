@@ -1338,3 +1338,67 @@ CREATE TABLE IF NOT EXISTS diff_read_stats (
     reads  BIGINT      NOT NULL DEFAULT 0,
     PRIMARY KEY (hour, result)
 );
+
+-- Code review (batch 7, phase D): threads and comments, synced both ways.
+-- A thread is on a line of the diff (path set) or is the change's
+-- conversation (path '', external_id 'conversation'). Host threads and
+-- comments are mirrored on each refresh; Forge comments are saved at once
+-- (state pending) and sent through the outbox carrying a hidden marker
+-- (forge_uid), which is how the host's echo is matched instead of duplicated.
+CREATE TABLE IF NOT EXISTS change_threads (
+    id                  BIGSERIAL   PRIMARY KEY,
+    change_id           BIGINT      NOT NULL REFERENCES changes(id) ON DELETE CASCADE,
+    external_id         TEXT        NOT NULL DEFAULT '',
+    root_comment_ext    TEXT        NOT NULL DEFAULT '', -- host id of the first comment (replies go to it)
+    path                TEXT        NOT NULL DEFAULT '',
+    side                TEXT        NOT NULL DEFAULT 'new' CHECK (side IN ('new','old')),
+    line                INT         NOT NULL DEFAULT 0,  -- 0: not on a line, or outdated
+    start_line          INT         NOT NULL DEFAULT 0,
+    original_line       INT         NOT NULL DEFAULT 0,
+    commit_sha          TEXT        NOT NULL DEFAULT '',
+    original_commit     TEXT        NOT NULL DEFAULT '',
+    anchor_head         TEXT        NOT NULL DEFAULT '', -- head the line was last placed on (Forge re-anchoring)
+    fingerprint         TEXT        NOT NULL DEFAULT '', -- the anchored line's text
+    resolved            BOOLEAN     NOT NULL DEFAULT FALSE,
+    outdated            BOOLEAN     NOT NULL DEFAULT FALSE,
+    resolve_pending     BOOLEAN     NOT NULL DEFAULT FALSE, -- Forge changed resolved; the host does not know yet
+    resolved_by         TEXT        NOT NULL DEFAULT '',
+    source              TEXT        NOT NULL DEFAULT 'host',
+    created_by          TEXT        NOT NULL DEFAULT '',
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS change_threads_ext_idx ON change_threads (change_id, external_id) WHERE external_id <> '';
+CREATE INDEX IF NOT EXISTS change_threads_change_idx ON change_threads (change_id);
+
+CREATE TABLE IF NOT EXISTS change_comments (
+    id           BIGSERIAL   PRIMARY KEY,
+    thread_id    BIGINT      NOT NULL REFERENCES change_threads(id) ON DELETE CASCADE,
+    external_id  TEXT        NOT NULL DEFAULT '',
+    forge_uid    TEXT        NOT NULL DEFAULT '',
+    author       TEXT        NOT NULL DEFAULT '',
+    author_email TEXT        NOT NULL DEFAULT '',
+    body         TEXT        NOT NULL DEFAULT '',
+    source       TEXT        NOT NULL DEFAULT 'host',
+    state        TEXT        NOT NULL DEFAULT 'sent' CHECK (state IN ('pending','sent','failed','local')),
+    error        TEXT        NOT NULL DEFAULT '',
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS change_comments_ext_idx ON change_comments (thread_id, external_id) WHERE external_id <> '';
+CREATE UNIQUE INDEX IF NOT EXISTS change_comments_uid_idx ON change_comments (forge_uid) WHERE forge_uid <> '';
+CREATE INDEX IF NOT EXISTS change_comments_thread_idx ON change_comments (thread_id, id);
+
+-- Host accounts people link from Forge (OAuth): their comments, reviews and
+-- merges are then made as them, with their own rate budget. The token is
+-- encrypted at rest. A verified link also maps the login in host_identities.
+CREATE TABLE IF NOT EXISTS user_host_tokens (
+    email      TEXT        NOT NULL,
+    provider   TEXT        NOT NULL,
+    login      TEXT        NOT NULL,
+    token      TEXT        NOT NULL,
+    scopes     TEXT        NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (email, provider)
+);
+ALTER TABLE host_identities ADD COLUMN IF NOT EXISTS verified BOOLEAN NOT NULL DEFAULT FALSE;

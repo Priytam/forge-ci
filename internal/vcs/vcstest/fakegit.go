@@ -113,3 +113,7 @@ func (g *FakeGit) Head(t *testing.T, id string) string {
 func (g *FakeGit) Protect(...string)                       {}
 func (g *FakeGit) Check(*testing.T, string, string) string { return "" }
 func (g *FakeGit) HostMerge(*testing.T, string) error      { return nil }
+
+// A plain git server has no comments: threads on it live in Forge.
+func (g *FakeGit) HostThread(*testing.T, string, string, string) string { return "" }
+func (g *FakeGit) CommentsOn(*testing.T, string) []string               { return nil }

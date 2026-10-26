@@ -48,6 +48,11 @@ type Host interface {
 	Check(t *testing.T, sha, context string) string
 	// HostMerge is a person clicking Merge in the host's own UI.
 	HostMerge(t *testing.T, id string) error
+	// HostThread is someone commenting on a line in the host's UI; it
+	// returns the thread's id (hosts with threads only).
+	HostThread(t *testing.T, id, login, body string) string
+	// CommentsOn lists every comment on the change as "login: body".
+	CommentsOn(t *testing.T, id string) []string
 }
 
 // Harness names the plugin under test and builds a fresh fake host per test.
@@ -97,7 +102,7 @@ func RunChangeSource(t *testing.T, h Harness) {
 		host := h.New(t)
 		id, _ := host.Open(t, "Normalise me")
 		repo := host.Repo()
-		for _, kind := range []string{"change", "review"} {
+		for _, kind := range []string{"change", "review", "comment"} {
 			hdr, body, ok := host.Delivery(t, id, kind)
 			if !ok {
 				continue
@@ -225,6 +230,11 @@ func RunChangeSource(t *testing.T, h Harness) {
 	if caps.StatusChecks || len(caps.MergeMethods) > 0 {
 		runWriter(t, h, caps)
 	}
+	if caps.Threads {
+		runThreads(t, h, caps)
+	} else if vcs.ThreadWriterFor(h.Provider) != nil {
+		t.Errorf("%s has a ThreadWriter but does not declare threads", h.Provider)
+	}
 	if !caps.Changes {
 		return // rate limits only exist where there is an API
 	}
@@ -334,6 +344,109 @@ func runWriter(t *testing.T, h Harness, caps vcs.Capabilities) {
 			if call.Result != "refused" {
 				t.Errorf("read-path write reached the host: %+v", call)
 			}
+		}
+	})
+}
+
+// runThreads is the comment half: a comment posted by Forge comes back from
+// the host with its marker (so Forge recognises its own and never stores it
+// twice), replies land in the thread, host comments are read, and resolve
+// works both ways.
+func runThreads(t *testing.T, h Harness, caps vcs.Capabilities) {
+	ctx := context.Background()
+	w := vcs.ThreadWriterFor(h.Provider)
+	src := vcs.ChangeSourceFor(h.Provider)
+	if w == nil || !caps.Resolve {
+		t.Fatalf("%s declares threads but has no ThreadWriter or no resolve", h.Provider)
+	}
+	find := func(ch *vcs.Change, uid string) (vcs.Thread, vcs.Comment, bool) {
+		for _, th := range ch.Threads {
+			for _, c := range th.Comments {
+				if _, got := vcs.Unmark(c.Body); got == uid {
+					return th, c, true
+				}
+			}
+		}
+		return vcs.Thread{}, vcs.Comment{}, false
+	}
+
+	t.Run("comment round trip", func(t *testing.T) {
+		host := h.New(t)
+		c, _ := newClient()
+		repo := host.Repo()
+		id, stored := host.Open(t, "Discuss")
+		head := host.Head(t, id)
+		cid, err := w.PostComment(ctx, c, repo, id, vcs.CommentRequest{Body: vcs.Mark("Why not a map?", "aa11bb22"),
+			Anchor: &vcs.ThreadAnchor{Path: "app.go", Side: "new", Line: 3, CommitSHA: head}})
+		if err != nil || cid == "" {
+			t.Fatalf("new thread: %q %v", cid, err)
+		}
+		if _, err := w.PostComment(ctx, c, repo, id, vcs.CommentRequest{Body: vcs.Mark("Good point", "cc33dd44"), ReplyTo: cid}); err != nil {
+			t.Fatalf("reply: %v", err)
+		}
+		if _, err := w.PostComment(ctx, c, repo, id, vcs.CommentRequest{Body: vcs.Mark("Ready for another look", "ee55ff66")}); err != nil {
+			t.Fatalf("conversation: %v", err)
+		}
+		ch, err := src.GetChange(ctx, c, repo, id, stored)
+		if err != nil {
+			t.Fatal(err)
+		}
+		th, cm, ok := find(ch, "aa11bb22")
+		if !ok || cm.ExternalID != cid || th.Path != "app.go" || th.Line != 3 || th.Side != "new" || len(th.Comments) != 2 {
+			t.Fatalf("thread = %+v (found %v)", th, ok)
+		}
+		if body, _ := vcs.Unmark(cm.Body); body != "Why not a map?" {
+			t.Errorf("body = %q", body)
+		}
+		if conv, _, ok := find(ch, "ee55ff66"); !ok || conv.ExternalID != vcs.ConversationThread || conv.Path != "" {
+			t.Errorf("conversation comment = %+v %v", conv, ok)
+		}
+		if err := w.ResolveThread(ctx, c, repo, th.ExternalID, true); err != nil {
+			t.Fatal(err)
+		}
+		ch, _ = src.GetChange(ctx, c, repo, id, stored)
+		if th, _, _ := find(ch, "aa11bb22"); !th.Resolved {
+			t.Error("resolve did not reach the host")
+		}
+		if err := w.ResolveThread(ctx, c, repo, th.ExternalID, false); err != nil {
+			t.Fatal(err)
+		}
+		ch, _ = src.GetChange(ctx, c, repo, id, stored)
+		if th, _, _ := find(ch, "aa11bb22"); th.Resolved {
+			t.Error("unresolve did not reach the host")
+		}
+	})
+
+	t.Run("host comments are read", func(t *testing.T) {
+		host := h.New(t)
+		c, _ := newClient()
+		id, stored := host.Open(t, "x")
+		tid := host.HostThread(t, id, "reviewer1", "Typo here")
+		ch, err := src.GetChange(ctx, c, host.Repo(), id, stored)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, th := range ch.Threads {
+			if th.ExternalID == tid && len(th.Comments) == 1 && th.Comments[0].Author == "reviewer1" && th.Comments[0].Body == "Typo here" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("host thread %s not read: %+v", tid, ch.Threads)
+		}
+	})
+
+	t.Run("post review", func(t *testing.T) {
+		host := h.New(t)
+		c, _ := newClient()
+		id, stored := host.Open(t, "x")
+		if _, err := w.PostReview(ctx, c, host.Repo(), id, "approve", "LGTM", host.Head(t, id)); err != nil {
+			t.Fatal(err)
+		}
+		ch, _ := src.GetChange(ctx, c, host.Repo(), id, stored)
+		if len(ch.Reviews) != 1 || ch.Reviews[0].Verdict != "approve" {
+			t.Errorf("reviews = %+v", ch.Reviews)
 		}
 	})
 }

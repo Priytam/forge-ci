@@ -330,6 +330,11 @@ func (s *Store) ApplyChange(ctx context.Context, repo, provider string, ch *vcs.
 			return 0, false, err
 		}
 	}
+	if ch.Threads != nil {
+		if err := applyThreadsTx(ctx, tx, id, ch.Threads); err != nil {
+			return 0, false, err
+		}
+	}
 	if _, err := tx.Exec(ctx, `SELECT pg_notify($1, $2)`, changesChannel, strconv.FormatInt(id, 10)); err != nil {
 		return 0, false, err
 	}
