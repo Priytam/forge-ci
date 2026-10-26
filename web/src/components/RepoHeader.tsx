@@ -4,17 +4,18 @@ import { listChanges, listMergeQueue, listRegistry } from "../api";
 import { usePoll } from "../hooks/usePoll";
 import { useChangeStream } from "../hooks/useChangeStream";
 import { ProviderChip } from "../pages/Repos";
+import Icon, { type IconName } from "./Icon";
 
 export type RepoTab = "pipelines" | "changes" | "queue" | "environments" | "tests" | "rules" | "settings";
 
-const TABS: { id: RepoTab; label: string; path: string }[] = [
-  { id: "pipelines", label: "Pipelines", path: "" },
-  { id: "changes", label: "Changes", path: "/changes" },
-  { id: "queue", label: "Merge queue", path: "/queue" },
-  { id: "environments", label: "Environments", path: "/environments" },
-  { id: "tests", label: "Tests", path: "/tests" },
-  { id: "rules", label: "Merge rules", path: "/merge-rules" },
-  { id: "settings", label: "Settings", path: "/settings" },
+const TABS: { id: RepoTab; label: string; path: string; icon: IconName }[] = [
+  { id: "pipelines", label: "Pipelines", path: "", icon: "pipelines" },
+  { id: "changes", label: "Changes", path: "/changes", icon: "changes" },
+  { id: "queue", label: "Merge queue", path: "/queue", icon: "layers" },
+  { id: "environments", label: "Environments", path: "/environments", icon: "environments" },
+  { id: "tests", label: "Tests", path: "/tests", icon: "activity" },
+  { id: "rules", label: "Merge rules", path: "/merge-rules", icon: "shield" },
+  { id: "settings", label: "Settings", path: "/settings", icon: "sliders" },
 ];
 
 /** The tab's path under a repo ("" for its pipelines). */
@@ -46,12 +47,14 @@ export default function RepoHeader({ repo, tab, actions }: { repo: string; tab: 
   const count = (id: RepoTab) => (id === "changes" ? counts.changes : id === "queue" ? counts.queue : undefined);
 
   return (
-    <>
-      <div className="page-head repo-head">
-        <h1>
-          {repo} <ProviderChip provider={provider} />
-        </h1>
-        {actions && <div className="page-head-actions">{actions}</div>}
+    <div className="repo-bar">
+      <div className="repo-head">
+        <span className="repo-head-ic">
+          <Icon name="repos" size={16} />
+        </span>
+        <h1>{repo}</h1>
+        <ProviderChip provider={provider} />
+        {actions && <div className="page-head-actions repo-head-actions">{actions}</div>}
       </div>
       <nav className="repo-tabs" aria-label="Repository">
         {TABS.map((t) => {
@@ -63,12 +66,13 @@ export default function RepoHeader({ repo, tab, actions }: { repo: string; tab: 
               className={t.id === tab ? "repo-tab repo-tab-active" : "repo-tab"}
               aria-current={t.id === tab ? "page" : undefined}
             >
+              <Icon name={t.icon} size={14} />
               {t.label}
               {n !== undefined && n > 0 && <span className="repo-tab-count">{n}</span>}
             </Link>
           );
         })}
       </nav>
-    </>
+    </div>
   );
 }

@@ -36,6 +36,15 @@ const PATHS: Record<string, string> = {
   dot: "M8 6a2 2 0 1 0 0 4 2 2 0 0 0 0-4Z",
   alert: "M8 2.5 14 13H2L8 2.5ZM8 6.5v3M8 11.2v.01",
   layers: "M8 2 2 5l6 3 6-3-6-3ZM2 8l6 3 6-3",
+  merge: "M4 2.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3ZM4 10.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3ZM4 5.5v5M12 8.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3ZM4 5.5c0 3 3 4.5 6.5 4.5",
+  clock: "M8 14A6 6 0 1 0 8 2a6 6 0 0 0 0 12ZM8 4.5V8l2.5 1.5",
+  blocked: "M8 14A6 6 0 1 0 8 2a6 6 0 0 0 0 12ZM3.8 3.8l8.4 8.4",
+  closed: "M8 14A6 6 0 1 0 8 2a6 6 0 0 0 0 12ZM6 6l4 4M10 6l-4 4",
+  ok: "M8 14A6 6 0 1 0 8 2a6 6 0 0 0 0 12ZM5.5 8.2l1.7 1.7 3.3-3.6",
+  comment: "M2.5 3.5h11v7.5H8l-3 2.5V11H2.5z",
+  file: "M4 2h5.5L12 4.5V14H4zM9.5 2v2.5H12",
+  edit: "M10.5 2.5l3 3L6 13H3v-3z",
+  external: "M9 2.5h4.5V7M13.5 2.5 7.5 8.5M11.5 9.5v4h-9v-9h4",
 };
 
 export type IconName = keyof typeof PATHS;

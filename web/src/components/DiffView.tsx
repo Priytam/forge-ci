@@ -14,6 +14,7 @@ import {
 } from "../api";
 import { useChangeStream } from "../hooks/useChangeStream";
 import Thread, { Composer } from "./Thread";
+import Icon from "./Icon";
 
 /** One line of a parsed unified diff. */
 interface Line {
@@ -135,6 +136,8 @@ function FileDiff({
   annotations?: Annotations;
 }) {
   const a = annotations;
+  // A new or deleted file has one side only: side by side would be half empty.
+  split = split && file.status !== "added" && file.status !== "deleted";
   const collapsedByDefault = !!(file.generated || file.binary || file.too_large || file.chunk);
   const [open, setOpen] = useState(!collapsedByDefault);
   const [patch, setPatch] = useState<string | null>(file.patch ?? null);
@@ -162,7 +165,9 @@ function FileDiff({
   return (
     <div className="diff-file" id={`f-${encodeURIComponent(file.path)}`}>
       <div className="diff-file-head" onClick={expand}>
-        <span className="diff-toggle">{open ? "▾" : "▸"}</span>
+        <span className={open ? "diff-toggle diff-toggle-open" : "diff-toggle"}>
+          <Icon name="expand" size={12} />
+        </span>
         <span className="mono">{file.old_path ? `${file.old_path} → ${file.path}` : file.path}</span>
         {STATUS[file.status] && <span className="diff-status">{STATUS[file.status]}</span>}
         <span className="diff-counts">
@@ -340,19 +345,19 @@ export default function DiffView({ page, onChanged }: { page: ChangePage; onChan
     }
   };
 
+  const jump = (path: string) =>
+    document.getElementById(`f-${encodeURIComponent(path)}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+
   return (
-    <div className="card settings-form" style={{ marginTop: 16 }}>
-      <h2>
-        Files changed{" "}
+    <div>
+      <div className="cr-diff-bar">
         {status?.status === "ready" && (
-          <span className="muted">
-            · {status.files} file{status.files === 1 ? "" : "s"}, <span className="diff-plus">+{status.additions}</span>{" "}
+          <span className="cr-diff-sum">
+            {status.files} file{status.files === 1 ? "" : "s"} <span className="diff-plus">+{status.additions}</span>{" "}
             <span className="diff-minus">−{status.deletions}</span>
           </span>
         )}
-      </h2>
-      <div className="form-actions diff-controls">
-        <select value={since} onChange={(e) => setSince(e.target.value)}>
+        <select value={since} onChange={(e) => setSince(e.target.value)} aria-label="Which changes">
           <option value="">All changes (vs {change.target_branch})</option>
           {revisions.slice(0, -1).map((r) => (
             <option key={r.number} value={r.head_sha}>
@@ -362,20 +367,35 @@ export default function DiffView({ page, onChanged }: { page: ChangePage; onChan
         </select>
         {seenRev && since !== seenRev.head_sha && (
           <button className="btn" onClick={() => setSince(seenRev.head_sha)}>
-            Changes since you last looked (r{seenRev.number})
+            New since you last looked (r{seenRev.number})
           </button>
         )}
-        <label className="field-inline">
-          <input type="checkbox" checked={split} onChange={(e) => toggleSplit(e.target.checked)} /> Side by side
-        </label>
+        <div className="segmented" role="radiogroup" aria-label="Diff layout">
+          {[false, true].map((v) => (
+            <button
+              key={String(v)}
+              type="button"
+              role="radio"
+              aria-checked={split === v}
+              className={split === v ? "seg-btn seg-active" : "seg-btn"}
+              onClick={() => toggleSplit(v)}
+            >
+              {v ? "Split" : "Unified"}
+            </button>
+          ))}
+        </div>
       </div>
       {error && <div className="error-banner">{error}</div>}
       {!status ? (
         <p className="muted">Loading…</p>
       ) : status.status === "unsupported" ? (
-        <p className="muted">Diffs are not available for this host yet.</p>
+        <div className="cr-empty">Diffs are not available for this host yet.</div>
       ) : status.status === "pending" ? (
-        <p className="muted">A runner is computing this diff from its git mirror… it appears here as soon as it is ready.</p>
+        <div className="cr-empty">
+          <Icon name="activity" size={24} />
+          <div className="cr-empty-title">Computing the diff…</div>
+          <div>A runner is working it out from its git mirror. It appears here as soon as it's ready.</div>
+        </div>
       ) : status.status === "failed" ? (
         <div className="error-banner">
           The diff could not be computed: {status.error}{" "}
@@ -386,21 +406,34 @@ export default function DiffView({ page, onChanged }: { page: ChangePage; onChan
       ) : !manifest ? (
         <p className="muted">Loading…</p>
       ) : (
-        <>
-          {manifest.truncated && (
-            <p className="muted">This diff is very large: the patches of the last files were left out (their counts are shown).</p>
-          )}
-          {manifest.files.length === 0 && <p className="muted">No file changes.</p>}
-          {manifest.files.map((f) => (
-            <FileDiff
-              key={f.path + (f.old_path ?? "")}
-              file={f}
-              manifestUrl={status.manifest_url!}
-              split={split}
-              annotations={showThreads ? annotationsFor(f.path) : undefined}
-            />
-          ))}
-        </>
+        <div className="cr-files">
+          <nav className="cr-filelist" aria-label="Files">
+            {manifest.files.map((f) => (
+              <button key={f.path + (f.old_path ?? "")} className="cr-file-link" onClick={() => jump(f.path)} title={f.path}>
+                <Icon name="file" size={12} />
+                <span className="cr-file-name">{f.path}</span>
+                <span className="cr-file-counts">
+                  <span className="diff-plus">+{f.additions}</span> <span className="diff-minus">−{f.deletions}</span>
+                </span>
+              </button>
+            ))}
+          </nav>
+          <div>
+            {manifest.truncated && (
+              <p className="muted">This diff is very large: the patches of the last files were left out (their counts are shown).</p>
+            )}
+            {manifest.files.length === 0 && <div className="cr-empty">No file changes.</div>}
+            {manifest.files.map((f) => (
+              <FileDiff
+                key={f.path + (f.old_path ?? "")}
+                file={f}
+                manifestUrl={status.manifest_url!}
+                split={split}
+                annotations={showThreads ? annotationsFor(f.path) : undefined}
+              />
+            ))}
+          </div>
+        </div>
       )}
     </div>
   );

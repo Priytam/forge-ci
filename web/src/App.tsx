@@ -34,12 +34,17 @@ import ChangeDetail from "./pages/ChangeDetail";
 import AdminMergeRules from "./pages/AdminMergeRules";
 import Account from "./pages/Account";
 import Shell from "./components/Shell";
+import { ToastProvider } from "./components/ui/Toast";
 
 /** Sign-in renders bare; every other page sits inside the app shell. */
 function Frame({ children }: { children: ReactNode }) {
   const { pathname } = useLocation();
   if (pathname.startsWith("/login")) return <main className="content content-bare">{children}</main>;
-  return <Shell>{children}</Shell>;
+  return (
+    <ToastProvider>
+      <Shell>{children}</Shell>
+    </ToastProvider>
+  );
 }
 
 export default function App() {
