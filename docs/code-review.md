@@ -36,19 +36,51 @@ the provider APIs it uses, cost next to nothing **by construction**:
 Turn it all off with `CODE_REVIEW=off` on `forge-server`. Pages then show
 what is already stored and nothing is fetched.
 
-## What ships today (phases A and B)
+## What ships today (phases A, B and C)
 
 | | |
 |---|---|
 | **Changes** inbox (sidebar → Changes) | open / merged / closed / all, filter by repo, search by title or `#number`; CI status of the head commit, the **merge gate** (ready / waiting / blocked), approvals and "changes requested" per change; live updates |
+| **Files changed** (change page) | every file's diff, unified or side by side; the whole change against its target, or **changes since revision N**; "changes since you last looked"; lock files, vendored and other generated files, binaries and very large diffs collapsed until opened |
 | Change page | the merge gate rule by rule, **Approve / Request changes / Withdraw**, **Merge** (merge / squash / rebase as the host allows), state, branches, description, labels, the Forge pipeline on the head commit, every review, every **revision** (each push is one, on every host) |
 | **Merge rules** (Admin → Merge rules) | rules per repo and target branch, and which host login is which Forge user |
 | Hosts | **GitHub** (App or token) and **plain git** (Forge-native changes; creating and merging them in the UI comes in phase F) |
 | About page | provider calls, 304 share, calls per open change, read-path calls, refresh and write backlogs, gates and what blocks them, every budget |
 
-Coming next, in order: diffs (C), line comments synced both ways and
+Coming next, in order: line comments synced both ways and
 reviews posted as the reviewer (D), GitLab / Bitbucket / Gitea / CodeCommit
 (E), and Forge-native changes, code owners and a merge queue (F).
+
+## Diffs
+
+Forge never asks a host's API for a diff. Every diff comes from git:
+
+- **A mirror on a runner.** Runners keep one blobless partial mirror per repo
+  (`git` with `--filter=blob:none`) and fetch into it **only when a diff names
+  a commit the mirror lacks** — never on a timer. File contents arrive lazily,
+  only for files the diff touches. A repo's diffs go to the runner that holds
+  its mirror (affinity), so the mirror stays warm. See
+  [runners.md](runners.md#git-mirrors-for-code-review-diffs-runner-tasks).
+- **Computed once, warm before anyone looks.** When a webhook moves a change's
+  head or target, Forge queues its diff at once; a runner computes it in well
+  under a second. The pull request's diff starts at the merge base with the
+  target (what the change itself did), like on the host; "since revision N"
+  diffs the two pushes directly and is computed the first time someone asks.
+- **Stored by commit, served forever.** A diff's bytes live in the existing
+  artifact blob store under a key made of commit shas (they can never change),
+  as a small manifest plus a separate chunk for each large or generated file.
+  The browser keeps them for good (`Cache-Control: private, max-age=31536000,
+  immutable` — private because a diff of a private repo must never sit in a
+  shared cache), and the server keeps recently served ones in memory. Opening
+  a diff again costs a 304 or nothing.
+- **Retention.** Diffs nobody has opened for 30 days and that no open change
+  shows are deleted; opening one again recomputes it.
+
+Hosts: GitHub (via `refs/pull/<n>/head`, so forks and deleted branches work)
+and plain git. The others arrive with their plugins (phase E).
+
+If a runner cannot compute a diff (the commits were force-pushed away, the
+repo cannot be reached), the page says why and offers **Try again**.
 
 ## Merge rules and the gate
 
@@ -198,6 +230,13 @@ zero; they cover the last 24 hours (gauges).
 | `forge_change_refresh_backlog` / `forge_change_refresh_oldest_seconds` | refreshes due now and the oldest one's age. A backlog that keeps growing means a budget is exhausted or a host is down |
 | `forge_provider_outbox_backlog` / `forge_provider_outbox_oldest_seconds` | gate publishes and merges waiting to be sent. Should drain within seconds; an old item means the host refuses writes (check the change page's action error) |
 | `forge_gate_evaluations_24h` | gate verdicts that changed |
+| `forge_diff_cache_hit_ratio_24h` | share of diff opens that found the diff ready (target > 0.99) |
+| `forge_diff_reads_24h{result}` | diff opens: `hit`, `miss` (queued then), `pending` (still computing), `failed` |
+| `forge_diff_open_p95_ms` | how long opening a diff took on this server, p95 of the last 1,000 (target < 300) |
+| `forge_diff_compute_p95_ms` / `forge_diffs_computed_24h` | runner compute time and count |
+| `forge_mirror_fetches_24h` | diffs that needed a git fetch into a mirror (git protocol, not an API call; there are no provider diff calls at all) |
+| `forge_runner_task_backlog` | diffs waiting for or running on a runner; growing means no runner can take tasks (git < 2.27, `RUNNER_TASKS=off`, all paused) |
+| `forge_diff_stored_bytes` | diff bytes in the blob store |
 | `forge_gate_blocked_changes{rule}` | open changes each rule is holding right now (`approvals`, `ci`, `freeze`, …) |
 
 At Travafa scale (≈15 repos, ≈40 open changes, ≈300 change events a day)
@@ -219,6 +258,14 @@ responses carry an `ETag` and answer `304` to `If-None-Match`.
 - `GET /api/v1/code-review/capabilities` — capabilities per provider.
 - `GET /api/v1/merge-policies`, `GET /api/v1/host-identities` — rules and
   login links (the latter admin-only).
+- `GET /api/v1/changes/{id}/diff[?from=<rev sha>&to=<rev sha>][&retry=1]` —
+  the diff's status (`ready` with `manifest_url`, `pending`, `failed`,
+  `unsupported`), queueing it when it was never computed.
+- `GET /api/v1/diff-blobs/<repo key>/<mode>/<from>..<to>/manifest.json` and
+  `.../f/<n>.patch` — the immutable manifest and chunks.
+
+Runner protocol (runner token): `POST /api/v1/runner/tasks/acquire`
+(long-poll, `{runner_id, kinds}`) and `POST /api/v1/runner/tasks/{id}/complete`.
 
 The change page's `GET /api/v1/changes/{id}` also returns `gate` (state,
 summary, `rules[]`, what the host shows), `actions` (queued and finished

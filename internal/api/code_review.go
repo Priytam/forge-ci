@@ -29,13 +29,15 @@ import (
 // test walks this table, so a new view route is covered by adding it here.
 func (s *Server) changeReadRoutes() map[string]http.HandlerFunc {
 	return map[string]http.HandlerFunc{
-		"GET /api/v1/changes":                  s.listChanges,
-		"GET /api/v1/changes/{id}":             s.getChange,
-		"GET /api/v1/changes/stream":           s.streamChanges,
-		"GET /api/v1/code-review/metrics":      s.codeReviewMetrics,
-		"GET /api/v1/code-review/capabilities": s.providerCapabilities,
-		"GET /api/v1/merge-policies":           s.listMergePolicies,
-		"GET /api/v1/host-identities":          s.listHostIdentities,
+		"GET /api/v1/changes":                                    s.listChanges,
+		"GET /api/v1/changes/{id}":                               s.getChange,
+		"GET /api/v1/changes/stream":                             s.streamChanges,
+		"GET /api/v1/code-review/metrics":                        s.codeReviewMetrics,
+		"GET /api/v1/code-review/capabilities":                   s.providerCapabilities,
+		"GET /api/v1/merge-policies":                             s.listMergePolicies,
+		"GET /api/v1/host-identities":                            s.listHostIdentities,
+		"GET /api/v1/changes/{id}/diff":                          s.getChangeDiff,
+		"GET /api/v1/diff-blobs/{repo}/{mode}/{range}/{rest...}": s.getDiffBlob,
 	}
 }
 
@@ -280,6 +282,9 @@ type codeReviewStats struct {
 	Budgets          []store.ProviderBudget    `json:"budgets"`
 	RefreshBacklog   int                       `json:"refresh_backlog"`
 	OldestRefreshS   float64                   `json:"oldest_refresh_seconds"`
+	Diffs            store.DiffStats           `json:"diffs"`
+	DiffOpenP95MS    float64                   `json:"diff_open_p95_ms"`
+	DiffOpenSamples  int                       `json:"diff_open_samples"`
 	OutboxBacklog    int                       `json:"outbox_backlog"`
 	OldestOutboxS    float64                   `json:"oldest_outbox_seconds"`
 	Gates            store.GateStats           `json:"gates"`
@@ -326,6 +331,11 @@ func (s *Server) loadCodeReviewStats(ctx context.Context) (*codeReviewStats, err
 	if st.Gates, err = s.store.GateStatsSince(ctx, time.Now().Add(-24*time.Hour)); err != nil {
 		return nil, err
 	}
+	if st.Diffs, err = s.store.DiffStatsSince(ctx, time.Now().Add(-24*time.Hour)); err != nil {
+		return nil, err
+	}
+	p95, n := s.diffOpens.p95()
+	st.DiffOpenP95MS, st.DiffOpenSamples = float64(p95.Microseconds())/1000, n
 	return st, nil
 }
 
@@ -385,5 +395,21 @@ func renderCodeReviewMetrics(st *codeReviewStats) string {
 	for _, id := range rules {
 		fmt.Fprintf(&b, "forge_gate_blocked_changes{rule=%q} %d\n", id, st.Gates.BlockedBy[id])
 	}
+	b.WriteString("# HELP forge_diff_reads_24h Diff opens in 24h: hit (ready), miss (queued for a runner), pending, failed.\n# TYPE forge_diff_reads_24h gauge\n")
+	results := make([]string, 0, len(st.Diffs.Reads))
+	for r := range st.Diffs.Reads {
+		results = append(results, r)
+	}
+	sort.Strings(results)
+	for _, r := range results {
+		fmt.Fprintf(&b, "forge_diff_reads_24h{result=%q} %d\n", r, st.Diffs.Reads[r])
+	}
+	fmt.Fprintf(&b, "# HELP forge_diff_cache_hit_ratio_24h Share of diff opens served ready (target > 0.99).\n# TYPE forge_diff_cache_hit_ratio_24h gauge\nforge_diff_cache_hit_ratio_24h %.4f\n", st.Diffs.HitRatio)
+	fmt.Fprintf(&b, "# HELP forge_diff_compute_p95_ms Runner diff compute time p95 over 24h.\n# TYPE forge_diff_compute_p95_ms gauge\nforge_diff_compute_p95_ms %.0f\n", st.Diffs.ComputeP95MS)
+	fmt.Fprintf(&b, "# HELP forge_diffs_computed_24h Diffs computed in 24h.\n# TYPE forge_diffs_computed_24h gauge\nforge_diffs_computed_24h %d\n", st.Diffs.Computed)
+	fmt.Fprintf(&b, "# HELP forge_mirror_fetches_24h Diffs that needed a git fetch into the runner's mirror (git protocol, not an API call).\n# TYPE forge_mirror_fetches_24h gauge\nforge_mirror_fetches_24h %d\n", st.Diffs.Fetches)
+	fmt.Fprintf(&b, "# HELP forge_diff_stored_bytes Bytes of diffs in the blob store.\n# TYPE forge_diff_stored_bytes gauge\nforge_diff_stored_bytes %d\n", st.Diffs.StoredBytes)
+	fmt.Fprintf(&b, "# HELP forge_runner_task_backlog Runner tasks (diffs) waiting or running.\n# TYPE forge_runner_task_backlog gauge\nforge_runner_task_backlog %d\n", st.Diffs.TaskBacklog)
+	fmt.Fprintf(&b, "# HELP forge_diff_open_p95_ms Diff open latency p95 on this instance (last 1000 opens; target < 300).\n# TYPE forge_diff_open_p95_ms gauge\nforge_diff_open_p95_ms %.1f\n", st.DiffOpenP95MS)
 	return b.String()
 }

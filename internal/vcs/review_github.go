@@ -396,3 +396,9 @@ func (githubProvider) Merge(ctx context.Context, c *ChangeClient, repo RepoRef, 
 	}
 	return out.SHA, nil
 }
+
+// MirrorRefs: the target branch and GitHub's pull/<n>/head, which keeps a
+// pull request's commits even from forks and after the branch is deleted.
+func (githubProvider) MirrorRefs(id, _, target string) []string {
+	return []string{headRef(target), "+refs/pull/" + id + "/head:refs/pull/" + id + "/head"}
+}

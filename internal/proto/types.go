@@ -560,3 +560,73 @@ type SecretSpec struct {
 	Azure string `json:"azure,omitempty"` // "https://<vault>.vault.azure.net/secrets/<name>[/<version>]"
 	File  bool   `json:"file,omitempty"`
 }
+
+// ---- runner tasks (code review, batch 7) ----
+
+// Runner tasks are small system work that runs inside the runner process,
+// not in an executor: today, keeping a repo's blobless git mirror and
+// computing a diff from it. They have their own queue and long-poll, so they
+// never take a job slot, and repo affinity keeps a repo's mirror on one
+// runner.
+
+// TaskKindDiff computes a diff between two commits from the repo's mirror.
+const TaskKindDiff = "diff"
+
+// TaskAcquireRequest asks for a task of one of Kinds.
+type TaskAcquireRequest struct {
+	RunnerID string   `json:"runner_id"`
+	Version  string   `json:"version,omitempty"`
+	Kinds    []string `json:"kinds"`
+}
+
+// RunnerTask is a claimed task. CloneURL carries a fresh credential (minted at
+// claim time); RedactValues must never be logged or written to disk.
+type RunnerTask struct {
+	ID           int64     `json:"id"`
+	Kind         string    `json:"kind"`
+	Repo         string    `json:"repo"`
+	CloneURL     string    `json:"clone_url"`
+	RedactValues []string  `json:"redact_values,omitempty"`
+	Diff         *DiffTask `json:"diff,omitempty"`
+}
+
+// DiffTask: diff From..To. Mode "change" diffs from the merge base of From
+// (the target branch) and To (the head) — what a pull request changed; mode
+// "range" diffs the two commits directly (revision to revision). FetchRefs
+// are the refs to fetch when either commit is missing from the mirror.
+type DiffTask struct {
+	From      string   `json:"from"`
+	To        string   `json:"to"`
+	Mode      string   `json:"mode"`
+	FetchRefs []string `json:"fetch_refs"`
+}
+
+// DiffFile is one changed file. Patch is the unified diff for the file
+// (headers included); empty for binary files and for patches over the cap.
+type DiffFile struct {
+	Path      string `json:"path"`
+	OldPath   string `json:"old_path,omitempty"`
+	Status    string `json:"status"` // added | modified | deleted | renamed | copied | type_changed
+	Additions int    `json:"additions"`
+	Deletions int    `json:"deletions"`
+	Binary    bool   `json:"binary,omitempty"`
+	Generated bool   `json:"generated,omitempty"`
+	TooLarge  bool   `json:"too_large,omitempty"` // patch dropped: over the per-file cap
+	Patch     string `json:"patch,omitempty"`
+}
+
+// DiffResult is what the runner reports for a diff task.
+type DiffResult struct {
+	MergeBase string     `json:"merge_base"` // the commit the diff starts from
+	Files     []DiffFile `json:"files"`
+	Truncated bool       `json:"truncated,omitempty"` // later files' patches dropped: total over the cap
+	Fetched   bool       `json:"fetched"`             // the mirror had to fetch (a git call to the host)
+	ComputeMS int        `json:"compute_ms"`
+}
+
+// TaskCompleteRequest reports a task's outcome: Error set means it failed.
+type TaskCompleteRequest struct {
+	RunnerID string      `json:"runner_id"`
+	Error    string      `json:"error,omitempty"`
+	Diff     *DiffResult `json:"diff,omitempty"`
+}

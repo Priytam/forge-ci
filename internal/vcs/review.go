@@ -96,6 +96,30 @@ type Capabilities struct {
 	// StatusChecks: the host can show (and require) a commit status, so the
 	// merge gate is enforced even when someone merges on the host.
 	StatusChecks bool `json:"status_checks"`
+	// Diffs: Forge can mirror the host with plain git and diff locally (set
+	// for every provider that is Mirrorable; never from a diff API).
+	Diffs bool `json:"diffs"`
+}
+
+// Mirrorable is implemented by hosts Forge can mirror with plain git. It
+// names the refspecs that carry a change's commits, fetched into the
+// runner's blobless mirror only when a commit is missing.
+type Mirrorable interface {
+	MirrorRefs(id, sourceBranch, targetBranch string) []string
+}
+
+// MirrorRefsFor returns provider's refspecs for a change, ok=false when the
+// host cannot be mirrored (yet).
+func MirrorRefsFor(provider, id, source, target string) ([]string, bool) {
+	m, ok := Lookup(provider).(Mirrorable)
+	if !ok {
+		return nil, false
+	}
+	return m.MirrorRefs(id, source, target), true
+}
+
+func headRef(branch string) string {
+	return "+refs/heads/" + branch + ":refs/heads/" + branch
 }
 
 // ChangeSource is the read side of a host's change API.
@@ -216,9 +240,11 @@ func CapabilitiesOf(provider string) Capabilities {
 		if caps.MergeMethods == nil {
 			caps.MergeMethods = []string{}
 		}
+		_, caps.Diffs = Lookup(provider).(Mirrorable)
 		return caps
 	}
-	return Capabilities{MergeMethods: []string{}}
+	_, diffs := Lookup(provider).(Mirrorable)
+	return Capabilities{MergeMethods: []string{}, Diffs: diffs}
 }
 
 // ---- call accounting ----

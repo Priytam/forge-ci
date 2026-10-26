@@ -4318,3 +4318,83 @@ h2.section-title {
   display: block;
   margin: 6px 0;
 }
+
+/* Diffs: one card per file, unified or side by side. */
+.diff-controls {
+  align-items: center;
+  margin-bottom: 8px;
+}
+.diff-file {
+  border: 1px solid var(--border, #d0d7de);
+  border-radius: 6px;
+  margin: 8px 0;
+  overflow: hidden;
+}
+.diff-file-head {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 10px;
+  cursor: pointer;
+  background: var(--surface-2, rgba(127, 127, 127, 0.08));
+}
+.diff-toggle {
+  width: 1em;
+}
+.diff-status {
+  font-size: 12px;
+  opacity: 0.7;
+}
+.diff-counts {
+  margin-left: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+.diff-plus {
+  color: var(--success, #1a7f37);
+}
+.diff-minus {
+  color: var(--danger, #cf222e);
+}
+.diff-empty {
+  padding: 8px 12px;
+}
+.diff-scroll {
+  overflow-x: auto;
+}
+.diff-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.diff-table td {
+  padding: 0 8px;
+  white-space: pre;
+  vertical-align: top;
+}
+.diff-split .diff-code {
+  width: 50%;
+}
+.diff-no {
+  width: 1%;
+  text-align: right;
+  opacity: 0.55;
+  user-select: none;
+}
+tr.diff-add,
+td.diff-add {
+  background: rgba(46, 160, 67, 0.15);
+}
+tr.diff-del,
+td.diff-del {
+  background: rgba(248, 81, 73, 0.15);
+}
+tr.diff-hunk td {
+  background: rgba(56, 139, 253, 0.1);
+  opacity: 0.8;
+}
+tr.diff-note td {
+  opacity: 0.6;
+}

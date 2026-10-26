@@ -199,6 +199,17 @@ function CodeReviewCard({ stats }: { stats: CodeReviewStats }) {
               {stats.refresh_backlog > 0 && <span className="muted"> (oldest {Math.round(stats.oldest_refresh_seconds)}s)</span>}
             </td>
           </tr>
+          <tr>
+            <td className="muted">Diffs opened ready</td>
+            <td>
+              {Math.round(stats.diffs.hit_ratio * 1000) / 10}%{" "}
+              <span className="muted">
+                (open p95 {stats.diff_open_p95_ms.toFixed(1)} ms on this server; {stats.diffs.computed} computed by runners, p95{" "}
+                {Math.round(stats.diffs.compute_p95_ms)} ms; {stats.diffs.task_backlog} waiting;{" "}
+                {(stats.diffs.stored_bytes / 1048576).toFixed(1)} MB stored)
+              </span>
+            </td>
+          </tr>
           {stats.budgets.map((b) => (
             <tr key={b.credential}>
               <td className="muted">
