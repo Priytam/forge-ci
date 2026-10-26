@@ -225,6 +225,7 @@ func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "failed to create pipeline")
 		return
 	}
+	s.nudgeNativeChanges(r.Context(), req.Repo, req.Ref)
 	writeJSON(w, http.StatusCreated, map[string]any{"pipeline": p})
 }
 

@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/priytamjeepandey/forge-ci/internal/blob"
 	"github.com/priytamjeepandey/forge-ci/internal/proto"
 	"github.com/priytamjeepandey/forge-ci/internal/store"
 	"github.com/priytamjeepandey/forge-ci/internal/vcs"
@@ -35,6 +36,9 @@ type harness struct {
 	svc  *Service
 	ctx  context.Context
 	cred string
+	// Runner tasks played in tests (native_test.go).
+	root  string
+	blobs blob.Store
 }
 
 func newHarness(t *testing.T) *harness {

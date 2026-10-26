@@ -60,10 +60,12 @@ func main() {
 	defer logs.Close()
 
 	go scheduler.New(st, blobs, logs).Run(ctx)
-	go autoscale.Loop(ctx, st)     // runner pools (no-op until one is configured)
-	go review.Loop(ctx, st, blobs) // code review: refreshes, reconcile, gates, writes, diff retention
+	go autoscale.Loop(ctx, st) // runner pools (no-op until one is configured)
+	handler := api.New(st, blobs, logs)
+	// Code review: refreshes, reconcile, gates, writes, merge queues, diff retention.
+	go review.Loop(ctx, st, blobs, handler.StartQueuePipeline)
 
-	srv := &http.Server{Addr: addr, Handler: api.New(st, blobs, logs)}
+	srv := &http.Server{Addr: addr, Handler: handler}
 	go func() {
 		<-ctx.Done()
 		_ = srv.Shutdown(context.Background())

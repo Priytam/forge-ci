@@ -145,6 +145,27 @@ func (m *Mirror) has(ctx context.Context, sha string) bool {
 	return cmd.Run() == nil
 }
 
+// begin takes the mirror for one task: one task at a time per mirror, and
+// the remote carries the credential only while the task runs (its fetches,
+// lazy blob fetches and push), then goes back to bare.
+func (m *Mirror) begin(ctx context.Context, cloneURL string, redact []string) (func(), error) {
+	mu, _ := locks.LoadOrStore(m.Dir, &sync.Mutex{})
+	mu.(*sync.Mutex).Lock()
+	m.secret = redact
+	if err := m.ensure(ctx, cloneURL); err != nil {
+		mu.(*sync.Mutex).Unlock()
+		return nil, err
+	}
+	if _, err := m.git(ctx, "remote", "set-url", "origin", cloneURL); err != nil {
+		mu.(*sync.Mutex).Unlock()
+		return nil, err
+	}
+	return func() {
+		_, _ = m.git(context.WithoutCancel(ctx), "remote", "set-url", "origin", stripUser(cloneURL))
+		mu.(*sync.Mutex).Unlock()
+	}, nil
+}
+
 var shaRe = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
 
 // Diff computes t on the mirror, fetching first only when a commit is
@@ -154,19 +175,11 @@ func (m *Mirror) Diff(ctx context.Context, cloneURL string, redact []string, t p
 		return nil, errors.New("diff endpoints must be full commit shas")
 	}
 	start := time.Now()
-	mu, _ := locks.LoadOrStore(m.Dir, &sync.Mutex{})
-	mu.(*sync.Mutex).Lock()
-	defer mu.(*sync.Mutex).Unlock()
-	m.secret = redact
-	if err := m.ensure(ctx, cloneURL); err != nil {
+	done, err := m.begin(ctx, cloneURL, redact)
+	if err != nil {
 		return nil, err
 	}
-	// The remote carries the credential only while this task runs (the fetch
-	// and the lazy blob fetches the diff makes), then goes back to bare.
-	if _, err := m.git(ctx, "remote", "set-url", "origin", cloneURL); err != nil {
-		return nil, err
-	}
-	defer m.git(context.WithoutCancel(ctx), "remote", "set-url", "origin", stripUser(cloneURL)) //nolint:errcheck
+	defer done()
 	res := &proto.DiffResult{}
 	if !m.has(ctx, t.From) || !m.has(ctx, t.To) {
 		res.Fetched = true
@@ -204,8 +217,47 @@ func (m *Mirror) Diff(ctx context.Context, cloneURL string, redact []string, t p
 		return nil, err
 	}
 	res.Files, res.Truncated = files, capPatches(files)
+	if t.Mode != "range" {
+		// Code owners are read from the target branch (From), as the hosts do.
+		res.OwnersRead = true
+		res.CodeOwnersPath, res.CodeOwners, err = m.codeOwners(ctx, t.From)
+		if err != nil {
+			return nil, err
+		}
+	}
 	res.ComputeMS = int(time.Since(start).Milliseconds())
 	return res, nil
+}
+
+// CodeOwnersPaths are where hosts look for a CODEOWNERS file, first found wins.
+var CodeOwnersPaths = []string{".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS", ".gitlab/CODEOWNERS", ".bitbucket/CODEOWNERS"}
+
+// maxCodeOwners caps the file read (GitHub ignores files over 3 MB; real ones
+// are a few KB).
+const maxCodeOwners = 256 << 10
+
+// codeOwners returns the CODEOWNERS file at commit (path "" when none). The
+// tree is local; only the one blob is fetched.
+func (m *Mirror) codeOwners(ctx context.Context, commit string) (string, string, error) {
+	for _, p := range CodeOwnersPaths {
+		out, err := m.git(ctx, "ls-tree", "-l", commit, "--", p)
+		if err != nil {
+			return "", "", err
+		}
+		f := strings.Fields(string(out))
+		if len(f) < 5 || f[1] != "blob" {
+			continue
+		}
+		if size, _ := strconv.Atoi(f[3]); size > maxCodeOwners {
+			return p, "", fmt.Errorf("%s is larger than %d KB", p, maxCodeOwners>>10)
+		}
+		body, err := m.git(ctx, "cat-file", "blob", f[2])
+		if err != nil {
+			return "", "", err
+		}
+		return p, string(body), nil
+	}
+	return "", "", nil
 }
 
 // diffFiles lists every changed file with its status, counts and patch. Three

@@ -43,8 +43,13 @@ type MergePolicy struct {
 	TicketPattern           string         `json:"ticket_pattern"`
 	FreezeWindows           []FreezeWindow `json:"freeze_windows"`
 	Timezone                string         `json:"timezone"`
-	UpdatedBy               string         `json:"updated_by"`
-	UpdatedAt               time.Time      `json:"updated_at"`
+	// RequireCodeOwners: the owners (CODEOWNERS on the target branch) of
+	// every touched file must approve. MergeQueue: merges go through the
+	// merge queue, which tests each change on top of the latest target.
+	RequireCodeOwners bool      `json:"require_code_owners"`
+	MergeQueue        bool      `json:"merge_queue"`
+	UpdatedBy         string    `json:"updated_by"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 var weekdays = map[string]int{"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
@@ -135,7 +140,7 @@ func (p *MergePolicy) Validate() error {
 const mergePolicyCols = `id, repo, branch_pattern, required_approvals, approver_roles, required_group,
 	required_group_approvals, allow_self_approval, dismiss_on_push, block_on_changes_requested,
 	require_ci, required_jobs, required_labels, blocked_labels, ticket_pattern, freeze_windows,
-	timezone, updated_by, updated_at`
+	timezone, updated_by, updated_at, require_code_owners, merge_queue`
 
 func scanMergePolicy(row pgx.Row) (*MergePolicy, error) {
 	var p MergePolicy
@@ -143,7 +148,7 @@ func scanMergePolicy(row pgx.Row) (*MergePolicy, error) {
 	if err := row.Scan(&p.ID, &p.Repo, &p.BranchPattern, &p.RequiredApprovals, &p.ApproverRoles,
 		&p.RequiredGroup, &p.RequiredGroupApprovals, &p.AllowSelfApproval, &p.DismissOnPush,
 		&p.BlockOnChangesRequested, &p.RequireCI, &p.RequiredJobs, &p.RequiredLabels, &p.BlockedLabels,
-		&p.TicketPattern, &windows, &p.Timezone, &p.UpdatedBy, &p.UpdatedAt); err != nil {
+		&p.TicketPattern, &windows, &p.Timezone, &p.UpdatedBy, &p.UpdatedAt, &p.RequireCodeOwners, &p.MergeQueue); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal(windows, &p.FreezeWindows); err != nil {
@@ -181,8 +186,8 @@ func (s *Store) UpsertMergePolicy(ctx context.Context, p MergePolicy) (*MergePol
 		`INSERT INTO merge_policies (repo, branch_pattern, required_approvals, approver_roles, required_group,
 		     required_group_approvals, allow_self_approval, dismiss_on_push, block_on_changes_requested,
 		     require_ci, required_jobs, required_labels, blocked_labels, ticket_pattern, freeze_windows,
-		     timezone, updated_by)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+		     timezone, updated_by, require_code_owners, merge_queue)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
 		 ON CONFLICT (repo, branch_pattern) DO UPDATE SET
 		     required_approvals = EXCLUDED.required_approvals, approver_roles = EXCLUDED.approver_roles,
 		     required_group = EXCLUDED.required_group, required_group_approvals = EXCLUDED.required_group_approvals,
@@ -191,12 +196,13 @@ func (s *Store) UpsertMergePolicy(ctx context.Context, p MergePolicy) (*MergePol
 		     required_jobs = EXCLUDED.required_jobs, required_labels = EXCLUDED.required_labels,
 		     blocked_labels = EXCLUDED.blocked_labels, ticket_pattern = EXCLUDED.ticket_pattern,
 		     freeze_windows = EXCLUDED.freeze_windows, timezone = EXCLUDED.timezone,
+		     require_code_owners = EXCLUDED.require_code_owners, merge_queue = EXCLUDED.merge_queue,
 		     updated_by = EXCLUDED.updated_by, updated_at = now()
 		 RETURNING `+mergePolicyCols,
 		p.Repo, p.BranchPattern, p.RequiredApprovals, p.ApproverRoles, p.RequiredGroup,
 		p.RequiredGroupApprovals, p.AllowSelfApproval, p.DismissOnPush, p.BlockOnChangesRequested,
 		p.RequireCI, p.RequiredJobs, p.RequiredLabels, p.BlockedLabels, p.TicketPattern, windows,
-		p.Timezone, p.UpdatedBy))
+		p.Timezone, p.UpdatedBy, p.RequireCodeOwners, p.MergeQueue))
 	if err != nil {
 		return nil, err
 	}
@@ -442,10 +448,15 @@ type GateInputs struct {
 	Title      string
 	Body       string
 	Source     string
+	BaseSHA    string
 	Labels     []string
 	Reviews    []ChangeReview
 	Pipeline   *HeadPipeline
 	Identities map[string]string // host login → email
+	// Loaded only when the rule needs them.
+	CodeOwners  *CodeOwnersInput
+	OwnerGroups map[string]map[string]bool // approver group → members
+	Queue       *QueueEntry                // the change's live merge queue entry
 }
 
 // ClaimDirtyGates returns open changes whose gate must be re-evaluated (an
@@ -481,10 +492,10 @@ func (s *Store) LoadGateInputs(ctx context.Context, id int64) (*GateInputs, erro
 	c := &in.Change
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, repo, provider, number, author, target_branch, state, draft, head_sha,
-		        title, body, source_branch, labels
+		        title, body, source_branch, labels, base_sha
 		 FROM changes WHERE id = $1`, id).
 		Scan(&c.ID, &c.Repo, &c.Provider, &c.Number, &c.Author, &c.TargetBranch, &c.State, &c.Draft, &c.HeadSHA,
-			&in.Title, &in.Body, &in.Source, &in.Labels)
+			&in.Title, &in.Body, &in.Source, &in.Labels, &in.BaseSHA)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}

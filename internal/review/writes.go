@@ -47,10 +47,12 @@ type gatePayload struct {
 	TargetURL   string `json:"target_url"`
 }
 
-// MergePayload is a queued merge.
+// MergePayload is a queued merge. ExpectedBase (merge queue) is the target
+// tip the merge was tested on; a native merge refuses if the target moved.
 type MergePayload struct {
 	Method       string `json:"method"`
 	ExpectedHead string `json:"expected_head"`
+	ExpectedBase string `json:"expected_base,omitempty"`
 }
 
 // ChangeURL is the change page in Forge (the gate's link on the host).
@@ -137,6 +139,9 @@ func (s *Service) evaluateGate(ctx context.Context, id int64, policies []store.M
 		}
 		elig, group, bootstrap, err := s.store.ApproverEligibility(ctx, c.Repo, emails, p.ApproverRoles, p.RequiredGroup)
 		if err != nil {
+			return false, err
+		}
+		if err := s.loadRuleInputs(ctx, in, p); err != nil {
 			return false, err
 		}
 		v = Evaluate(in, p, Eligibility{Eligible: elig, Group: group, Bootstrap: bootstrap}, time.Now())
@@ -230,6 +235,10 @@ func (s *Service) send(ctx context.Context, o store.OutboxItem) {
 		s.finishWrite(ctx, o, "pending", nil, err, time.Now().Add(30*time.Second), true)
 		return
 	}
+	if found && o.Kind == KindMerge && vcs.CapabilitiesOf(ref.Provider).NativeChanges {
+		s.nativeMerge(ctx, o) // a runner merges; no host API
+		return
+	}
 	w := vcs.ChangeWriterFor(ref.Provider)
 	if !found || w == nil {
 		s.finishWrite(ctx, o, "failed", nil, errors.New("repo is not connected to a host Forge can write to"), time.Time{}, true)
@@ -278,51 +287,9 @@ func (s *Service) send(ctx context.Context, o store.OutboxItem) {
 // the host. A retry first re-reads the change, so a merge that succeeded
 // before a timeout is never sent twice.
 func (s *Service) merge(ctx, cctx context.Context, o store.OutboxItem, ref vcs.RepoRef, cred string, w vcs.ChangeWriter) {
-	var p MergePayload
-	if err := json.Unmarshal(o.Payload, &p); err != nil || o.ChangeID == nil {
-		s.finishWrite(ctx, o, "failed", nil, errors.New("malformed merge request"), time.Time{}, true)
+	c, p, ok := s.mergeReady(ctx, o)
+	if !ok {
 		return
-	}
-	c, err := s.store.ChangeForAction(ctx, *o.ChangeID)
-	if err != nil {
-		s.finishWrite(ctx, o, "pending", nil, err, time.Now().Add(10*time.Second), true)
-		return
-	}
-	if c.State == "merged" {
-		s.finishWrite(ctx, o, "done", map[string]string{"note": "already merged"}, nil, time.Time{}, true)
-		return
-	}
-	if c.State != "open" || c.HeadSHA != p.ExpectedHead {
-		s.finishWrite(ctx, o, "failed", nil, vcs.ErrHeadMoved, time.Time{}, true)
-		return
-	}
-	// Re-evaluate now rather than trust a verdict whose inputs may have just
-	// moved (a review a second ago). The zero claim time leaves any dirty
-	// mark for the regular tick.
-	if policies, err := s.store.ListMergePolicies(ctx); err == nil {
-		if _, err := s.evaluateGate(ctx, c.ID, policies, time.Time{}); err != nil {
-			slog.Warn("code review: evaluate gate before merge", "change", c.ID, "err", err)
-		}
-	}
-	gate, err := s.store.GetGate(ctx, c.ID)
-	if err != nil {
-		s.finishWrite(ctx, o, "pending", nil, err, time.Now().Add(10*time.Second), true)
-		return
-	}
-	if gate != nil {
-		if gate.State != "pass" {
-			s.finishWrite(ctx, o, "failed", nil, errors.New("the merge gate no longer passes: "+gate.Summary), time.Time{}, true)
-			return
-		}
-		if vcs.CapabilitiesOf(c.Provider).StatusChecks && gate.PublishedState != "pass" {
-			if time.Since(o.CreatedAt) > gatePublishWait {
-				s.finishWrite(ctx, o, "failed", nil, errors.New("the passing gate could not be published to the host"), time.Time{}, true)
-				return
-			}
-			// The host would refuse until it sees the gate; wait for it.
-			s.finishWrite(ctx, o, "pending", nil, nil, time.Now().Add(2*time.Second), false)
-			return
-		}
 	}
 	if o.Attempts > 0 {
 		if src := vcs.ChangeSourceFor(ref.Provider); src != nil {
@@ -347,4 +314,88 @@ func (s *Service) merge(ctx, cctx context.Context, o store.OutboxItem, ref vcs.R
 	s.finishWrite(ctx, o, "done", map[string]string{"merge_sha": sha}, nil, time.Time{}, true)
 	// The host's webhook will say merged too; refresh now so the page does.
 	_ = s.store.RequestChangeRefresh(ctx, c.Repo, ref.Provider, c.Number, store.PriorityWebhook, 0, false)
+}
+
+// mergeReady re-checks a queued merge at send time: the change is still open
+// on the approved head, its gate still passes and has reached the host. When
+// it is not ready it finishes (or defers) the write itself and returns false.
+func (s *Service) mergeReady(ctx context.Context, o store.OutboxItem) (*store.ReviewTargetChange, MergePayload, bool) {
+	var p MergePayload
+	if err := json.Unmarshal(o.Payload, &p); err != nil || o.ChangeID == nil {
+		s.finishWrite(ctx, o, "failed", nil, errors.New("malformed merge request"), time.Time{}, true)
+		return nil, p, false
+	}
+	c, err := s.store.ChangeForAction(ctx, *o.ChangeID)
+	if err != nil {
+		s.finishWrite(ctx, o, "pending", nil, err, time.Now().Add(10*time.Second), true)
+		return nil, p, false
+	}
+	if c.State == "merged" {
+		s.finishWrite(ctx, o, "done", map[string]string{"note": "already merged"}, nil, time.Time{}, true)
+		return nil, p, false
+	}
+	if c.State != "open" || c.HeadSHA != p.ExpectedHead {
+		s.finishWrite(ctx, o, "failed", nil, vcs.ErrHeadMoved, time.Time{}, true)
+		return nil, p, false
+	}
+	// Re-evaluate now rather than trust a verdict whose inputs may have just
+	// moved (a review a second ago). The zero claim time leaves any dirty
+	// mark for the regular tick.
+	if policies, err := s.store.ListMergePolicies(ctx); err == nil {
+		if _, err := s.evaluateGate(ctx, c.ID, policies, time.Time{}); err != nil {
+			slog.Warn("code review: evaluate gate before merge", "change", c.ID, "err", err)
+		}
+	}
+	gate, err := s.store.GetGate(ctx, c.ID)
+	if err != nil {
+		s.finishWrite(ctx, o, "pending", nil, err, time.Now().Add(10*time.Second), true)
+		return nil, p, false
+	}
+	if gate != nil {
+		if gate.State != "pass" {
+			s.finishWrite(ctx, o, "failed", nil, errors.New("the merge gate no longer passes: "+gate.Summary), time.Time{}, true)
+			return nil, p, false
+		}
+		if vcs.CapabilitiesOf(c.Provider).StatusChecks && gate.PublishedState != "pass" {
+			if time.Since(o.CreatedAt) > gatePublishWait {
+				s.finishWrite(ctx, o, "failed", nil, errors.New("the passing gate could not be published to the host"), time.Time{}, true)
+				return nil, p, false
+			}
+			// The host would refuse until it sees the gate; wait for it.
+			s.finishWrite(ctx, o, "pending", nil, nil, time.Now().Add(2*time.Second), false)
+			return nil, p, false
+		}
+	}
+	return c, p, true
+}
+
+// loadRuleInputs loads what only some rules read: the change's code owners
+// (asking a runner for its diff when needed) and its merge queue entry.
+func (s *Service) loadRuleInputs(ctx context.Context, in *store.GateInputs, p *store.MergePolicy) error {
+	c := in.Change
+	if p.RequireCodeOwners && c.HeadSHA != "" && in.BaseSHA != "" {
+		refs, ok := vcs.MirrorRefsFor(c.Provider, c.Number, in.Source, c.TargetBranch)
+		if ok {
+			co, err := s.store.ChangeCodeOwners(ctx, c.Repo, in.BaseSHA, c.HeadSHA, refs)
+			if err != nil {
+				return err
+			}
+			in.CodeOwners = co
+		} else {
+			in.CodeOwners = &store.CodeOwnersInput{State: "failed", Error: "Forge cannot read files on this host yet"}
+		}
+		groups, err := s.store.ApproverGroupMembers(ctx)
+		if err != nil {
+			return err
+		}
+		in.OwnerGroups = groups
+	}
+	if p.MergeQueue {
+		q, err := s.store.ActiveQueueEntry(ctx, c.ID)
+		if err != nil {
+			return err
+		}
+		in.Queue = q
+	}
+	return nil
 }

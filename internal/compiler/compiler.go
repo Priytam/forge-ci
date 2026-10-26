@@ -79,6 +79,9 @@ const (
 	// build to another environment. Its rules are evaluated with the source
 	// pipeline's source; at run time CI_PIPELINE_SOURCE is "promotion".
 	SourcePromotion = "promotion"
+	// SourceMergeQueue marks the merge queue's test pipeline: the change
+	// merged onto the latest target, on branch forge-queue/<target>.
+	SourceMergeQueue = "merge_queue"
 )
 
 const (

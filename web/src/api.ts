@@ -415,7 +415,7 @@ async function postJSON<T>(path: string, body: unknown): Promise<T> {
 
 /** For endpoints that return no body (204 etc.). */
 async function requestVoid(
-  method: "PUT" | "POST" | "DELETE",
+  method: "PUT" | "POST" | "PATCH" | "DELETE",
   path: string,
   body?: unknown
 ): Promise<void> {
@@ -2358,13 +2358,40 @@ export interface ChangeThread {
   comments: ThreadComment[];
 }
 
+/** A change's place in its target's merge queue. */
+export interface QueueEntry {
+  id: number;
+  change_id: number;
+  repo: string;
+  target_branch: string;
+  head_sha: string;
+  method: string;
+  state: "queued" | "testing" | "merging" | "merged" | "failed" | "removed";
+  base_sha?: string;
+  test_sha?: string;
+  pipeline_id?: number;
+  error?: string;
+  requested_by?: string;
+  enqueued_at: string;
+  started_at?: string;
+  finished_at?: string;
+  /** 1 = next (live entries) */
+  position?: number;
+  number?: string;
+  title?: string;
+}
+
 export interface ChangePage {
   change: ChangeDetail;
   capabilities: Capabilities;
   gate: GateResult | null;
   actions: ChangeAction[];
   threads: ChangeThread[];
-  permissions: { can_review: boolean; can_merge: boolean; can_comment: boolean };
+  /** enabled: the target merges through the queue; entry: the change's live
+   *  (or latest, on this head) entry; length: how many are in line */
+  queue: { enabled: boolean; entry?: QueueEntry; length: number };
+  /** can_edit: a Forge-native change the caller may edit, close or reopen */
+  permissions: { can_review: boolean; can_merge: boolean; can_comment: boolean; can_edit: boolean };
 }
 
 /** Comment on a line (path, side, line) or, without them, on the conversation. */
@@ -2415,6 +2442,40 @@ export function reviewChange(
   return postJSON(`/changes/${id}/reviews`, { verdict, body, reviewer });
 }
 
+/** What each host supports natively, by provider name. */
+export function getProviderCapabilities(): Promise<Record<string, Capabilities>> {
+  return getJSON("/code-review/capabilities");
+}
+
+/** Open a Forge-native change (hosts without pull requests, e.g. plain git). */
+export function createChange(input: {
+  repo: string;
+  source_branch: string;
+  target_branch: string;
+  title: string;
+  body?: string;
+  draft?: boolean;
+}): Promise<{ id: number; number: string }> {
+  return postJSON("/changes", input);
+}
+
+/** Edit, close or reopen a Forge-native change. */
+export function editChange(
+  id: number,
+  patch: { title?: string; body?: string; draft?: boolean; state?: "open" | "closed" }
+): Promise<void> {
+  return requestVoid("PATCH", `/changes/${id}`, patch);
+}
+
+/** Add the change (exactly this head) to its target's merge queue. */
+export function queueChange(id: number, expectedHead: string, method: string): Promise<{ entry: QueueEntry }> {
+  return postJSON(`/changes/${id}/queue`, { expected_head: expectedHead, method });
+}
+
+export function dequeueChange(id: number): Promise<void> {
+  return requestVoid("DELETE", `/changes/${id}/queue`);
+}
+
 /** Queue a merge of exactly the head you reviewed. */
 export function mergeChange(id: number, expectedHead: string, method: string): Promise<{ action: ChangeAction }> {
   return postJSON(`/changes/${id}/merge`, { expected_head: expectedHead, method });
@@ -2443,6 +2504,10 @@ export interface MergePolicy {
   ticket_pattern: string;
   freeze_windows: FreezeWindow[];
   timezone: string;
+  /** owners (CODEOWNERS on the target) of every touched file must approve */
+  require_code_owners: boolean;
+  /** merges go through the merge queue */
+  merge_queue: boolean;
   updated_by?: string;
   updated_at?: string;
 }

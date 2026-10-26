@@ -20,6 +20,7 @@ import (
 
 	"github.com/priytamjeepandey/forge-ci/internal/compiler"
 	"github.com/priytamjeepandey/forge-ci/internal/proto"
+	"github.com/priytamjeepandey/forge-ci/internal/review"
 	"github.com/priytamjeepandey/forge-ci/internal/store"
 	"github.com/priytamjeepandey/forge-ci/internal/vcs"
 )
@@ -371,26 +372,54 @@ type webhookRun struct {
 }
 
 func (s *Server) triggerFromWebhook(w http.ResponseWriter, r *http.Request, run webhookRun) bool {
-	repo, ref, sha, author, source := run.Repo, run.Ref, run.SHA, run.Actor, run.Source
-	extraCtx, pr := run.ExtraCtx, run.PR
-	if repo == "" || ref == "" || sha == "" {
+	if run.Repo == "" || run.Ref == "" || run.SHA == "" {
 		writeErr(w, http.StatusBadRequest, "payload missing repo/ref/sha")
 		return false
 	}
+	if strings.HasPrefix(strings.TrimPrefix(run.Ref, "refs/heads/"), review.QueueBranchPrefix) {
+		// The merge queue's test merges: the queue starts their pipelines.
+		writeJSON(w, http.StatusAccepted, map[string]string{"status": "merge queue branch: pipelines are started by the queue"})
+		return false
+	}
+	p, status, err := s.runPipeline(r.Context(), run)
+	if err != nil {
+		writeErr(w, status, err.Error())
+		return false
+	}
+	slog.Info("pipeline triggered via webhook", "repo", run.Repo, "ref", run.Ref, "pipeline", p.ID, "config_source", p.ConfigSource)
+	writeJSON(w, http.StatusCreated, map[string]any{"pipeline": p})
+	return true
+}
+
+// StartQueuePipeline starts the merge queue's test pipeline for sha on its
+// queue branch, as a push there would (source merge_queue).
+func (s *Server) StartQueuePipeline(ctx context.Context, repo, ref, sha, actor string) (int64, error) {
+	p, _, err := s.runPipeline(ctx, webhookRun{Repo: repo, Ref: ref, SHA: sha, Actor: actor, Source: compiler.SourceMergeQueue,
+		CommitMessage: "Merge queue test"})
+	if err != nil {
+		return 0, err
+	}
+	slog.Info("merge queue: test pipeline started", "repo", repo, "ref", ref, "pipeline", p.ID)
+	return p.ID, nil
+}
+
+// runPipeline compiles and creates the pipeline for run; on failure the
+// status says how to answer an HTTP caller.
+func (s *Server) runPipeline(ctx context.Context, run webhookRun) (*proto.Pipeline, int, error) {
+	repo, ref, sha, author, source := run.Repo, run.Ref, run.SHA, run.Actor, run.Source
+	extraCtx, pr := run.ExtraCtx, run.PR
 	// config-from-repo: resolve the config for this event per the repo's
 	// config_source toggle — an in-repo .forge-ci.yml fetched at the event sha
 	// (preferred by default), else the registered config. configVersion is nil
 	// for an in-repo config (it is not a registry version); cfgSource is stamped
 	// on the pipeline for audit. config_yaml stores exactly what compiled.
-	config, configVersion, cfgSource, err := s.store.ResolvePipelineConfig(r.Context(), repo, sha)
+	config, configVersion, cfgSource, err := s.store.ResolvePipelineConfig(ctx, repo, sha)
 	if errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound,
-			"no pipeline config for "+repo+" — add .forge-ci.yml to the repo or PUT /api/v1/repo-configs first")
-		return false
+		return nil, http.StatusNotFound,
+			errors.New("no pipeline config for " + repo + " — add .forge-ci.yml to the repo or PUT /api/v1/repo-configs first")
 	}
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "failed to load repo config")
-		return false
+		return nil, http.StatusInternalServerError, errors.New("failed to load repo config")
 	}
 	if source == compiler.SourceMergeRequest && extraCtx != nil {
 		// The same MR variables on every host. Hosts without a separate global
@@ -411,18 +440,16 @@ func (s *Server) triggerFromWebhook(w http.ResponseWriter, r *http.Request, run 
 			mrBase = extraCtx["CI_MERGE_REQUEST_TARGET_BRANCH"] // diff from the merge base with the target
 		}
 	}
-	changes := s.store.PipelineChangeSet(r.Context(), repo, ref, sha, source, mrBase)
-	copts := s.store.CompileOpts(r.Context(), repo)
+	changes := s.store.PipelineChangeSet(ctx, repo, ref, sha, source, mrBase)
+	copts := s.store.CompileOpts(ctx, repo)
 	copts.Changes, copts.Extra = changes, extraCtx
 	jobs, err := compiler.CompileWith(config, ref, source, copts)
 	if err != nil {
-		writeErr(w, http.StatusUnprocessableEntity, "pipeline config error: "+err.Error())
-		return false
+		return nil, http.StatusUnprocessableEntity, errors.New("pipeline config error: " + err.Error())
 	}
 	opts, err := compiler.Options(config)
 	if err != nil {
-		writeErr(w, http.StatusUnprocessableEntity, "pipeline config error: "+err.Error())
-		return false
+		return nil, http.StatusUnprocessableEntity, errors.New("pipeline config error: " + err.Error())
 	}
 	create := proto.CreatePipelineRequest{
 		Repo: repo, Ref: ref, SHA: sha, Config: config,
@@ -432,16 +459,14 @@ func (s *Server) triggerFromWebhook(w http.ResponseWriter, r *http.Request, run 
 	if pr != nil {
 		create.MRIID, create.MRBaseSHA = pr.IID, pr.BaseSHA
 	}
-	p, err := s.store.CreatePipeline(r.Context(), create,
+	p, err := s.store.CreatePipeline(ctx, create,
 		jobs, configVersion, opts.AutoCancel, opts.FailFast)
 	if err != nil {
 		slog.Error("webhook pipeline create", "err", err)
-		writeErr(w, http.StatusInternalServerError, "failed to create pipeline")
-		return false
+		return nil, http.StatusInternalServerError, errors.New("failed to create pipeline")
 	}
-	slog.Info("pipeline triggered via webhook", "repo", repo, "ref", ref, "pipeline", p.ID, "config_source", cfgSource)
-	writeJSON(w, http.StatusCreated, map[string]any{"pipeline": p})
-	return true
+	s.nudgeNativeChanges(ctx, repo, ref)
+	return p, http.StatusCreated, nil
 }
 
 // dedupDelivery records this webhook delivery and reports whether processing

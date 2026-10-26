@@ -5,6 +5,7 @@ import StatusBadge from "../components/StatusBadge";
 import ChangeStateBadge from "../components/ChangeStateBadge";
 import GateBadge from "../components/GateBadge";
 import Avatar from "../components/Avatar";
+import NewChange from "../components/NewChange";
 import { useChangeStream } from "../hooks/useChangeStream";
 
 /**
@@ -21,6 +22,7 @@ export default function Changes() {
   const [changes, setChanges] = useState<Change[] | null>(null);
   const [total, setTotal] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
 
   const load = useCallback(() => {
     listChanges({ state, repo, q: params.get("q") ?? "" })
@@ -46,7 +48,13 @@ export default function Changes() {
     <div>
       <div className="page-head">
         <h1>Changes</h1>
+        <div className="page-head-actions">
+          <button className="btn btn-primary" onClick={() => setCreating(true)} disabled={creating}>
+            New change
+          </button>
+        </div>
       </div>
+      {creating && <NewChange onClose={() => setCreating(false)} />}
       <p className="page-lede">
         Pull and merge requests from every connected repo, whichever host it lives on. This list is kept
         current by webhooks — opening it never calls the host.

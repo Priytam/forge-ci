@@ -112,12 +112,22 @@ func (s *Server) prepareTask(ctx context.Context, t *store.TaskRow) (*proto.Runn
 		}
 		return nil, false
 	}
-	if t.Kind != proto.TaskKindDiff {
+	task := &proto.RunnerTask{ID: t.ID, Kind: t.Kind, Repo: t.Repo}
+	switch t.Kind {
+	case proto.TaskKindDiff:
+		_, d, err := store.DiffKeyFromTask(t)
+		if err != nil {
+			return fail(err.Error())
+		}
+		task.Diff = &d
+	case proto.TaskKindMerge:
+		m, err := store.MergeTaskFromRow(t)
+		if err != nil {
+			return fail(err.Error())
+		}
+		task.Merge = &m
+	default:
 		return fail("unknown task kind " + t.Kind)
-	}
-	_, d, err := store.DiffKeyFromTask(t)
-	if err != nil {
-		return fail(err.Error())
 	}
 	cloneURL, redact, ok, err := s.store.TaskCloneURL(ctx, t.Repo)
 	if err != nil {
@@ -127,7 +137,8 @@ func (s *Server) prepareTask(ctx context.Context, t *store.TaskRow) (*proto.Runn
 	if !ok {
 		return fail(t.Repo + " is not connected to a host git can fetch from")
 	}
-	return &proto.RunnerTask{ID: t.ID, Kind: t.Kind, Repo: t.Repo, CloneURL: cloneURL, RedactValues: redact, Diff: &d}, true
+	task.CloneURL, task.RedactValues = cloneURL, redact
+	return task, true
 }
 
 // completeTask records a task's outcome; a diff's bytes go to the blob store.
@@ -146,10 +157,19 @@ func (s *Server) completeTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	failure := req.Error
-	if failure == "" && req.Diff == nil {
-		failure = "the runner reported no diff"
+	if failure == "" && req.Diff == nil && req.Merge == nil {
+		failure = "the runner reported no result"
 	}
-	if failure == "" {
+	if failure == "" && req.Merge != nil {
+		// A merge's answer is kept on the task; whoever queued it reads it.
+		if err := s.store.SetRunnerTaskResult(r.Context(), id, req.RunnerID, req.Merge); errors.Is(err, store.ErrTaskGone) {
+			writeErr(w, http.StatusConflict, err.Error())
+			return
+		} else if err != nil {
+			writeErr(w, http.StatusInternalServerError, "failed to record the merge")
+			return
+		}
+	} else if failure == "" {
 		// Store before finishing, so a task is only done once its diff is.
 		t, err := s.store.ClaimedTask(r.Context(), id, req.RunnerID)
 		if errors.Is(err, store.ErrTaskGone) {
@@ -178,7 +198,7 @@ func (s *Server) completeTask(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "failed to record task")
 		return
 	}
-	if failure != "" && final {
+	if failure != "" && final && t.Kind == proto.TaskKindDiff {
 		if k, _, err := store.DiffKeyFromTask(t); err == nil {
 			_ = s.store.MarkDiffFailed(r.Context(), k, failure)
 		}

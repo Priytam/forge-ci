@@ -585,6 +585,11 @@ type SecretSpec struct {
 // TaskKindDiff computes a diff between two commits from the repo's mirror.
 const TaskKindDiff = "diff"
 
+// TaskKindMerge merges commits onto a branch in the repo's mirror and pushes
+// the result: merging a Forge-native change, or building a merge queue's
+// test commit.
+const TaskKindMerge = "merge"
+
 // TaskAcquireRequest asks for a task of one of Kinds.
 type TaskAcquireRequest struct {
 	RunnerID string   `json:"runner_id"`
@@ -595,12 +600,13 @@ type TaskAcquireRequest struct {
 // RunnerTask is a claimed task. CloneURL carries a fresh credential (minted at
 // claim time); RedactValues must never be logged or written to disk.
 type RunnerTask struct {
-	ID           int64     `json:"id"`
-	Kind         string    `json:"kind"`
-	Repo         string    `json:"repo"`
-	CloneURL     string    `json:"clone_url"`
-	RedactValues []string  `json:"redact_values,omitempty"`
-	Diff         *DiffTask `json:"diff,omitempty"`
+	ID           int64      `json:"id"`
+	Kind         string     `json:"kind"`
+	Repo         string     `json:"repo"`
+	CloneURL     string     `json:"clone_url"`
+	RedactValues []string   `json:"redact_values,omitempty"`
+	Diff         *DiffTask  `json:"diff,omitempty"`
+	Merge        *MergeTask `json:"merge,omitempty"`
 }
 
 // DiffTask: diff From..To. Mode "change" diffs from the merge base of From
@@ -635,11 +641,50 @@ type DiffResult struct {
 	Truncated bool       `json:"truncated,omitempty"` // later files' patches dropped: total over the cap
 	Fetched   bool       `json:"fetched"`             // the mirror had to fetch (a git call to the host)
 	ComputeMS int        `json:"compute_ms"`
+	// OwnersRead: the runner looked for a CODEOWNERS file at From (mode
+	// "change" only; older runners never set it). CodeOwnersPath is "" when
+	// there is none.
+	OwnersRead     bool   `json:"owners_read,omitempty"`
+	CodeOwnersPath string `json:"codeowners_path,omitempty"`
+	CodeOwners     string `json:"codeowners,omitempty"`
+}
+
+// MergeTask merges Heads, in order, onto Target's tip and pushes the result
+// to PushRef. ExpectedTarget (when set) and ExpectedSource (Source's tip)
+// must still hold, or nothing is pushed (Moved). Without Force the push
+// only lands if the remote ref still points where it was fetched (a lease),
+// so a concurrent push is never overwritten.
+type MergeTask struct {
+	Target         string   `json:"target"`
+	ExpectedTarget string   `json:"expected_target,omitempty"`
+	Source         string   `json:"source,omitempty"`
+	ExpectedSource string   `json:"expected_source,omitempty"`
+	Heads          []string `json:"heads"`
+	Method         string   `json:"method"` // merge | squash | fast_forward
+	Message        string   `json:"message"`
+	AuthorName     string   `json:"author_name"`
+	AuthorEmail    string   `json:"author_email"`
+	PushRef        string   `json:"push_ref"`
+	Force          bool     `json:"force,omitempty"`
+	// FetchRefs are fetched (best effort) when a head is missing, e.g. a
+	// pull request's head ref on a host that serves no commit by sha.
+	FetchRefs []string `json:"fetch_refs,omitempty"`
+}
+
+// MergeResult is a merge task's outcome. A conflict or a moved branch is an
+// answer, not an error: retrying would not change it.
+type MergeResult struct {
+	SHA       string   `json:"sha,omitempty"`
+	Base      string   `json:"base,omitempty"` // Target's tip the merge was made on
+	Conflicts []string `json:"conflicts,omitempty"`
+	Moved     string   `json:"moved,omitempty"` // why: which branch moved
+	NotFF     bool     `json:"not_fast_forward,omitempty"`
 }
 
 // TaskCompleteRequest reports a task's outcome: Error set means it failed.
 type TaskCompleteRequest struct {
-	RunnerID string      `json:"runner_id"`
-	Error    string      `json:"error,omitempty"`
-	Diff     *DiffResult `json:"diff,omitempty"`
+	RunnerID string       `json:"runner_id"`
+	Error    string       `json:"error,omitempty"`
+	Diff     *DiffResult  `json:"diff,omitempty"`
+	Merge    *MergeResult `json:"merge,omitempty"`
 }

@@ -1402,3 +1402,49 @@ CREATE TABLE IF NOT EXISTS user_host_tokens (
     PRIMARY KEY (email, provider)
 );
 ALTER TABLE host_identities ADD COLUMN IF NOT EXISTS verified BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- Code review (batch 7, phase F): code owners, the merge queue, merges done
+-- by runners.
+-- A rule can require code owners' approval (CODEOWNERS read from the target
+-- branch by the runner that computes the diff) and send merges through the
+-- queue.
+ALTER TABLE merge_policies ADD COLUMN IF NOT EXISTS require_code_owners BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE merge_policies ADD COLUMN IF NOT EXISTS merge_queue BOOLEAN NOT NULL DEFAULT FALSE;
+-- What a 'change' diff touched (renames count both paths; NULL for diffs
+-- stored before phase F) and the CODEOWNERS file at its target tip
+-- (owners_read false: computed by a runner too old to look).
+ALTER TABLE change_diffs ADD COLUMN IF NOT EXISTS paths TEXT[];
+ALTER TABLE change_diffs ADD COLUMN IF NOT EXISTS owners_read BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE change_diffs ADD COLUMN IF NOT EXISTS codeowners_path TEXT NOT NULL DEFAULT '';
+ALTER TABLE change_diffs ADD COLUMN IF NOT EXISTS codeowners TEXT NOT NULL DEFAULT '';
+-- A task's answer (a merge's commit, or why it did not merge).
+ALTER TABLE runner_tasks ADD COLUMN IF NOT EXISTS result JSONB;
+
+-- The merge queue: per repo and target branch, one change at a time is
+-- merged onto the target's tip by a runner, pushed to forge-queue/<target>,
+-- tested by a Forge pipeline, and merged only if that passes — so two
+-- changes that pass alone cannot break the target together.
+CREATE TABLE IF NOT EXISTS merge_queue (
+    id            BIGSERIAL   PRIMARY KEY,
+    change_id     BIGINT      NOT NULL REFERENCES changes(id) ON DELETE CASCADE,
+    repo          TEXT        NOT NULL,
+    target_branch TEXT        NOT NULL,
+    head_sha      TEXT        NOT NULL,
+    method        TEXT        NOT NULL,
+    state         TEXT        NOT NULL DEFAULT 'queued'
+        CHECK (state IN ('queued','testing','merging','merged','failed','removed')),
+    base_sha      TEXT        NOT NULL DEFAULT '',
+    test_sha      TEXT        NOT NULL DEFAULT '',
+    pipeline_id   BIGINT,
+    outbox_id     BIGINT,
+    error         TEXT        NOT NULL DEFAULT '',
+    requested_by  TEXT        NOT NULL DEFAULT '',
+    enqueued_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    started_at    TIMESTAMPTZ,
+    finished_at   TIMESTAMPTZ,
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS merge_queue_active_change_idx ON merge_queue (change_id)
+    WHERE state IN ('queued','testing','merging');
+CREATE INDEX IF NOT EXISTS merge_queue_active_idx ON merge_queue (repo, target_branch, id)
+    WHERE state IN ('queued','testing','merging');

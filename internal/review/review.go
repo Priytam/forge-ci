@@ -92,6 +92,9 @@ type Service struct {
 	client *vcs.ChangeClient
 	tick   time.Duration
 	batch  int
+	// startPipeline starts merge queue test pipelines (nil: the queue fails
+	// changes that reach testing).
+	startPipeline PipelineStarter
 }
 
 // New builds a service whose every provider call is counted in Postgres and
@@ -106,13 +109,14 @@ func New(st *store.Store) *Service {
 func (s *Service) Client() *vcs.ChangeClient { return s.client }
 
 // Loop runs the service until ctx ends (no-op when code review is off).
-func Loop(ctx context.Context, st *store.Store, blobs blob.Store) {
+func Loop(ctx context.Context, st *store.Store, blobs blob.Store, start PipelineStarter) {
 	if !Enabled() {
 		slog.Info("code review: disabled (CODE_REVIEW=off)")
 		return
 	}
 	s := New(st)
 	s.blobs = blobs
+	s.startPipeline = start
 	s.Run(ctx)
 }
 
@@ -133,6 +137,7 @@ func (s *Service) Run(ctx context.Context) {
 		case <-t.C:
 			s.RefreshDue(ctx)
 			s.EvaluateGates(ctx)
+			s.AdvanceQueues(ctx)
 			s.SendOutbox(ctx)
 			s.ReanchorThreads(ctx)
 		case <-first:

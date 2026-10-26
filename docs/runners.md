@@ -308,6 +308,11 @@ that it will not compute diffs and takes jobs as before. The clone credential
 is minted per task, set on the mirror's remote only while the task runs and
 redacted from every error. Paused and draining runners take no tasks.
 
+Merges — Forge-native changes on plain git servers, and the merge queue's
+test merges — are runner tasks too: the runner merges in the same mirror with
+`git merge-tree` and pushes with a lease. They need **git 2.38+**; an older
+runner keeps computing diffs and logs that it will not merge.
+
 ### Persistent per-runner BuildKit cache — not built yet
 
 A long-lived BuildKit daemon per runner (shared across jobs) would make

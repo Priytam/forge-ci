@@ -151,10 +151,17 @@ type DiffReady struct {
 	Bytes      int64
 	Fetched    bool
 	ComputeMS  int
+	// Paths the diff touched ("change" diffs; renames list both paths) and
+	// the CODEOWNERS file at its target tip, for the code owners rule.
+	Paths          []string
+	OwnersRead     bool
+	CodeOwnersPath string
+	CodeOwners     string
 }
 
 // MarkDiffReady records a computed diff (its bytes already in the blob
-// store) and wakes the pages showing it.
+// store), wakes the pages showing it, and marks for re-evaluation the gates
+// of changes whose code owners it answers.
 func (s *Store) MarkDiffReady(ctx context.Context, k DiffKey, r DiffReady) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -163,11 +170,19 @@ func (s *Store) MarkDiffReady(ctx context.Context, k DiffKey, r DiffReady) error
 	defer tx.Rollback(ctx)
 	if _, err := tx.Exec(ctx,
 		`UPDATE change_diffs SET state = 'ready', merge_base = $5, blob_prefix = $6, chunks = $7, files = $8,
-		     additions = $9, deletions = $10, bytes = $11, fetched = $12, compute_ms = $13, error = '', ready_at = now()
+		     additions = $9, deletions = $10, bytes = $11, fetched = $12, compute_ms = $13, error = '', ready_at = now(),
+		     paths = $14, owners_read = $15, codeowners_path = $16, codeowners = $17
 		 WHERE repo = $1 AND from_sha = $2 AND to_sha = $3 AND mode = $4`,
 		k.Repo, k.From, k.To, k.Mode, r.MergeBase, r.BlobPrefix, r.Chunks, r.Files, r.Additions, r.Deletions,
-		r.Bytes, r.Fetched, r.ComputeMS); err != nil {
+		r.Bytes, r.Fetched, r.ComputeMS, r.Paths, r.OwnersRead, r.CodeOwnersPath, r.CodeOwners); err != nil {
 		return err
+	}
+	if k.Mode == "change" {
+		if _, err := tx.Exec(ctx,
+			`UPDATE changes SET gate_dirty_at = now()
+			 WHERE repo = $1 AND base_sha = $2 AND head_sha = $3 AND state = 'open'`, k.Repo, k.From, k.To); err != nil {
+			return err
+		}
 	}
 	if err := notifyDiffTx(ctx, tx, k); err != nil {
 		return err
@@ -463,4 +478,121 @@ func (s *Store) ClaimedTask(ctx context.Context, id int64, runnerID string) (*Ta
 		return nil, ErrTaskGone
 	}
 	return &t, err
+}
+
+// CodeOwnersInput is what the code owners rule knows about a change's diff.
+type CodeOwnersInput struct {
+	State      string   // pending | ready | failed
+	Error      string   // why the diff failed
+	PathsKnown bool     // false: stored before phase F
+	OwnersRead bool     // false: computed by a runner too old to read CODEOWNERS
+	Paths      []string // touched paths
+	File       string   // CODEOWNERS path on the target ("" = none)
+	Content    string
+}
+
+// ChangeCodeOwners returns what the change diff (base → head) says about
+// code owners, asking for the diff when there is none yet, or when it was
+// stored before paths were recorded. refs are the refs a runner fetches.
+func (s *Store) ChangeCodeOwners(ctx context.Context, repo, base, head string, refs []string) (*CodeOwnersInput, error) {
+	k := DiffKey{Repo: repo, From: base, To: head, Mode: "change"}
+	in := &CodeOwnersInput{}
+	var paths []string
+	err := s.pool.QueryRow(ctx,
+		`SELECT state, error, paths, owners_read, codeowners_path, codeowners FROM change_diffs
+		 WHERE repo = $1 AND from_sha = $2 AND to_sha = $3 AND mode = 'change'`, repo, base, head).
+		Scan(&in.State, &in.Error, &paths, &in.OwnersRead, &in.File, &in.Content)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		if _, err := s.RequestDiff(ctx, k, refs, false); err != nil {
+			return nil, err
+		}
+		return &CodeOwnersInput{State: "pending"}, nil
+	case err != nil:
+		return nil, err
+	}
+	in.PathsKnown, in.Paths = paths != nil, paths
+	if in.State == "ready" && paths == nil {
+		// Stored before phase F: compute it again, once, to learn its paths.
+		tx, err := s.pool.Begin(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer tx.Rollback(ctx)
+		if _, err := tx.Exec(ctx,
+			`UPDATE change_diffs SET state = 'failed', error = 'recomputing for code owners'
+			 WHERE repo = $1 AND from_sha = $2 AND to_sha = $3 AND mode = 'change' AND paths IS NULL`, repo, base, head); err != nil {
+			return nil, err
+		}
+		if err := requestDiffTx(ctx, tx, k, refs, true); err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, err
+		}
+		return &CodeOwnersInput{State: "pending"}, nil
+	}
+	return in, nil
+}
+
+// ---- task results ----
+
+// SetRunnerTaskResult stores a running task's answer (before it is
+// finished, so a finished task always has its result).
+func (s *Store) SetRunnerTaskResult(ctx context.Context, id int64, runnerID string, result any) error {
+	b, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE runner_tasks SET result = $3 WHERE id = $1 AND state = 'running' AND runner_id = $2`, id, runnerID, b)
+	if err == nil && tag.RowsAffected() == 0 {
+		return ErrTaskGone
+	}
+	return err
+}
+
+// TaskStatus is a task as its requester sees it.
+type TaskStatus struct {
+	ID       int64
+	State    string // pending | running | done | failed
+	Error    string
+	Result   json.RawMessage
+	QueuedAt time.Time
+	Started  bool
+}
+
+// EnqueueRunnerTask queues a task once per dedupe key (a repeat is a no-op)
+// on the repo's mirror, and returns its status.
+func (s *Store) EnqueueRunnerTask(ctx context.Context, kind, repo, dedupe string, payload any) (*TaskStatus, error) {
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := s.pool.Exec(ctx,
+		`INSERT INTO runner_tasks (kind, repo, affinity_key, dedupe_key, payload) VALUES ($1,$2,$3,$4,$5)
+		 ON CONFLICT (dedupe_key) DO NOTHING`, kind, repo, mirrorAffinity(repo), dedupe, b); err != nil {
+		return nil, err
+	}
+	return s.RunnerTaskStatus(ctx, dedupe)
+}
+
+// RunnerTaskStatus returns the task with dedupe key (ErrNotFound if none).
+func (s *Store) RunnerTaskStatus(ctx context.Context, dedupe string) (*TaskStatus, error) {
+	var t TaskStatus
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, state, error, COALESCE(result, 'null'::jsonb), queued_at, started_at IS NOT NULL
+		 FROM runner_tasks WHERE dedupe_key = $1`, dedupe).
+		Scan(&t.ID, &t.State, &t.Error, &t.Result, &t.QueuedAt, &t.Started)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return &t, err
+}
+
+// MergeTaskFromRow decodes a claimed merge task's payload.
+func MergeTaskFromRow(t *TaskRow) (proto.MergeTask, error) {
+	var m proto.MergeTask
+	err := json.Unmarshal(t.Payload, &m)
+	return m, err
 }

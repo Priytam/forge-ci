@@ -14,10 +14,10 @@ import (
 // The plain-git change source. A git server has no pull requests, so changes
 // are Forge-native: Forge stores them (source and target branch) and this
 // source only re-reads the two branch tips with one `git ls-remote` — the
-// cheapest call git has, and no API.
+// cheapest call git has, and no API. A runner merges them (no API either).
 
 func (gitProvider) Capabilities() Capabilities {
-	return Capabilities{NativeChanges: true, MergeMethods: []string{}}
+	return Capabilities{NativeChanges: true, MergeMethods: []string{"merge", "squash", "fast_forward"}}
 }
 
 // NormalizeEvent: a plain git server sends no change webhooks.
@@ -51,7 +51,7 @@ func (gitProvider) GetChange(ctx context.Context, c *ChangeClient, repo RepoRef,
 	switch {
 	case !ok && ch.State == "open":
 		ch.State = "closed"
-	case ok:
+	case ok && ch.State == "open":
 		ch.HeadSHA = head
 	}
 	if base != "" {

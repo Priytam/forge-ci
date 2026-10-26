@@ -36,20 +36,21 @@ the provider APIs it uses, cost next to nothing **by construction**:
 Turn it all off with `CODE_REVIEW=off` on `forge-server`. Pages then show
 what is already stored and nothing is fetched.
 
-## What ships today (phases A–E)
+## What ships today (phases A–F)
 
 | | |
 |---|---|
-| **Changes** inbox (sidebar → Changes) | open / merged / closed / all, filter by repo, search by title or `#number`; CI status of the head commit, the **merge gate** (ready / waiting / blocked), approvals and "changes requested" per change; live updates |
+| **Changes** inbox (sidebar → Changes) | open / merged / closed / all, filter by repo, search by title or `#number`; CI status of the head commit, the **merge gate** (ready / waiting / blocked), approvals and "changes requested" per change; live updates; **New change** opens one on a plain git repo |
 | **Files changed** (change page) | every file's diff, unified or side by side; the whole change against its target, or **changes since revision N**; "changes since you last looked"; lock files, vendored and other generated files, binaries and very large diffs collapsed until opened |
 | **Comments** | comment on any line of the diff (with **suggested changes**), reply, resolve and reopen; the change's conversation; threads that left the diff listed as outdated — **synced both ways** with GitHub, GitLab, Bitbucket, Gitea and CodeCommit (where a host lacks a feature, Forge keeps it; see [the host table](#what-each-host-supports)) |
 | **Linked accounts** (user menu → Linked accounts) | link your GitHub account and your comments, reviews and merges are made as you |
-| Change page | the merge gate rule by rule, **Approve / Request changes / Withdraw**, **Merge** (merge / squash / rebase as the host allows), state, branches, description, labels, the Forge pipeline on the head commit, every review, every **revision** (each push is one, on every host) |
-| **Merge rules** (Admin → Merge rules) | rules per repo and target branch, and which host login is which Forge user |
-| Hosts | **GitHub** (App or token), **GitLab**, **Bitbucket Cloud**, **Gitea / Forgejo**, **AWS CodeCommit**, and **plain git** (Forge-native changes; creating and merging them in the UI comes in phase F) |
+| Change page | the merge gate rule by rule, **Approve / Request changes / Withdraw**, **Merge** (merge / squash / rebase / fast-forward as the host allows) or **Add to merge queue**, state, branches, description, labels, the Forge pipeline on the head commit, every review, every **revision** (each push is one, on every host); **Edit / Close / Reopen** for Forge-native changes |
+| **Merge rules** (Admin → Merge rules) | rules per repo and target branch — including **code owners** and the **merge queue** — and which host login is which Forge user |
+| Hosts | **GitHub** (App or token), **GitLab**, **Bitbucket Cloud**, **Gitea / Forgejo**, **AWS CodeCommit**, and **plain git** (Forge-native changes, merged by a runner) — the same page on every one |
 | About page | provider calls, 304 share, calls per open change, read-path calls, refresh and write backlogs, gates and what blocks them, every budget |
 
-Coming next: Forge-native changes, code owners and a merge queue (F).
+Not yet: testing several queued changes at once (the queue tests one at a
+time), browsing a repo's files in Forge.
 
 ## Diffs
 
@@ -154,6 +155,8 @@ you write a rule for it.
 | Linked ticket | the regular expression matches the title, description or branch | **blocked** |
 | Merge window | now is outside every weekly freeze window (`fri 18:00 - mon 09:00`, in the rule's timezone) | waiting until the window ends |
 | Draft | the change is not a draft | waiting |
+| Code owners | someone who owns each touched file approved ([below](#code-owners)) | waiting |
+| Merge queue | the queue tested the change on top of the latest target ([below](#the-merge-queue)) | waiting |
 
 Who counts:
 
@@ -189,6 +192,58 @@ GitHub App permissions for phase B: **Commit statuses: Read & write** (the
 gate), **Pull requests: Read & write** and **Contents: Read & write** (merging
 from Forge). Without the write permissions the gate still works; Merge from
 Forge then fails with GitHub's reason on the change page.
+
+### Code owners
+
+With **Code owners must approve** on, every touched file that has an owner
+needs an approval from one of its owners. Forge reads the `CODEOWNERS` file
+**from the target branch** (`.github/CODEOWNERS`, `CODEOWNERS`,
+`docs/CODEOWNERS`, `.gitlab/CODEOWNERS` or `.bitbucket/CODEOWNERS`, first
+found), so a change cannot name its own owners. It works on every host, also
+those with no code owners of their own, and costs no API call: the runner
+that computes the change's diff reads the file from its mirror, and the diff
+says which files the change touched (a rename counts both paths).
+
+- Syntax as on GitHub: `pattern owner…`, the last matching line wins, a line
+  with no owners makes files unowned. `/build/` is anchored at the root,
+  `*.go` matches at any depth, `docs/*` covers `docs/a.md` but not
+  `docs/deep/a.md`, `apps/**/api` crosses directories. GitLab section headers
+  are skipped.
+- Owners are matched to Forge people: an **email** is that user; **`@login`**
+  is the host login (linked or mapped in Admin → Merge rules → Host logins),
+  or a Forge approver group of that name; **`@org/team`** is the Forge
+  approver group `org/team` or `team`. An owner that matches nobody is named
+  on the gate ("no Forge user for @x"), and the files stay waiting.
+- Only approvals that count for the Approvals rule count here (not your own,
+  not on an earlier revision).
+- Runners need this release to read CODEOWNERS; until one has computed the
+  change's diff, the rule says "Working out which files the change touches".
+
+### The merge queue
+
+Two changes can each pass CI and still break the target together. With
+**Merge through the merge queue** on, Merge becomes **Add to merge queue**
+(the change must meet every other rule first), and per repo and target
+branch Forge takes the queue one change at a time:
+
+1. A runner merges the change onto the target's current tip in its mirror and
+   force-pushes the result to **`forge-queue/<target>`** (never the target).
+2. Forge starts a pipeline on that commit, as a push would, with
+   `CI_PIPELINE_SOURCE=merge_queue`. Pushes to `forge-queue/*` never start
+   pipelines from webhooks, so the test runs once.
+3. When it passes, the gate's **Merge queue** rule passes, the gate reaches
+   the host, and Forge merges the change. On a plain git server the runner
+   refuses if the target moved since the test.
+4. A failed test, a conflict, new commits on the change or a closed change
+   take it out of the queue with the reason on the change page; the next
+   change starts.
+
+While a change waits, the gate says where it is ("In the merge queue,
+position 2", "Testing on top of main"), and the host's own Merge button stays
+blocked, so nobody can skip the queue. **Remove from queue** takes it out.
+On hosts with a merge API, a push straight to the target while a change is
+being merged is not detected (the host merges onto the new tip); block
+direct pushes in branch protection.
 
 ### Approve and merge from Forge
 
@@ -230,10 +285,26 @@ pipeline config — code review does not depend on CI.
 ### Plain git (any git server)
 
 A git server has no pull requests, so changes on it are **Forge-native**:
-Forge stores them and re-reads the two branch tips with a single
-`git ls-remote` (no API). Creating them from the UI arrives with phase F;
-the plumbing — model, refresh, revisions — is already in place and covered by
-the same conformance suite as GitHub.
+**Changes → New change** (repo, from branch, into branch, title,
+description) opens one in Forge, numbered `#1, #2, …` per repo. Forge
+re-reads the two branch tips with a single `git ls-remote` (no API), every
+15 minutes and whenever a pipeline starts on one of the branches (a push
+hook that calls Forge's API keeps them current at once). Comments and reviews
+live in Forge; the change page has **Edit**, **Close** and **Reopen**.
+
+**Merge** (merge commit, squash or fast-forward) is done by a runner: it
+merges exactly the approved head in its mirror and pushes the target with a
+lease, so it refuses — with the reason on the page — when the change has new
+commits, the target moved (merge queue), the target cannot be fast-forwarded
+or the branches conflict (the files are named). It needs:
+
+- a runner with **git 2.38+** and runner tasks on (`RUNNER_TASKS` unset);
+- a repo token that may **push** to the target branch.
+
+**Enforce it**: with no pull requests the server cannot know Forge's rules,
+so make Forge the only path to the protected branch — the server's
+protected-branch setting (or a `pre-receive` hook) allowing pushes to it only
+from the token Forge uses.
 
 ### What each host supports
 
@@ -434,6 +505,8 @@ responses carry an `ETag` and answer `304` to `If-None-Match`.
   `unsupported`), queueing it when it was never computed.
 - `GET /api/v1/diff-blobs/<repo key>/<mode>/<from>..<to>/manifest.json` and
   `.../f/<n>.patch` — the immutable manifest and chunks.
+- `GET /api/v1/merge-queue[?repo=&target=]` — live merge queue entries in
+  order (`position`, `state`: queued / testing / merging, `pipeline_id`).
 
 Runner protocol (runner token): `POST /api/v1/runner/tasks/acquire`
 (long-poll, `{runner_id, kinds}`) and `POST /api/v1/runner/tasks/{id}/complete`.
@@ -441,7 +514,8 @@ Runner protocol (runner token): `POST /api/v1/runner/tasks/acquire`
 The change page's `GET /api/v1/changes/{id}` also returns `gate` (state,
 summary, `rules[]`, what the host shows), `actions` (queued and finished
 writes), `threads` (every thread with its comments and their delivery
-state) and `permissions` (`can_review`, `can_merge`, `can_comment`).
+state), `queue` (`enabled`, the change's `entry`, `length`) and
+`permissions` (`can_review`, `can_merge`, `can_comment`, `can_edit`).
 
 Writes (session or API token; CSRF rules as everywhere; a repo role, as for
 retrying pipelines, when the repo has members):
@@ -455,7 +529,15 @@ retrying pipelines, when the repo has members):
 
 - `POST /api/v1/changes/{id}/reviews` `{verdict: approve|request_changes|dismiss, body}`
 - `POST /api/v1/changes/{id}/merge` `{expected_head, method}` → `202 {action}`
-  (`409` when the head moved, the gate does not pass, or the change is a draft)
+  (`409` when the head moved, the gate does not pass, the change is a draft,
+  or the target merges through the queue)
+- `POST /api/v1/changes` `{repo, source_branch, target_branch, title, body, draft}`
+  → `201 {id, number}` — a Forge-native change (hosts without pull requests;
+  `409` for others, or when an open change already proposes the branches).
+- `PATCH /api/v1/changes/{id}` `{title?, body?, draft?, state?: open|closed}` —
+  edit, close or reopen a Forge-native change.
+- `POST /api/v1/changes/{id}/queue` `{expected_head, method}` → `202 {entry}`;
+  `DELETE /api/v1/changes/{id}/queue` takes it out.
 - `PUT /api/v1/merge-policies` (admin) — create or replace the rule for
   `(repo, branch_pattern)`; omitted booleans default to CI required,
   re-approve after push, changes requested block. `DELETE /api/v1/merge-policies/{id}`.

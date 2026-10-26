@@ -131,3 +131,21 @@ func (s *Store) groupMembers(ctx context.Context, q interface {
 	}
 	return out, nil
 }
+
+// ApproverGroupMembers returns every group's members by group name (emails
+// lowercased), for the code owners rule.
+func (s *Store) ApproverGroupMembers(ctx context.Context) (map[string]map[string]bool, error) {
+	gs, err := s.ListApproverGroups(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]map[string]bool, len(gs))
+	for _, g := range gs {
+		m := make(map[string]bool, len(g.Members))
+		for _, e := range g.Members {
+			m[strings.ToLower(e)] = true
+		}
+		out[strings.ToLower(g.Name)] = m
+	}
+	return out, nil
+}

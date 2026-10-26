@@ -235,7 +235,9 @@ func RunChangeSource(t *testing.T, h Harness) {
 		}
 	})
 
-	if caps.StatusChecks || len(caps.MergeMethods) > 0 {
+	// Native changes are merged by a runner in its mirror, not through a
+	// host API (internal/mirror and internal/review test that path).
+	if !caps.NativeChanges && (caps.StatusChecks || len(caps.MergeMethods) > 0) {
 		runWriter(t, h, caps)
 	}
 	if caps.Threads {

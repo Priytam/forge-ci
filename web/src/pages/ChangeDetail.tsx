@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { getChange, relativeTime, shortSha, type ChangePage } from "../api";
+import { editChange, getChange, relativeTime, shortSha, type ChangePage } from "../api";
 import StatusBadge from "../components/StatusBadge";
 import ChangeStateBadge from "../components/ChangeStateBadge";
 import Avatar from "../components/Avatar";
@@ -25,6 +25,9 @@ export default function ChangeDetail() {
   const { id } = useParams();
   const [page, setPage] = useState<ChangePage | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [editing, setEditing] = useState<{ title: string; body: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
 
   const load = useCallback(() => {
     if (!id) return;
@@ -40,7 +43,22 @@ export default function ChangeDetail() {
 
   if (error) return <div className="error-banner">{error}</div>;
   if (!page) return <div className="muted">Loading…</div>;
-  const { change, capabilities: caps } = page;
+  const { change, capabilities: caps, permissions } = page;
+  // Forge-native changes are edited, closed and reopened here (they have no
+  // host page).
+  const save = async (patch: Parameters<typeof editChange>[1]) => {
+    setBusy(true);
+    setEditError(null);
+    try {
+      await editChange(change.id, patch);
+      setEditing(null);
+      load();
+    } catch (e) {
+      setEditError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <div>
@@ -49,6 +67,21 @@ export default function ChangeDetail() {
           {change.title || "(untitled)"} <span className="mono muted">#{change.number}</span>
         </h1>
         <div className="page-head-actions">
+          {permissions.can_edit && change.state !== "merged" && !editing && (
+            <button className="btn" onClick={() => setEditing({ title: change.title, body: change.body })}>
+              Edit
+            </button>
+          )}
+          {permissions.can_edit && change.state === "open" && (
+            <button className="btn" disabled={busy} onClick={() => void save({ state: "closed" })}>
+              Close
+            </button>
+          )}
+          {permissions.can_edit && change.state === "closed" && (
+            <button className="btn" disabled={busy} onClick={() => void save({ state: "open" })}>
+              Reopen
+            </button>
+          )}
           {change.url && (
             <a className="btn" href={change.url} target="_blank" rel="noreferrer">
               Open on host
@@ -63,6 +96,31 @@ export default function ChangeDetail() {
         {caps.native_changes && <span className="muted"> · a Forge-native change (the host has no pull requests)</span>}
         {change.updated_at && <span className="muted"> · updated {relativeTime(change.updated_at)}</span>}
       </p>
+      {editing && (
+        <div className="card settings-form">
+          <label className="field">
+            <span>Title</span>
+            <input value={editing.title} onChange={(e) => setEditing({ ...editing, title: e.target.value })} />
+          </label>
+          <label className="field">
+            <span>Description</span>
+            <textarea rows={6} value={editing.body} onChange={(e) => setEditing({ ...editing, body: e.target.value })} />
+          </label>
+          <div className="form-actions">
+            <button
+              className="btn btn-primary"
+              disabled={busy || !editing.title.trim()}
+              onClick={() => void save({ title: editing.title, body: editing.body })}
+            >
+              Save
+            </button>
+            <button className="btn" disabled={busy} onClick={() => setEditing(null)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+      {editError && <div className="error-banner">{editError}</div>}
       {change.refresh_error && (
         <div className="error-banner">Last sync with the host failed: {change.refresh_error}. Showing the last good copy.</div>
       )}

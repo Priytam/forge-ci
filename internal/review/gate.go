@@ -69,6 +69,7 @@ func Evaluate(in *store.GateInputs, p *store.MergePolicy, el Eligibility, now ti
 
 	var approved, fromGroup int
 	var wanted, notes []string
+	var approvers []approver
 	for _, k := range keys {
 		rv := latest[k]
 		r := rv.review
@@ -92,6 +93,11 @@ func Evaluate(in *store.GateInputs, p *store.MergePolicy, el Eligibility, now ti
 				if rv.email != "" && el.Group[rv.email] {
 					fromGroup++
 				}
+				a := approver{email: rv.email}
+				if r.Source != "forge" {
+					a.login = strings.ToLower(r.Reviewer)
+				}
+				approvers = append(approvers, a)
 			}
 		}
 	}
@@ -121,6 +127,11 @@ func Evaluate(in *store.GateInputs, p *store.MergePolicy, el Eligibility, now ti
 		}
 		add("group", "Approval from "+p.RequiredGroup, state,
 			fmt.Sprintf("%d of %d from %s", fromGroup, p.RequiredGroupApprovals, p.RequiredGroup))
+	}
+	if p.RequireCodeOwners {
+		state, detail := codeOwnersRule(in.CodeOwners, c.TargetBranch,
+			ownerResolver{identities: in.Identities, groups: in.OwnerGroups}, approvers)
+		add("code_owners", "Code owners", state, detail)
 	}
 	if p.BlockOnChangesRequested {
 		if len(wanted) > 0 {
@@ -154,6 +165,11 @@ func Evaluate(in *store.GateInputs, p *store.MergePolicy, el Eligibility, now ti
 		} else {
 			add("freeze", "Merge window", "pass", "Outside the freeze windows")
 		}
+	}
+
+	if p.MergeQueue {
+		state, detail := queueRule(in.Queue, c.TargetBranch)
+		add("merge_queue", "Merge queue", state, detail)
 	}
 
 	v := Verdict{State: "pass", Rules: rules, RecheckAt: recheck}

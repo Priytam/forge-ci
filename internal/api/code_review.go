@@ -38,6 +38,7 @@ func (s *Server) changeReadRoutes() map[string]http.HandlerFunc {
 		"GET /api/v1/host-identities":                            s.listHostIdentities,
 		"GET /api/v1/changes/{id}/diff":                          s.getChangeDiff,
 		"GET /api/v1/diff-blobs/{repo}/{mode}/{range}/{rest...}": s.getDiffBlob,
+		"GET /api/v1/merge-queue":                                s.listMergeQueue,
 	}
 }
 
@@ -47,6 +48,7 @@ func (s *Server) registerCodeReviewRoutes() {
 	}
 	s.registerCodeReviewWriteRoutes()
 	s.registerThreadRoutes()
+	s.registerNativeChangeRoutes()
 }
 
 // readPath serves h with a read-path context.
@@ -147,10 +149,13 @@ func (s *Server) getChange(w http.ResponseWriter, r *http.Request) {
 	// What the caller may do here — a hint for the UI; every write re-checks.
 	c := &store.ReviewTargetChange{ID: d.ID, Repo: d.Repo, Provider: d.Provider, Author: d.Author, TargetBranch: d.TargetBranch}
 	canReview := false
+	policy, err := s.changePolicy(ctx, c)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to load merge rules")
+		return
+	}
 	if who := s.reviewerFor(r, ""); who != "" {
-		if p, err := s.changePolicy(ctx, c); err == nil {
-			canReview, _, _ = s.mayReview(ctx, c, p, who)
-		}
+		canReview, _, _ = s.mayReview(ctx, c, policy, who)
 	} else {
 		canReview = !s.ssoEnforced(ctx) // open bootstrap mode names the reviewer
 	}
@@ -159,10 +164,17 @@ func (s *Server) getChange(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "failed to load comments")
 		return
 	}
+	queue, err := s.changeQueue(ctx, d, policy)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to load the merge queue")
+		return
+	}
 	canWrite := s.canOperate(r, d.Repo)
+	caps := vcs.CapabilitiesOf(d.Provider)
 	writeJSONCached(w, r, map[string]any{
-		"change": d, "capabilities": vcs.CapabilitiesOf(d.Provider), "gate": gate, "actions": actions, "threads": threads,
-		"permissions": map[string]bool{"can_review": canReview, "can_merge": canWrite, "can_comment": canWrite},
+		"change": d, "capabilities": caps, "gate": gate, "actions": actions, "threads": threads, "queue": queue,
+		"permissions": map[string]bool{"can_review": canReview, "can_merge": canWrite, "can_comment": canWrite,
+			"can_edit": canWrite && caps.NativeChanges},
 	})
 }
 

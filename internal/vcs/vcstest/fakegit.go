@@ -31,6 +31,9 @@ func NewFakeGit(t *testing.T) *FakeGit {
 	dir := t.TempDir()
 	g := &FakeGit{bare: filepath.Join(dir, "origin.git"), work: filepath.Join(dir, "work"), next: 1}
 	g.git(t, dir, "init", "-q", "--bare", "-b", "main", g.bare)
+	// Serve partial clones, as hosted git servers do (runner mirrors).
+	g.git(t, g.bare, "config", "uploadpack.allowFilter", "true")
+	g.git(t, g.bare, "config", "uploadpack.allowAnySHA1InWant", "true")
 	g.git(t, dir, "clone", "-q", g.bare, g.work)
 	g.commit(t, "main", "README.md")
 	return g
@@ -52,6 +55,14 @@ func (g *FakeGit) git(t *testing.T, dir string, args ...string) string {
 // commit adds a commit on branch (creating it from main) and pushes it.
 func (g *FakeGit) commit(t *testing.T, branch, file string) string {
 	t.Helper()
+	return g.CommitFile(t, branch, file, time.Now().String())
+}
+
+// CommitFile commits file with content on branch (creating the branch from
+// main) and pushes it; it returns the new tip.
+func (g *FakeGit) CommitFile(t *testing.T, branch, file, content string) string {
+	t.Helper()
+	g.git(t, g.work, "fetch", "-q", "origin")
 	if branch != "main" {
 		if _, err := os.Stat(filepath.Join(g.work, ".git", "refs", "heads", branch)); err != nil {
 			g.git(t, g.work, "checkout", "-q", "-B", branch, "origin/main")
@@ -59,15 +70,32 @@ func (g *FakeGit) commit(t *testing.T, branch, file string) string {
 			g.git(t, g.work, "checkout", "-q", branch)
 		}
 	}
+	if branch == "main" && g.Tip(t, "main") != "" {
+		g.git(t, g.work, "checkout", "-q", "-B", "main", "origin/main")
+	}
 	path := filepath.Join(g.work, file)
 	_ = os.MkdirAll(filepath.Dir(path), 0o755)
-	if err := os.WriteFile(path, []byte(time.Now().String()), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	g.git(t, g.work, "add", "-A")
 	g.git(t, g.work, "commit", "-q", "-m", "change "+file)
 	g.git(t, g.work, "push", "-q", "origin", branch)
 	return g.git(t, g.work, "rev-parse", "HEAD")
+}
+
+// Tip is branch's commit on the server ("" when it does not exist).
+func (g *FakeGit) Tip(t *testing.T, branch string) string {
+	t.Helper()
+	out := g.git(t, g.work, "ls-remote", g.bare, "refs/heads/"+branch)
+	sha, _, _ := strings.Cut(out, "\t")
+	return sha
+}
+
+// Show runs `git show args...` on the server (e.g. "main:file").
+func (g *FakeGit) Show(t *testing.T, args ...string) string {
+	t.Helper()
+	return g.git(t, g.bare, append([]string{"show"}, args...)...)
 }
 
 func (g *FakeGit) Repo() vcs.RepoRef {

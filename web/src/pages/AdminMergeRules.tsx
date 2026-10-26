@@ -32,6 +32,8 @@ const BLANK: MergePolicy = {
   ticket_pattern: "",
   freeze_windows: [],
   timezone: "UTC",
+  require_code_owners: false,
+  merge_queue: false,
 };
 
 const list = (s: string) => s.split(/[\s,]+/).filter(Boolean);
@@ -56,6 +58,8 @@ function describe(p: MergePolicy): string {
   if (p.freeze_windows.length) parts.push(`${p.freeze_windows.length} freeze window(s)`);
   if (!p.allow_self_approval) parts.push("no self-approval");
   if (p.dismiss_on_push) parts.push("re-approve after push");
+  if (p.require_code_owners) parts.push("code owners");
+  if (p.merge_queue) parts.push("merge queue");
   return parts.join(" · ");
 }
 
@@ -231,6 +235,8 @@ export default function AdminMergeRules() {
             ["dismiss_on_push", "A push needs fresh approvals"],
             ["block_on_changes_requested", "\"Changes requested\" blocks the merge"],
             ["allow_self_approval", "Authors may approve their own changes"],
+            ["require_code_owners", "Code owners (CODEOWNERS on the target) of every touched file must approve"],
+            ["merge_queue", "Merge through the merge queue (each change is tested on top of the latest target)"],
           ] as const
         ).map(([k, label]) => (
           <label key={k} className="field-inline">

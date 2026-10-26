@@ -214,6 +214,10 @@ func (s *Server) mergeChange(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "failed to load merge rules")
 		return
 	}
+	if p != nil && p.MergeQueue {
+		writeErr(w, http.StatusConflict, c.TargetBranch+" merges through the merge queue — add the change to the queue")
+		return
+	}
 	if p != nil {
 		g, err := s.store.GetGate(r.Context(), id)
 		if err != nil {

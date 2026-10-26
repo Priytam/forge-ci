@@ -121,10 +121,21 @@ func StoreDiff(ctx context.Context, st *store.Store, blobs blob.Store, k store.D
 	if err != nil {
 		return fmt.Errorf("store diff manifest: %w", err)
 	}
-	return st.MarkDiffReady(ctx, k, store.DiffReady{
+	ready := store.DiffReady{
 		MergeBase: res.MergeBase, BlobPrefix: prefix, Chunks: len(res.Files), Files: len(res.Files),
 		Additions: m.Additions, Deletions: m.Deletions, Bytes: total + n, Fetched: res.Fetched, ComputeMS: res.ComputeMS,
-	})
+	}
+	if k.Mode == "change" {
+		ready.Paths = make([]string, 0, len(res.Files))
+		for _, f := range res.Files {
+			ready.Paths = append(ready.Paths, f.Path)
+			if f.OldPath != "" && f.OldPath != f.Path {
+				ready.Paths = append(ready.Paths, f.OldPath)
+			}
+		}
+		ready.OwnersRead, ready.CodeOwnersPath, ready.CodeOwners = res.OwnersRead, res.CodeOwnersPath, res.CodeOwners
+	}
+	return st.MarkDiffReady(ctx, k, ready)
 }
 
 // ExpireDiffs deletes diffs nobody has opened for 30 days and no open

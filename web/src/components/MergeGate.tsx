@@ -1,5 +1,15 @@
 import { useEffect, useState } from "react";
-import { getMe, mergeChange, relativeTime, reviewChange, type ChangePage } from "../api";
+import { Link } from "react-router-dom";
+import {
+  dequeueChange,
+  getMe,
+  mergeChange,
+  queueChange,
+  relativeTime,
+  reviewChange,
+  type ChangePage,
+  type QueueEntry,
+} from "../api";
 
 const MARK: Record<string, string> = { pass: "✓", pending: "…", fail: "✗" };
 
@@ -10,6 +20,24 @@ const METHOD_LABELS: Record<string, string> = {
   fast_forward: "Fast-forward",
 };
 
+/** Where a change stands in its merge queue, in words. */
+function queueStatus(e: QueueEntry, target: string): string {
+  switch (e.state) {
+    case "queued":
+      return e.position && e.position > 1 ? `In the merge queue — position ${e.position}` : "Next in the merge queue";
+    case "testing":
+      return e.pipeline_id ? `Testing on top of ${target}` : `Merging onto ${target} to test…`;
+    case "merging":
+      return "Tested — merging…";
+    case "merged":
+      return "Merged by the merge queue";
+    case "failed":
+      return `Left the merge queue: ${e.error ?? "failed"}`;
+    default:
+      return `Removed from the merge queue${e.error ? ` (${e.error})` : ""}`;
+  }
+}
+
 /**
  * Forge's rules between the change and its merge: each rule's progress, the
  * caller's review buttons, and Merge. What is offered depends on the host's
@@ -18,7 +46,7 @@ const METHOD_LABELS: Record<string, string> = {
  * page shows them as queued until the host confirms.
  */
 export default function MergeGate({ page, onChanged }: { page: ChangePage; onChanged: () => void }) {
-  const { change, capabilities: caps, gate, actions, permissions } = page;
+  const { change, capabilities: caps, gate, actions, permissions, queue } = page;
   const [me, setMe] = useState<string | null | undefined>(undefined);
   const [reviewer, setReviewer] = useState("");
   const [comment, setComment] = useState("");
@@ -35,6 +63,11 @@ export default function MergeGate({ page, onChanged }: { page: ChangePage; onCha
   const merge = actions.find((a) => a.kind === "merge");
   const merging = merge?.state === "pending";
   const gateOK = !gate || gate.state === "pass";
+  // With the queue on, everything but the queue itself (and a freeze, which
+  // the queue waits out) must pass before the change can join it.
+  const queueReady = !!gate && gate.rules.every((r) => r.id === "merge_queue" || r.id === "freeze" || r.state === "pass");
+  const entry = queue?.entry;
+  const inQueue = !!entry && ["queued", "testing", "merging"].includes(entry.state);
 
   const run = async (fn: () => Promise<unknown>, ok: string) => {
     setBusy(true);
@@ -108,7 +141,46 @@ export default function MergeGate({ page, onChanged }: { page: ChangePage; onCha
         </div>
       )}
 
-      {open && caps.merge_methods.length > 0 && permissions.can_merge && (
+      {queue?.enabled && entry && (
+        <p className={entry.state === "failed" ? "error-text" : "muted"}>
+          {queueStatus(entry, change.target_branch)}
+          {entry.pipeline_id && (
+            <>
+              {" "}
+              · <Link to={`/pipelines/${entry.pipeline_id}`}>test pipeline #{entry.pipeline_id}</Link>
+            </>
+          )}
+          {inQueue && queue.length > 1 && ` · ${queue.length} in line for ${change.target_branch}`}
+        </p>
+      )}
+      {open && queue?.enabled && caps.merge_methods.length > 0 && permissions.can_merge && (
+        <div className="form-actions" style={{ marginTop: 12 }}>
+          {!inQueue && (
+            <select value={method} onChange={(e) => setMethod(e.target.value)} disabled={busy}>
+              {caps.merge_methods.map((m) => (
+                <option key={m} value={m}>
+                  {METHOD_LABELS[m] ?? m}
+                </option>
+              ))}
+            </select>
+          )}
+          {inQueue ? (
+            <button className="btn" disabled={busy} onClick={() => void run(() => dequeueChange(change.id), "Removed from the queue.")}>
+              Remove from queue
+            </button>
+          ) : (
+            <button
+              className="btn btn-primary"
+              disabled={busy || !queueReady || change.draft}
+              title={!queueReady ? gate?.summary : change.draft ? "The change is a draft" : undefined}
+              onClick={() => void run(() => queueChange(change.id, change.head_sha, method), "Added to the merge queue.")}
+            >
+              Add to merge queue
+            </button>
+          )}
+        </div>
+      )}
+      {open && !queue?.enabled && caps.merge_methods.length > 0 && permissions.can_merge && (
         <div className="form-actions" style={{ marginTop: 12 }}>
           <select value={method} onChange={(e) => setMethod(e.target.value)} disabled={busy || merging}>
             {caps.merge_methods.map((m) => (
