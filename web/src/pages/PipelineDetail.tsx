@@ -6,7 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   duration,
   getPipeline,
@@ -27,6 +27,10 @@ import ApprovalGate from "../components/ApprovalGate";
 import PlayButton from "../components/PlayButton";
 import PipelineActions from "../components/PipelineActions";
 import JobListView from "../components/JobListView";
+import RepoHeader from "../components/RepoHeader";
+import { StatusBar } from "../components/review/ui";
+import type { Tone } from "../components/ui/Pill";
+import type { IconName } from "../components/Icon";
 
 interface Stage {
   name: string;
@@ -113,6 +117,46 @@ function groupByDepth(jobs: Job[]): Stage[] {
 }
 
 type GroupMode = "stage" | "deps" | "list";
+
+/** What the status bar says about a run: its outcome in words, and how
+ *  many of its jobs have finished. */
+function runStatus(status: string, jobs: Job[]) {
+  const total = jobs.length;
+  const finished = jobs.filter((j) => isTerminalStatus(j.status));
+  const progress = { done: finished.length, total };
+  const failed = jobs.filter((j) => j.status === "failed" && !j.allow_failure);
+  const waiting = jobs.filter((j) => j.status === "blocked");
+  const starts = jobs.map((j) => j.started_at).filter(Boolean) as string[];
+  const ends = jobs.map((j) => j.finished_at).filter(Boolean) as string[];
+  const took =
+    starts.length && ends.length
+      ? duration(starts.sort()[0], ends.sort()[ends.length - 1])
+      : null;
+  const names = (js: Job[]) =>
+    js.slice(0, 3).map((j) => j.name).join(", ") +
+    (js.length > 3 ? ` and ${js.length - 3} more` : "");
+  const out = (tone: Tone, icon: IconName, title: string, detail?: string) => ({
+    tone,
+    icon,
+    title,
+    detail,
+    progress,
+  });
+  switch (status) {
+    case "success":
+      return out("success", "ok", took ? `Passed in ${took}` : "Passed", `${total} job${total === 1 ? "" : "s"} passed`);
+    case "failed":
+      return out("danger", "blocked", `${failed.length || "Some"} of ${total} jobs failed`, failed.length ? names(failed) : undefined);
+    case "canceled":
+      return out("neutral", "closed", "Canceled", `${finished.length} of ${total} jobs had finished`);
+    case "blocked":
+      return out("warning", "pause", "Waiting for approval", waiting.length ? `Needs a go-ahead: ${names(waiting)}` : undefined);
+    case "running":
+      return out("accent", "activity", "Running", `${finished.length} of ${total} jobs done`);
+    default:
+      return out("neutral", "clock", "Queued", "Waiting for a runner");
+  }
+}
 
 /**
  * authorDiffers reports whether the commit author is a DIFFERENT person from
@@ -237,19 +281,12 @@ export default function PipelineDetail() {
 
   return (
     <div>
-      <div className="breadcrumbs">
-        <Link to="/">Repos</Link> <span className="crumb-sep">/</span>{" "}
-        <Link to={`/repos/${encodeURIComponent(pipeline.repo)}`}>
-          {pipeline.repo}
-        </Link>{" "}
-        <span className="crumb-sep">/</span>{" "}
-        <span className="mono">#{pipeline.id}</span>
-      </div>
+      <RepoHeader repo={pipeline.repo} tab="pipelines" />
 
-      <div className="card pipeline-head">
+      <div className="pipeline-head pipeline-head-v2">
         <div className="pipeline-head-main">
-          <h1>
-            {pipeline.repo} <span className="muted">·</span>{" "}
+          <h1 className="cr-title">
+            Pipeline <span className="cr-num">#{pipeline.id}</span>{" "}
             <span className="ref-tag">{pipeline.ref}</span>
           </h1>
           {/* What this run is. A bare sha says nothing; the subject line is the
@@ -312,6 +349,8 @@ export default function PipelineDetail() {
           />
         </div>
       </div>
+
+      <StatusBar {...runStatus(pipeline.status, data.jobs)} />
 
       {error && <div className="error-banner">Refresh failed: {error}</div>}
 

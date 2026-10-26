@@ -6942,3 +6942,179 @@ button.cr-switch:focus-visible {
 .cr-files .diff-file {
   overflow: clip;
 }
+
+/* ==== Modern pass (2026-10): one status language everywhere ==== */
+/* Badges are pills: a dot for a status, the word in sentence case. */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  line-height: 18px;
+  text-transform: none;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.badge-status::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+.badge-running::before {
+  animation: pulse 1.6s ease-in-out infinite;
+}
+.badge-skipped,
+.badge-manual {
+  color: var(--text-muted);
+  background: var(--surface-2);
+  border-color: var(--border);
+}
+/* Status filter chips: the same dot colours as the badges. */
+.fchip[class*="fdot-"]::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--neutral);
+}
+.fchip.fdot-success::before {
+  background: var(--success);
+}
+.fchip.fdot-failed::before {
+  background: var(--danger);
+}
+.fchip.fdot-running::before {
+  background: var(--accent);
+}
+.fchip.fdot-pending::before {
+  background: var(--warning);
+}
+.fchip.fdot-blocked::before {
+  background: var(--attention);
+}
+@media (prefers-reduced-motion: reduce) {
+  .badge-running::before {
+    animation: none;
+  }
+}
+/* Filters sit on the page as a toolbar row, not in a box. */
+.card.filter-panel {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  padding: 0;
+  margin-bottom: 12px;
+}
+.card.filter-panel .filter-bar {
+  gap: 8px;
+}
+/* A pipeline: header on the page (no box), then its status bar. */
+.pipeline-head.pipeline-head-v2 {
+  padding: 0;
+  margin-bottom: 0;
+  background: none;
+  border: 0;
+  align-items: flex-start;
+}
+.pipeline-head-v2 .ref-tag {
+  font-size: var(--fs-sm);
+  vertical-align: middle;
+}
+.pipeline-head-v2 .pipeline-head-side {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.back-link {
+  display: inline-block;
+  margin-bottom: 8px;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+  text-decoration: none;
+}
+.back-link:hover {
+  color: var(--text);
+}
+/* Saved views: one quiet line under the filters. */
+.filter-views {
+  margin-top: 4px;
+}
+.filter-views .field {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+}
+.filter-views .field > span {
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+}
+.filter-views select {
+  height: 28px;
+}
+
+/* ---- Smooth, modern base polish (applies to every page) ---- */
+:root {
+  --radius: 8px;
+  --radius-sm: 5px;
+}
+/* Controls respond softly. */
+.btn,
+.fchip,
+.seg-btn,
+.icon-btn,
+.repo-tab,
+.cr-tab,
+.nav-item,
+input,
+select,
+textarea {
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+.btn:active:not(:disabled) {
+  transform: translateY(0.5px);
+}
+.btn-primary {
+  font-weight: 600;
+}
+.btn:disabled {
+  cursor: not-allowed;
+}
+/* A card's first heading reads as its title bar. */
+.card.settings-form > h2:first-child {
+  margin: -16px -16px 4px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: var(--fs-md);
+}
+.settings-form {
+  border-radius: var(--radius);
+}
+/* Tables: rows show where the pointer is. */
+.dense-table tbody tr {
+  transition: background-color 0.12s ease;
+}
+.dense-table tbody tr:hover {
+  background: color-mix(in srgb, var(--text) 3%, transparent);
+}
+.dense-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+/* Empty states are centred and calm. */
+.card.empty,
+.empty.card {
+  text-align: center;
+  color: var(--text-muted);
+}

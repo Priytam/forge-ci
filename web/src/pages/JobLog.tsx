@@ -24,6 +24,10 @@ import PlayButton from "../components/PlayButton";
 import CancelJobButton from "../components/CancelJobButton";
 import RetryJobButton from "../components/RetryJobButton";
 import LogTools from "../components/LogTools";
+import RepoHeader from "../components/RepoHeader";
+import { StatusBar } from "../components/review/ui";
+import type { Tone } from "../components/ui/Pill";
+import type { IconName } from "../components/Icon";
 
 /**
  * Live job log: an SSE EventSource on /logs/stream?offset=0 that appends
@@ -159,6 +163,31 @@ function useJobLog(
   return { text, streaming, error };
 }
 
+/** A job's outcome in words, for its status bar. */
+function jobOutcome(
+  job: { status: string; exit_code: number | null; allow_failure?: boolean; manual?: boolean },
+  dur: string | null
+): { tone: Tone; icon: IconName; title: string } {
+  switch (job.status) {
+    case "success":
+      return { tone: "success", icon: "ok", title: `Passed${dur ? ` in ${dur}` : ""}` };
+    case "failed":
+      return {
+        tone: job.allow_failure ? "warning" : "danger",
+        icon: "blocked",
+        title: `Failed${job.exit_code !== null ? ` with exit code ${job.exit_code}` : ""}${job.allow_failure ? " (allowed to fail)" : ""}`,
+      };
+    case "running":
+      return { tone: "accent", icon: "activity", title: "Running…" };
+    case "blocked":
+      return { tone: "warning", icon: "pause", title: job.manual ? "Waiting for someone to start it" : "Waiting for approval" };
+    case "canceled":
+      return { tone: "neutral", icon: "closed", title: "Canceled" };
+    default:
+      return { tone: "neutral", icon: "clock", title: "Queued — waiting for a runner" };
+  }
+}
+
 export default function JobLog() {
   const { id } = useParams<{ id: string }>();
   const [searchParams] = useSearchParams();
@@ -244,18 +273,18 @@ export default function JobLog() {
 
   return (
     <div>
-      <div className="breadcrumbs">
-        <Link to="/">Repos</Link> <span className="crumb-sep">/</span>{" "}
-        {pipelineId ? (
-          <Link to={`/pipelines/${pipelineId}`} className="mono">
-            #{pipelineId}
-          </Link>
-        ) : (
-          <span className="muted">unknown pipeline</span>
-        )}{" "}
-        <span className="crumb-sep">/</span>{" "}
-        <span className="mono">job {jobId}</span>
-      </div>
+      {repo ? (
+        <RepoHeader repo={repo} tab="pipelines" />
+      ) : (
+        <div className="breadcrumbs">
+          <Link to="/">Repos</Link>
+        </div>
+      )}
+      {pipelineId && (
+        <Link to={`/pipelines/${pipelineId}`} className="back-link">
+          ← Pipeline #{pipelineId}
+        </Link>
+      )}
 
       {pipelineError && (
         <div className="error-banner">Failed to load job metadata: {pipelineError}</div>
@@ -267,9 +296,11 @@ export default function JobLog() {
       )}
 
       {job && (
-        <div className="card pipeline-head">
+        <div className="pipeline-head pipeline-head-v2">
           <div className="pipeline-head-main">
-            <h1>{job.name}</h1>
+            <h1 className="cr-title">
+              {job.name} <span className="cr-num">job {job.id}</span>
+            </h1>
             <div className="pipeline-meta">
               <span className="stage-tag">stage: {job.stage}</span>
               {dur && <span className="muted">{dur}</span>}
@@ -301,11 +332,19 @@ export default function JobLog() {
         </div>
       )}
 
-      {job?.runner_id && (
-        <p className="muted">
-          Ran on runner <Link to={`/jobs?runner=${encodeURIComponent(job.runner_id)}`} className="mono">{job.runner_id}</Link>
-        </p>
-      )}
+      {job && <StatusBar {...jobOutcome(job, dur)} detail={
+        job.runner_id ? (
+          <>
+            on runner{" "}
+            <Link to={`/jobs?runner=${encodeURIComponent(job.runner_id)}`} className="mono">
+              {job.runner_id}
+            </Link>{" "}
+            · stage {job.stage}
+          </>
+        ) : (
+          `stage ${job.stage}`
+        )
+      } />}
       {job?.status_reason && (
         <div className="error-banner">
           This job did not run: {job.status_reason}. An admin sets which branches

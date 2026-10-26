@@ -14,6 +14,7 @@ import {
 import { usePoll } from "../hooks/usePoll";
 import StatusBadge from "../components/StatusBadge";
 import EnvTabs from "../components/EnvTabs";
+import { STATUS_LABEL } from "../components/StatusBadge";
 
 const PAGE = 50;
 
@@ -137,12 +138,13 @@ export default function Jobs() {
             onChange={(e) => setName(e.target.value)}
             aria-label="Job name"
           />
-          <div className="segmented" role="group" aria-label="Status">
+          <div className="state-chips" role="group" aria-label="Status">
             {JOB_STATUSES.map((st) => (
               <button
                 key={st}
                 type="button"
-                className={statuses.includes(st) ? "seg-btn seg-active" : "seg-btn"}
+                className={`fchip fdot-${st}${statuses.includes(st) ? " fchip-on" : ""}`}
+                aria-pressed={statuses.includes(st)}
                 onClick={() =>
                   patch({
                     statuses: statuses.includes(st)
@@ -151,7 +153,7 @@ export default function Jobs() {
                   })
                 }
               >
-                {st}
+                {STATUS_LABEL[st] ?? st}
               </button>
             ))}
           </div>

@@ -18,6 +18,7 @@ import {
 import { usePoll } from "../hooks/usePoll";
 import PipelineTable from "./PipelineTable";
 import EnvTabs from "./EnvTabs";
+import { STATUS_LABEL } from "./StatusBadge";
 
 const PAGE = 50;
 
@@ -274,12 +275,13 @@ export default function PipelineBrowser({ fixedRepo }: { fixedRepo?: string }) {
             </option>
           ))}
         </select>
-        <div className="segmented" role="group" aria-label="Status">
+        <div className="state-chips" role="group" aria-label="Status">
           {PIPELINE_STATUSES.map((st) => (
             <button
               key={st}
               type="button"
-              className={statuses.includes(st) ? "seg-btn seg-active" : "seg-btn"}
+              className={`fchip fdot-${st}${statuses.includes(st) ? " fchip-on" : ""}`}
+              aria-pressed={statuses.includes(st)}
               onClick={() =>
                 patch({
                   statuses: statuses.includes(st)
@@ -288,7 +290,7 @@ export default function PipelineBrowser({ fixedRepo }: { fixedRepo?: string }) {
                 })
               }
             >
-              {st}
+              {STATUS_LABEL[st] ?? st}
             </button>
           ))}
         </div>
