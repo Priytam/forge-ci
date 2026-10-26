@@ -2280,6 +2280,8 @@ export interface ChangeFilter {
   state?: string;
   repo?: string;
   q?: string;
+  /** rows to return (default 200); the total is counted either way */
+  limit?: number;
 }
 
 /** The inbox: open changes across every repo and host (Postgres only — no
@@ -2289,7 +2291,7 @@ export async function listChanges(f: ChangeFilter = {}): Promise<{ changes: Chan
   if (f.state) qs.set("state", f.state);
   if (f.repo) qs.set("repo", f.repo);
   if (f.q) qs.set("q", f.q);
-  qs.set("limit", "200");
+  qs.set("limit", String(f.limit ?? 200));
   const res = await fetch(`${BASE}/changes?${qs}`, { headers: { Accept: "application/json" } });
   if (!res.ok) throw await parseError(res);
   return { changes: (await res.json()) as Change[], total: Number(res.headers.get("X-Total-Count") ?? 0) };
@@ -2474,6 +2476,14 @@ export function queueChange(id: number, expectedHead: string, method: string): P
 
 export function dequeueChange(id: number): Promise<void> {
   return requestVoid("DELETE", `/changes/${id}/queue`);
+}
+
+/** Live merge queue entries in order (one repo's, or every repo's). */
+export function listMergeQueue(repo?: string, target?: string): Promise<QueueEntry[]> {
+  const qs = new URLSearchParams();
+  if (repo) qs.set("repo", repo);
+  if (target) qs.set("target", target);
+  return getJSON(`/merge-queue${qs.size ? `?${qs}` : ""}`);
 }
 
 /** Queue a merge of exactly the head you reviewed. */

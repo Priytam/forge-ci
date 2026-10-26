@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { useParams } from "react-router-dom";
 import {
   decodeRepoParam,
   listTestHistory,
@@ -10,6 +10,7 @@ import {
 import { usePoll } from "../hooks/usePoll";
 import { StatusIcon } from "../components/StageDots";
 import CoverageTrend from "../components/CoverageTrend";
+import RepoHeader from "../components/RepoHeader";
 
 /** Test-case status -> the pipeline/job status vocabulary StatusIcon and the
  *  .badge-* classes already speak, so both are reused as-is rather than
@@ -104,15 +105,7 @@ export default function TestHistory() {
 
   return (
     <div>
-      <div className="breadcrumbs">
-        <Link to="/">Repos</Link> <span className="crumb-sep">/</span>{" "}
-        <Link to={`/repos/${encodeURIComponent(repo)}`}>{repo}</Link>{" "}
-        <span className="crumb-sep">/</span> <span>tests</span>
-      </div>
-
-      <div className="page-head">
-        <h1>Tests</h1>
-      </div>
+      <RepoHeader repo={repo} tab="tests" />
 
       <CoverageTrend repo={repo} />
 

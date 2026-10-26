@@ -14,10 +14,15 @@ import { useChangeStream } from "../hooks/useChangeStream";
  * opening it never calls GitHub/GitLab/…; updates arrive live.
  */
 export default function Changes() {
+  return <ChangeList />;
+}
+
+/** The change list: every repo's (the inbox), or one repo's (its Changes tab). */
+export function ChangeList({ fixedRepo }: { fixedRepo?: string }) {
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const state = params.get("state") ?? "open";
-  const repo = params.get("repo") ?? "";
+  const repo = fixedRepo ?? params.get("repo") ?? "";
   const [q, setQ] = useState(params.get("q") ?? "");
   const [changes, setChanges] = useState<Change[] | null>(null);
   const [total, setTotal] = useState(0);
@@ -46,19 +51,34 @@ export default function Changes() {
 
   return (
     <div>
-      <div className="page-head">
-        <h1>Changes</h1>
-        <div className="page-head-actions">
-          <button className="btn btn-primary" onClick={() => setCreating(true)} disabled={creating}>
-            New change
-          </button>
+      {fixedRepo ? (
+        <div className="page-head">
+          <p className="page-lede" style={{ margin: 0 }}>
+            Pull and merge requests into {fixedRepo}, updated live.
+          </p>
+          <div className="page-head-actions">
+            <button className="btn btn-primary" onClick={() => setCreating(true)} disabled={creating}>
+              New change
+            </button>
+          </div>
         </div>
-      </div>
-      {creating && <NewChange onClose={() => setCreating(false)} />}
-      <p className="page-lede">
-        Pull and merge requests from every connected repo, whichever host it lives on. This list is kept
-        current by webhooks — opening it never calls the host.
-      </p>
+      ) : (
+        <>
+          <div className="page-head">
+            <h1>Changes</h1>
+            <div className="page-head-actions">
+              <button className="btn btn-primary" onClick={() => setCreating(true)} disabled={creating}>
+                New change
+              </button>
+            </div>
+          </div>
+          <p className="page-lede">
+            Pull and merge requests from every connected repo, whichever host it lives on. This list is kept current by
+            webhooks — opening it never calls the host.
+          </p>
+        </>
+      )}
+      {creating && <NewChange repo={fixedRepo} onClose={() => setCreating(false)} />}
       <div className="filter-bar" style={{ marginBottom: 12 }}>
         <label className="field">
           <span>State</span>
@@ -69,17 +89,19 @@ export default function Changes() {
             <option value="all">All</option>
           </select>
         </label>
-        <label className="field">
-          <span>Repo</span>
-          <select value={repo} onChange={(e) => set("repo", e.target.value)}>
-            <option value="">All repos</option>
-            {(repo && !repos.includes(repo) ? [repo, ...repos] : repos).map((r) => (
-              <option key={r} value={r}>
-                {r}
-              </option>
-            ))}
-          </select>
-        </label>
+        {!fixedRepo && (
+          <label className="field">
+            <span>Repo</span>
+            <select value={repo} onChange={(e) => set("repo", e.target.value)}>
+              <option value="">All repos</option>
+              {(repo && !repos.includes(repo) ? [repo, ...repos] : repos).map((r) => (
+                <option key={r} value={r}>
+                  {r}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <form
           className="field filter-search"
           onSubmit={(e) => {
@@ -96,8 +118,8 @@ export default function Changes() {
         <div className="muted">Loading…</div>
       ) : changes.length === 0 ? (
         <div className="card empty">
-          No {state === "all" ? "" : state} changes. Connected GitHub repos fill this list from their
-          pull-request webhooks.
+          No {state === "all" ? "" : state} changes. Connected GitHub repos fill this list from their pull-request
+          webhooks.
         </div>
       ) : (
         <div className="card table-card">
@@ -107,7 +129,7 @@ export default function Changes() {
                 <th style={{ width: 96 }}>CI</th>
                 <th style={{ width: 96 }}>Gate</th>
                 <th>Change</th>
-                <th>Repo</th>
+                {!fixedRepo && <th>Repo</th>}
                 <th>Branch</th>
                 <th>Reviews</th>
                 <th style={{ textAlign: "right" }}>Updated</th>
@@ -116,12 +138,15 @@ export default function Changes() {
             <tbody>
               {changes.map((c) => (
                 <tr key={c.id} className="row-link" onClick={() => navigate(`/changes/${c.id}`)}>
-                  <td>{c.pipeline_status ? <StatusBadge status={c.pipeline_status} /> : <span className="muted">—</span>}</td>
+                  <td>
+                    {c.pipeline_status ? <StatusBadge status={c.pipeline_status} /> : <span className="muted">—</span>}
+                  </td>
                   <td>
                     <GateBadge change={c} />
                   </td>
                   <td className="cell-title">
-                    <span className="mono muted">#{c.number}</span> {c.title || <span className="muted">(untitled)</span>}{" "}
+                    <span className="mono muted">#{c.number}</span>{" "}
+                    {c.title || <span className="muted">(untitled)</span>}{" "}
                     {(c.draft || c.state !== "open") && <ChangeStateBadge change={c} />}
                     <span className="cell-meta">
                       {" "}
@@ -129,7 +154,7 @@ export default function Changes() {
                       {c.labels.length > 0 && <> · {c.labels.join(", ")}</>}
                     </span>
                   </td>
-                  <td className="cell-repo">{c.repo}</td>
+                  {!fixedRepo && <td className="cell-repo">{c.repo}</td>}
                   <td>
                     <span className="mono cell-branch" title={`${c.source_branch} → ${c.target_branch}`}>
                       {c.source_branch} → {c.target_branch}

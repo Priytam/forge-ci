@@ -40,6 +40,7 @@ what is already stored and nothing is fetched.
 
 | | |
 |---|---|
+| **Repo tabs** (open a repo) | every repo page has the same tabs — Pipelines, **Changes**, **Merge queue**, Environments, Tests, **Merge rules**, Settings — so everything about a repo is reached from the repo; a change opens under its repo's Changes tab |
 | **Changes** inbox (sidebar → Changes) | open / merged / closed / all, filter by repo, search by title or `#number`; CI status of the head commit, the **merge gate** (ready / waiting / blocked), approvals and "changes requested" per change; live updates; **New change** opens one on a plain git repo |
 | **Files changed** (change page) | every file's diff, unified or side by side; the whole change against its target, or **changes since revision N**; "changes since you last looked"; lock files, vendored and other generated files, binaries and very large diffs collapsed until opened |
 | **Comments** | comment on any line of the diff (with **suggested changes**), reply, resolve and reopen; the change's conversation; threads that left the diff listed as outdated — **synced both ways** with GitHub, GitLab, Bitbucket, Gitea and CodeCommit (where a host lacks a feature, Forge keeps it; see [the host table](#what-each-host-supports)) |

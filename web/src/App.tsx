@@ -27,6 +27,9 @@ import AdminAbout from "./pages/AdminAbout";
 import Environments from "./pages/Environments";
 import TestHistory from "./pages/TestHistory";
 import Changes from "./pages/Changes";
+import RepoChanges from "./pages/RepoChanges";
+import RepoQueue from "./pages/RepoQueue";
+import RepoMergeRules from "./pages/RepoMergeRules";
 import ChangeDetail from "./pages/ChangeDetail";
 import AdminMergeRules from "./pages/AdminMergeRules";
 import Account from "./pages/Account";
@@ -50,6 +53,9 @@ export default function App() {
           <Route path="/repos/:repo/settings" element={<RepoSettings />} />
           <Route path="/repos/:repo/environments" element={<Environments />} />
           <Route path="/repos/:repo/tests" element={<TestHistory />} />
+          <Route path="/repos/:repo/changes" element={<RepoChanges />} />
+          <Route path="/repos/:repo/queue" element={<RepoQueue />} />
+          <Route path="/repos/:repo/merge-rules" element={<RepoMergeRules />} />
           <Route path="/runners" element={<Runners />} />
           <Route path="/docs" element={<Docs />} />
           <Route path="/docs/:guide" element={<Docs />} />

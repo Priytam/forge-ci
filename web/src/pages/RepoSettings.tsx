@@ -42,6 +42,7 @@ import {
 } from "../api";
 import LintPanel from "../components/LintPanel";
 import { usePoll } from "../hooks/usePoll";
+import RepoHeader from "../components/RepoHeader";
 
 const MASKED_PLACEHOLDER = "********************";
 const ROLES = ["admin", "owner", "developer"];
@@ -1479,15 +1480,7 @@ export default function RepoSettings() {
 
   return (
     <div>
-      <div className="breadcrumbs">
-        <Link to="/">Repos</Link> <span className="crumb-sep">/</span>{" "}
-        <Link to={`/repos/${encodeURIComponent(repo)}`}>{repo}</Link>{" "}
-        <span className="crumb-sep">/</span> <span>settings</span>
-      </div>
-
-      <div className="page-head">
-        <h1>CI/CD Settings</h1>
-      </div>
+      <RepoHeader repo={repo} tab="settings" />
 
       <Section
         title="Variables"

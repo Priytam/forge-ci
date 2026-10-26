@@ -8,7 +8,7 @@ import { createChange, getProviderCapabilities, listRegistry, type RegisteredRep
  * hosts with pull requests are not offered — their changes come from the
  * host by themselves.
  */
-export default function NewChange({ onClose }: { onClose: () => void }) {
+export default function NewChange({ repo, onClose }: { repo?: string; onClose: () => void }) {
   const navigate = useNavigate();
   const [repos, setRepos] = useState<RegisteredRepo[] | null>(null);
   const [form, setForm] = useState({ repo: "", source_branch: "", target_branch: "", title: "", body: "", draft: false });
@@ -18,14 +18,14 @@ export default function NewChange({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     Promise.all([listRegistry(), getProviderCapabilities()])
       .then(([all, caps]) => {
-        const native = all.filter((r) => caps[r.provider]?.native_changes);
+        const native = all.filter((r) => caps[r.provider]?.native_changes && (!repo || r.repo === repo));
         setRepos(native);
         if (native.length > 0) {
           setForm((f) => ({ ...f, repo: native[0].repo, target_branch: native[0].default_branch || "main" }));
         }
       })
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
-  }, []);
+  }, [repo]);
 
   const set = (k: keyof typeof form, v: string | boolean) => setForm((f) => ({ ...f, [k]: v }));
   const submit = async () => {
@@ -46,8 +46,9 @@ export default function NewChange({ onClose }: { onClose: () => void }) {
       {repos === null && !error && <p className="muted">Loading…</p>}
       {repos !== null && repos.length === 0 && (
         <p className="muted">
-          Changes are opened here only for repos on plain git servers. Pull and merge requests on GitHub, GitLab,
-          Bitbucket, Gitea and CodeCommit appear in this list by themselves.
+          {repo ? `${repo}'s host has its own pull requests: open the change there and it appears here by itself.` : ""}
+          {!repo &&
+            "Changes are opened here only for repos on plain git servers. Pull and merge requests on GitHub, GitLab, Bitbucket, Gitea and CodeCommit appear in this list by themselves."}
         </p>
       )}
       {repos !== null && repos.length > 0 && (

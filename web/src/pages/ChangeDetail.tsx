@@ -8,6 +8,7 @@ import MergeGate from "../components/MergeGate";
 import DiffView from "../components/DiffView";
 import Conversation from "../components/Conversation";
 import { useChangeStream } from "../hooks/useChangeStream";
+import RepoHeader from "../components/RepoHeader";
 
 const VERDICT: Record<string, string> = {
   approve: "approved",
@@ -62,10 +63,11 @@ export default function ChangeDetail() {
 
   return (
     <div>
+      <RepoHeader repo={change.repo} tab="changes" />
       <div className="page-head">
-        <h1>
+        <h2 className="change-title">
           {change.title || "(untitled)"} <span className="mono muted">#{change.number}</span>
-        </h1>
+        </h2>
         <div className="page-head-actions">
           {permissions.can_edit && change.state !== "merged" && !editing && (
             <button className="btn" onClick={() => setEditing({ title: change.title, body: change.body })}>
@@ -91,8 +93,7 @@ export default function ChangeDetail() {
       </div>
       <p className="page-lede">
         <ChangeStateBadge change={change} /> <Avatar identity={change.author} size={16} /> <b>{change.author}</b> wants to
-        merge <span className="mono">{change.source_branch}</span> into <span className="mono">{change.target_branch}</span>{" "}
-        in <Link to={`/repos/${encodeURIComponent(change.repo)}`}>{change.repo}</Link>
+        merge <span className="mono">{change.source_branch}</span> into <span className="mono">{change.target_branch}</span>
         {caps.native_changes && <span className="muted"> · a Forge-native change (the host has no pull requests)</span>}
         {change.updated_at && <span className="muted"> · updated {relativeTime(change.updated_at)}</span>}
       </p>

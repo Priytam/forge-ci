@@ -49,7 +49,7 @@ const parseWindows = (s: string) =>
       return { start: start ?? "", end: end ?? "" };
     });
 
-function describe(p: MergePolicy): string {
+export function describe(p: MergePolicy): string {
   const parts = [`${p.required_approvals} approval${p.required_approvals === 1 ? "" : "s"}`];
   if (p.required_group) parts.push(`${p.required_group_approvals} from ${p.required_group}`);
   if (p.require_ci) parts.push("CI green");

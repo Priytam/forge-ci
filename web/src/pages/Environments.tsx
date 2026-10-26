@@ -18,6 +18,7 @@ import {
   type Freeze,
 } from "../api";
 import { usePoll } from "../hooks/usePoll";
+import RepoHeader from "../components/RepoHeader";
 
 /** URL, version and digest of a deployment, when the job reported them. */
 function DeployFacts({ d }: { d: Deployment }) {
@@ -428,15 +429,7 @@ export default function Environments() {
 
   return (
     <div>
-      <div className="breadcrumbs">
-        <Link to="/">Repos</Link> <span className="crumb-sep">/</span>{" "}
-        <Link to={`/repos/${encodeURIComponent(repo)}`}>{repo}</Link>{" "}
-        <span className="crumb-sep">/</span> <span>environments</span>
-      </div>
-
-      <div className="page-head">
-        <h1>Environments</h1>
-      </div>
+      <RepoHeader repo={repo} tab="environments" />
 
       {error && <div className="error-banner">Failed to load environments: {error}</div>}
       {loading && !envs && <div className="muted">Loading…</div>}

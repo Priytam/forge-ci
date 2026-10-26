@@ -5892,3 +5892,66 @@ tr.diff-note td {
 .thread-actions {
   margin-top: 4px;
 }
+
+/* ---- repo header tabs: everything about a repo, reached from the repo ---- */
+.repo-head {
+  margin-bottom: 8px;
+}
+
+.repo-tabs {
+  display: flex;
+  gap: 2px;
+  margin: 0 0 16px;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.repo-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.repo-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  margin-bottom: -1px;
+  border-bottom: 2px solid transparent;
+  color: var(--text-muted);
+  font-size: var(--fs);
+  white-space: nowrap;
+  text-decoration: none;
+}
+
+.repo-tab:hover {
+  color: var(--text);
+  text-decoration: none;
+  border-bottom-color: var(--border-strong);
+}
+
+.repo-tab-active,
+.repo-tab-active:hover {
+  color: var(--text);
+  font-weight: 600;
+  border-bottom-color: var(--accent);
+}
+
+.repo-tab-count {
+  min-width: 18px;
+  padding: 0 6px;
+  border-radius: 9px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  line-height: 16px;
+  text-align: center;
+}
+
+.change-title {
+  margin: 0;
+  font-size: var(--fs-xl);
+  font-weight: 600;
+}

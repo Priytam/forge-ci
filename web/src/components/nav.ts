@@ -95,7 +95,14 @@ export function crumbsFor(pathname: string, search: string): Crumb[] {
     case "repos": {
       if (b === "new") return [{ label: "Repos", to: "/" }, { label: "Add repository" }];
       const repoTo = `/repos/${encodeURIComponent(b ?? "")}`;
-      const sub: Record<string, string> = { settings: "Settings", environments: "Environments", tests: "Tests" };
+      const sub: Record<string, string> = {
+        settings: "Settings",
+        environments: "Environments",
+        tests: "Tests",
+        changes: "Changes",
+        queue: "Merge queue",
+        "merge-rules": "Merge rules",
+      };
       return c
         ? [{ label: "Repos", to: "/" }, { label: b, to: repoTo }, { label: sub[c] ?? c }]
         : [{ label: "Repos", to: "/" }, { label: b }];
