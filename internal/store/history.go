@@ -93,6 +93,13 @@ type HistoryBucket struct {
 	DurationP95 *float64  `json:"duration_p95"`
 	Finished    int       `json:"finished"`
 	Failed      int       `json:"failed"`
+	// Fleet capacity and queue depth from the per-minute snapshots (not
+	// narrowed by the filter); null where no snapshot fell in the bucket.
+	CapacityTotal     *float64 `json:"capacity_total"`     // avg slots on non-stale runners
+	CapacityAvailable *float64 `json:"capacity_available"` // avg available slots
+	QueuePendingAvg   *float64 `json:"queue_pending_avg"`
+	QueuePendingMax   *int     `json:"queue_pending_max"`
+	QueueOldestMax    *int     `json:"queue_oldest_wait_max"` // seconds
 }
 
 // HistorySummary is the whole range in one figure per measure (the KPI
@@ -107,6 +114,16 @@ type HistorySummary struct {
 	DurationP95 *float64 `json:"duration_p95"`
 	Finished    int      `json:"finished"`
 	Failed      int      `json:"failed"`
+	// From the capacity snapshots: averages over the minutes recorded,
+	// AvailableSlotSeconds their sum (the utilisation denominator) and
+	// SnapshotSeconds how much of the range they cover.
+	CapacityAvailable    *float64 `json:"capacity_available"`
+	CapacityTotal        *float64 `json:"capacity_total"`
+	QueuePendingAvg      *float64 `json:"queue_pending_avg"`
+	QueuePendingMax      *int     `json:"queue_pending_max"`
+	QueueOldestMax       *int     `json:"queue_oldest_wait_max"`
+	AvailableSlotSeconds int      `json:"available_slot_seconds"`
+	SnapshotSeconds      int      `json:"snapshot_seconds"`
 }
 
 // HistoryFilter narrows the history.
@@ -252,6 +269,15 @@ func (s *Store) RunnerHistory(ctx context.Context, r Range, f HistoryFilter) ([]
 			return nil, sum, err
 		}
 	}
+	caps, capAll, slotSeconds, err := s.capacityHistory(ctx, r)
+	if err != nil {
+		return nil, sum, err
+	}
+	if capAll.n > 0 {
+		sum.CapacityAvailable, sum.CapacityTotal = ptr(capAll.available), ptr(capAll.total)
+		sum.QueuePendingAvg, sum.QueuePendingMax, sum.QueueOldestMax = ptr(capAll.pendingAvg), ptr(capAll.pendingMax), ptr(capAll.oldestMax)
+		sum.AvailableSlotSeconds, sum.SnapshotSeconds = slotSeconds, capAll.n*60
+	}
 	// Dense series: every bucket in the range — zeros where nothing ran,
 	// NoData where the rollups don't reach.
 	out := []HistoryBucket{}
@@ -261,6 +287,10 @@ func (s *Store) RunnerHistory(ctx context.Context, r Range, f HistoryFilter) ([]
 			b = &HistoryBucket{At: at, NoData: rollups && !covered[at]}
 		}
 		b.BusySlots = float64(b.BusySeconds) / r.Bucket.Seconds()
+		if c, ok := caps[at]; ok {
+			b.CapacityTotal, b.CapacityAvailable = ptr(c.total), ptr(c.available)
+			b.QueuePendingAvg, b.QueuePendingMax, b.QueueOldestMax = ptr(c.pendingAvg), ptr(c.pendingMax), ptr(c.oldestMax)
+		}
 		out = append(out, *b)
 	}
 	return out, sum, nil

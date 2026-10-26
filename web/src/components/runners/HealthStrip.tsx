@@ -24,13 +24,28 @@ function Tile({ label, tone, value, sub, spark, delta }: { label: string; tone: 
   );
 }
 
-/** "+12% vs previous" — tone by whether up is good. */
-function Delta({ now, prev, upIsBad, fmt }: { now: number | null; prev: number | null; upIsBad?: boolean; fmt?: (d: number) => string }) {
+/** "+12% vs previous" — tone by whether up is good, bad, or neither. */
+function Delta({
+  now,
+  prev,
+  upIsBad,
+  upIsGood,
+  fmt,
+  epsilon = 1e-9,
+}: {
+  now: number | null;
+  prev: number | null;
+  upIsBad?: boolean;
+  upIsGood?: boolean;
+  fmt?: (d: number) => string;
+  /** changes smaller than this read "no change" (what the format would round to 0) */
+  epsilon?: number;
+}) {
   if (now == null || prev == null) return <span className="kpi-delta muted" title="No data for the previous period">—</span>;
   const d = now - prev;
-  if (Math.abs(d) < 1e-9) return <span className="kpi-delta muted">no change</span>;
-  const bad = upIsBad ? d > 0 : false;
-  const good = upIsBad ? d < 0 : false;
+  if (Math.abs(d) < epsilon) return <span className="kpi-delta muted">no change</span>;
+  const bad = (upIsBad && d > 0) || (upIsGood && d < 0);
+  const good = (upIsBad && d < 0) || (upIsGood && d > 0);
   const text = fmt ? fmt(d) : prev === 0 ? "new" : `${d > 0 ? "+" : ""}${Math.round((d / prev) * 100)}%`;
   return (
     <span className={`kpi-delta ${bad ? "delta-bad" : good ? "delta-good" : ""}`} title="Change vs the previous period of the same length">
@@ -48,7 +63,12 @@ export interface HealthData {
   prev: HistorySummary | null;
   utilisation: number | null;
   prevUtilisation: number | null;
+  /** no runner filter: fleet-wide capacity/queue history applies */
+  fleet: boolean;
 }
+
+/** "+1.5 slots" */
+const signed = (unit: string) => (d: number) => `${d > 0 ? "+" : ""}${+d.toFixed(1)} ${unit}`;
 
 export default function HealthStrip({ data, onState }: { data: HealthData | null; onState: (s: RunnerState | "all") => void }) {
   if (!data) {
@@ -72,7 +92,13 @@ export default function HealthStrip({ data, onState }: { data: HealthData | null
   const queueTone: Tone = !load ? "none" : blocked.length > 0 || oldest > WAIT_THRESHOLD_S ? "bad" : (load.pending ?? 0) > 0 ? "warn" : "ok";
   const p95 = summary?.wait_p95 ?? null;
   const waitTone: Tone = p95 == null ? "none" : p95 > WAIT_THRESHOLD_S ? "bad" : p95 > WAIT_THRESHOLD_S / 2 ? "warn" : "ok";
-  const capSeries = buckets?.map((b) => (b.no_data ? null : cap.total > 0 ? b.busy_slots / cap.total : b.busy_slots)) ?? [];
+  // Capacity and queue history come from per-minute snapshots (fleet-wide);
+  // before any exist, capacity falls back to busy share and the queue has none.
+  const snapshots = data.fleet && !!buckets?.some((b) => b.capacity_available != null);
+  const capSeries = snapshots
+    ? buckets!.map((b) => b.capacity_available)
+    : (buckets?.map((b) => (b.no_data ? null : cap.total > 0 ? b.busy_slots / cap.total : b.busy_slots)) ?? []);
+  const capMax = snapshots ? Math.max(cap.total, ...buckets!.map((b) => b.capacity_total ?? 0)) : 1;
 
   return (
     <div className="health-strip">
@@ -97,7 +123,22 @@ export default function HealthStrip({ data, onState }: { data: HealthData | null
             <span>{cap.busy} busy now</span>
           )
         }
-        spark={buckets && <Sparkline values={capSeries} max={1} label="Busy share of capacity over the range" />}
+        delta={
+          snapshots ? (
+            <span title="Average available slots vs the previous period">
+              <Delta now={summary?.capacity_available ?? null} prev={prev?.capacity_available ?? null} upIsGood fmt={signed("slots")} epsilon={0.05} />
+            </span>
+          ) : undefined
+        }
+        spark={
+          buckets && (
+            <Sparkline
+              values={capSeries}
+              max={capMax}
+              label={snapshots ? "Available slots over the range" : "Busy share of capacity over the range"}
+            />
+          )
+        }
       />
       <Tile
         label="Queue now"
@@ -116,9 +157,20 @@ export default function HealthStrip({ data, onState }: { data: HealthData | null
               oldest <span className="num">{duration(oldest)}</span> · {load?.running ?? 0} running
             </span>
           ) : (
-            <span>{load?.running ?? 0} running · nothing stuck</span>
+            <span>
+              {load?.running ?? 0} running · nothing stuck
+              {snapshots && summary?.queue_pending_max != null && <> · peak {summary.queue_pending_max}</>}
+            </span>
           )
         }
+        delta={
+          snapshots ? (
+            <span title="Average jobs waiting vs the previous period">
+              <Delta now={summary?.queue_pending_avg ?? null} prev={prev?.queue_pending_avg ?? null} upIsBad fmt={signed("avg")} epsilon={0.05} />
+            </span>
+          ) : undefined
+        }
+        spark={snapshots && <Sparkline values={buckets!.map((b) => b.queue_pending_max)} color="var(--attention)" label="Most jobs waiting per bucket over the range" />}
       />
       <Tile
         label="Queue wait p95"

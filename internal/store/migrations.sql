@@ -1050,3 +1050,19 @@ CREATE INDEX IF NOT EXISTS jobs_started_at_idx ON jobs (started_at) WHERE starte
 -- concurrency rather than a runner count.
 ALTER TABLE runners ADD COLUMN IF NOT EXISTS concurrency INT NOT NULL DEFAULT 1;
 CREATE INDEX IF NOT EXISTS audit_log_target_idx ON audit_log (target);
+
+-- Runners page: the pool that launched a runner (RUNNER_POOL), and a
+-- per-minute snapshot of capacity and queue depth, so those have history.
+ALTER TABLE runners ADD COLUMN IF NOT EXISTS pool TEXT NOT NULL DEFAULT '';
+CREATE TABLE IF NOT EXISTS runner_capacity_snapshots (
+    at              TIMESTAMPTZ PRIMARY KEY,           -- the minute
+    total_slots     INT    NOT NULL DEFAULT 0,         -- slots on non-stale runners
+    available_slots INT    NOT NULL DEFAULT 0,         -- online, not paused or draining
+    busy_slots      INT    NOT NULL DEFAULT 0,         -- available slots running a job
+    paused_slots    INT    NOT NULL DEFAULT 0,
+    draining_slots  INT    NOT NULL DEFAULT 0,
+    offline_slots   INT    NOT NULL DEFAULT 0,
+    pending         INT    NOT NULL DEFAULT 0,         -- jobs waiting for a runner
+    oldest_wait_s   INT    NOT NULL DEFAULT 0,
+    starved_tags    TEXT[] NOT NULL DEFAULT '{}'       -- tags with runners but no available slot
+);

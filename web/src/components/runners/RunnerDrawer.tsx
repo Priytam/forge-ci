@@ -100,6 +100,19 @@ export default function RunnerDrawer({
           </dd>
         </div>
         <div>
+          <dt>Pool</dt>
+          <dd title={runner.pool_inferred ? "It doesn't report a pool; its tags match exactly one pool's" : undefined}>
+            {runner.pool ? (
+              <>
+                <span className="mono">{runner.pool}</span>
+                {runner.pool_inferred && <span className="muted"> (by tags)</span>}
+              </>
+            ) : (
+              <span className="muted">—</span>
+            )}
+          </dd>
+        </div>
+        <div>
           <dt>Registered</dt>
           <dd className="num" title={new Date(runner.created_at).toLocaleString()}>
             {relativeTime(runner.created_at)}

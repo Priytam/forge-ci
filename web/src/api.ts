@@ -180,8 +180,11 @@ export interface Runner {
   running_jobs?: number;
   /** job slots (the runner's --concurrency; 1 for older runners) */
   concurrency?: number;
-  /** not seen for a day: left out of capacity and tag counts, removable */
+  /** not seen for RUNNER_STALE_AFTER (default a day): left out of capacity and tag counts */
   stale?: boolean;
+  /** the autoscaled pool it reported, or the one pool whose tags equal its tags (pool_inferred) */
+  pool?: string;
+  pool_inferred?: boolean;
 }
 
 export interface Artifact {
@@ -1004,6 +1007,12 @@ export interface HistoryBucket {
   duration_p95: number | null;
   finished: number;
   failed: number;
+  /** fleet capacity and queue depth from per-minute snapshots; null where none fell in the bucket */
+  capacity_total: number | null;
+  capacity_available: number | null;
+  queue_pending_avg: number | null;
+  queue_pending_max: number | null;
+  queue_oldest_wait_max: number | null;
 }
 
 export interface HistorySummary {
@@ -1015,6 +1024,14 @@ export interface HistorySummary {
   duration_p95: number | null;
   finished: number;
   failed: number;
+  capacity_available: number | null;
+  capacity_total: number | null;
+  queue_pending_avg: number | null;
+  queue_pending_max: number | null;
+  queue_oldest_wait_max: number | null;
+  /** slot-seconds available over the snapshots, and how much of the range they cover */
+  available_slot_seconds: number;
+  snapshot_seconds: number;
 }
 
 export interface RunnerHistoryResponse {

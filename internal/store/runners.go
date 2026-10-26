@@ -12,9 +12,17 @@ import (
 
 const onlineWindow = 30 * time.Second
 
-// staleWindow: a runner not seen for this long is stale — it no longer counts
-// toward capacity or tag totals, and an admin may remove it.
-const staleWindow = 24 * time.Hour
+// defaultStaleAfter: a runner not seen for this long is stale — it no longer
+// counts toward capacity or tag totals. RUNNER_STALE_AFTER overrides it.
+const defaultStaleAfter = 24 * time.Hour
+
+// staleAfter is the configured stale threshold.
+func (s *Store) staleAfter() time.Duration {
+	if s.runnerStaleAfter > 0 {
+		return s.runnerStaleAfter
+	}
+	return defaultStaleAfter
+}
 
 // ErrRunnerActive: the runner is online or still running jobs, so it can't be
 // removed.
@@ -40,7 +48,11 @@ func (s *Store) ListRunners(ctx context.Context) ([]proto.Runner, error) {
 		`SELECT r.id, r.executor, r.tags, r.description, r.paused, r.created_at, r.last_contact_at,
 		        r.version, r.draining, r.update_requested_at IS NOT NULL,
 		        (SELECT count(*) FROM jobs j WHERE j.status='running' AND j.runner_id = r.id),
-		        r.concurrency
+		        r.concurrency, r.pool,
+		        -- No reported pool: the one pool whose tags equal the runner's,
+		        -- which is how the autoscaler counts a pool's runners.
+		        CASE WHEN r.pool = '' THEN COALESCE((SELECT min(p.name) FROM runner_pools p
+		          WHERE p.tags @> r.tags AND p.tags <@ r.tags HAVING count(*) = 1), '') ELSE '' END
 		 FROM runners r ORDER BY r.last_contact_at DESC`)
 	if err != nil {
 		return nil, err
@@ -50,12 +62,17 @@ func (s *Store) ListRunners(ctx context.Context) ([]proto.Runner, error) {
 	out := []proto.Runner{}
 	for rows.Next() {
 		var r proto.Runner
+		var inferred string
 		if err := rows.Scan(&r.ID, &r.Executor, &r.Tags, &r.Description, &r.Paused,
-			&r.CreatedAt, &r.LastContactAt, &r.Version, &r.Draining, &r.UpdateRequested, &r.RunningJobs, &r.Concurrency); err != nil {
+			&r.CreatedAt, &r.LastContactAt, &r.Version, &r.Draining, &r.UpdateRequested, &r.RunningJobs, &r.Concurrency,
+			&r.Pool, &inferred); err != nil {
 			return nil, err
 		}
+		if r.Pool == "" && inferred != "" {
+			r.Pool, r.PoolInferred = inferred, true
+		}
 		r.Online = time.Since(r.LastContactAt) < onlineWindow
-		r.Stale = time.Since(r.LastContactAt) >= staleWindow
+		r.Stale = time.Since(r.LastContactAt) >= s.staleAfter()
 		out = append(out, r)
 	}
 	return out, rows.Err()

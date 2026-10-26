@@ -1,4 +1,4 @@
-import type { Runner, RunnerLoad, RunnerLoadRow } from "../../api";
+import type { HistorySummary, Runner, RunnerLoad, RunnerLoadRow } from "../../api";
 
 /* The runners page's view of the fleet: one state per runner, slots and
    capacity, tag counts and utilisation. Pure functions, unit-tested. */
@@ -137,6 +137,58 @@ export function fleetUtilisation(runners: Runner[], busySeconds: number, from: n
   let avail = 0;
   for (const r of runners) avail += availableSeconds(r, from, to) * Math.max(1, r.concurrency ?? 1);
   return avail > 0 ? Math.min(1, busySeconds / avail) : null;
+}
+
+/** Snapshots must cover this share of a range before they are the utilisation denominator. */
+const SNAPSHOT_COVERAGE = 0.9;
+
+/**
+ * Utilisation from the capacity snapshots — busy slot-hours over the slot-hours
+ * actually available — when they cover the range; null otherwise (use
+ * fleetUtilisation's estimate instead).
+ */
+export function snapshotUtilisation(s: Pick<HistorySummary, "busy_seconds" | "available_slot_seconds" | "snapshot_seconds"> | null, rangeSeconds: number): number | null {
+  if (!s || rangeSeconds <= 0 || s.snapshot_seconds < rangeSeconds * SNAPSHOT_COVERAGE || s.available_slot_seconds <= 0) return null;
+  const available = s.available_slot_seconds * (rangeSeconds / s.snapshot_seconds);
+  return Math.min(1, s.busy_seconds / available);
+}
+
+export type GroupBy = "none" | "tag" | "executor" | "pool";
+
+export interface ViewGroup {
+  key: string;
+  views: RunnerView[];
+  /** the group's tag capacity (tag grouping) */
+  tag?: TagCapacity;
+  /** pool groups: every member's pool was inferred from tags */
+  inferred?: boolean;
+}
+
+const NO_TAGS = "(no tags)";
+const NO_POOL = "(not in a pool)";
+
+/**
+ * Rows grouped for the table. A runner sits in every one of its tags' groups;
+ * pool groups follow the runner's pool (reported or inferred), with
+ * pool-less runners last.
+ */
+export function groupViews(views: RunnerView[], by: GroupBy, cap: Capacity): ViewGroup[] {
+  if (by === "none") return [{ key: "all", views }];
+  const groups = new Map<string, RunnerView[]>();
+  for (const v of views) {
+    const keys =
+      by === "tag" ? (v.runner.tags?.length ? v.runner.tags : [NO_TAGS]) : by === "executor" ? [v.runner.executor] : [v.runner.pool || NO_POOL];
+    for (const k of keys) groups.set(k, [...(groups.get(k) ?? []), v]);
+  }
+  const last = (k: string) => k === NO_POOL || k === NO_TAGS;
+  return [...groups.entries()]
+    .sort(([a], [b]) => (last(a) !== last(b) ? (last(a) ? 1 : -1) : a.localeCompare(b)))
+    .map(([key, vs]) => ({
+      key,
+      views: vs,
+      tag: by === "tag" ? cap.byTag.find((t) => t.tag === key) : undefined,
+      inferred: by === "pool" && key !== NO_POOL ? vs.every((v) => v.runner.pool_inferred) : undefined,
+    }));
 }
 
 export type RunnerAction = "pause" | "resume" | "drain" | "undrain" | "upgrade" | "remove";

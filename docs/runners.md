@@ -14,6 +14,8 @@ Flags / env vars:
 | `--id` | `RUNNER_ID` | stable unique name (defaults to host-pid) |
 | `--tags` | `RUNNER_TAGS` | comma-separated capabilities, e.g. `gpu,linux` |
 | `--token` | `RUNNER_TOKEN` | runner auth token (required when the server runs `RUNNER_AUTH=on`) |
+| `--concurrency` | `RUNNER_CONCURRENCY` | jobs run in parallel; the Runners page counts capacity in these slots |
+| `--pool` | `RUNNER_POOL` | autoscaled pool the runner belongs to (shown and grouped on the Runners page); docker pools set it, set it in your Deployment/VM template for others |
 
 ## Runner authentication
 
@@ -158,6 +160,7 @@ Deployment:
            - {name: SERVER_URL, value: "http://forge-server.ci.svc:8080"}
            - {name: EXECUTOR, value: "shell"}
            - {name: RUNNER_TAGS, value: "k8s,linux"}
+           - {name: RUNNER_POOL, value: "k8s-pool"}   # optional: the pool, if autoscaled
            - name: RUNNER_ID
              valueFrom: {fieldRef: {fieldPath: metadata.name}}
    ```
@@ -240,6 +243,13 @@ The Runners page charts busy slots, jobs started, queue-wait p50/p95 and
 job-duration p50/p95 over 24h / 7 days / 30 days, per runner or overall,
 with click-through to the jobs behind a point — see
 [observability.md](observability.md).
+
+Capacity and queue depth are snapshotted once a minute (kept 62 days), so
+the Capacity and Queue tiles and the Utilisation chart show them over the
+range and against the previous period; utilisation uses the recorded
+available slot-time once snapshots cover the range. A runner not seen for
+`RUNNER_STALE_AFTER` (server env, default `24h`) is stale: left out of
+capacity and tag counts, and an admin can remove it.
 
 ## Drain, upgrade, lost jobs, maintenance mode
 

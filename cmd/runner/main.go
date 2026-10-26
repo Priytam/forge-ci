@@ -79,6 +79,7 @@ func main() {
 		tagsFlag = flag.String("tags", envOr("RUNNER_TAGS", ""), "comma-separated runner tags (jobs route by tag)")
 		token    = flag.String("token", envOr("RUNNER_TOKEN", ""), "runner auth token (required when the server runs RUNNER_AUTH=on)")
 		conc     = flag.Int("concurrency", concFromEnv(), "jobs to run in parallel (each forks its own executor)")
+		poolName = flag.String("pool", envOr("RUNNER_POOL", os.Getenv("FORGE_POOL")), "autoscaled pool this runner belongs to (shown on the Runners page)")
 		showVer  = flag.Bool("version", false, "print the runner version and exit")
 	)
 	flag.Parse()
@@ -139,7 +140,7 @@ func main() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			req := proto.AcquireRequest{RunnerID: *runnerID, Executor: exec.Name(), Tags: tags, Version: buildinfo.Version, Concurrency: *conc}
+			req := proto.AcquireRequest{RunnerID: *runnerID, Executor: exec.Name(), Tags: tags, Version: buildinfo.Version, Concurrency: *conc, Pool: *poolName}
 			for drainCtx.Err() == nil {
 				job, action, err := acquire(drainCtx, c, req)
 				if err != nil {

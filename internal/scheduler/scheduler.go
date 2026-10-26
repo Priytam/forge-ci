@@ -29,6 +29,7 @@ type Scheduler struct {
 	tick          time.Duration
 	staleAfter    time.Duration
 	lastRollup    time.Time
+	lastSnapshot  time.Time     // capacity snapshot, once a minute
 	gcEvery       time.Duration // retention GC cadence
 	archiveEvery  time.Duration // log-archive safety-net sweep cadence
 	scheduleEvery time.Duration // cron-schedule fire-check cadence
@@ -335,8 +336,18 @@ func (sc *Scheduler) step(ctx context.Context) {
 			if err == nil {
 				_, _ = sc.store.PruneWebhookLog(ctx, 30*24*time.Hour)
 				_ = sc.store.PruneRollups(ctx, 400*24*time.Hour)
+				_ = sc.store.PruneCapacitySnapshots(ctx)
 			}
 			return int64(n), err
+		}},
+		{"capacity_snapshot", func(ctx context.Context) (int64, error) {
+			// One row a minute, idempotent across servers.
+			if time.Since(sc.lastSnapshot) < time.Minute {
+				return 0, nil
+			}
+			sc.lastSnapshot = time.Now()
+			_, err := sc.store.RecordCapacitySnapshot(ctx)
+			return 0, err
 		}},
 		{"runner_rollout", func(ctx context.Context) (int64, error) {
 			_, err := sc.store.AdvanceRollout(ctx, sc.staleAfter)

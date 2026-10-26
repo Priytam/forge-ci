@@ -28,9 +28,12 @@ import {
   buildViews,
   capacity,
   fleetUtilisation,
+  groupViews,
+  snapshotUtilisation,
   stateCounts,
   STATE_LABEL,
   STATES,
+  type GroupBy,
   type RunnerAction,
   type RunnerState,
   type RunnerView,
@@ -47,7 +50,6 @@ import { useElementWidth } from "../hooks/useElementWidth";
 import { useStoredState } from "../hooks/useStoredState";
 import { duration } from "../components/charts/scale";
 
-type GroupBy = "none" | "tag" | "executor";
 type Density = "compact" | "comfortable";
 
 const ACTION_VERB: Record<RunnerAction, { title: string; button: string; done: string; danger?: boolean }> = {
@@ -165,13 +167,20 @@ function RunnersPage() {
       buckets: history?.buckets ?? null,
       summary: history?.summary ?? null,
       prev,
-      utilisation: history ? fleetUtilisation(scoped, history.summary.busy_seconds, span.from, span.to) : null,
-      prevUtilisation: prev ? fleetUtilisation(scoped, prev.busy_seconds, pspan.from, pspan.to) : null,
+      // Snapshots are fleet-wide: the true denominator unless one runner is picked.
+      utilisation: history
+        ? (filter.runner ? null : snapshotUtilisation(history.summary, (span.to - span.from) / 1000)) ??
+          fleetUtilisation(scoped, history.summary.busy_seconds, span.from, span.to)
+        : null,
+      prevUtilisation: prev
+        ? (filter.runner ? null : snapshotUtilisation(prev, (pspan.to - pspan.from) / 1000)) ?? fleetUtilisation(scoped, prev.busy_seconds, pspan.from, pspan.to)
+        : null,
+      fleet: !filter.runner,
     };
   }, [runners, cap, counts, load, history, prev, filter.runner, span.from, span.to]);
 
   // ---- table: filter, sort, group ----
-  const [groupBy, setGroupBy] = useStoredState<GroupBy>("forge.runners.group", "none", ["none", "tag", "executor"]);
+  const [groupBy, setGroupBy] = useStoredState<GroupBy>("forge.runners.group", "none", ["none", "tag", "executor", "pool"]);
   const [density, setDensity] = useStoredState<Density>("forge.runners.density", "compact", ["compact", "comfortable"]);
   const [historyOpen, setHistoryOpen] = useStoredState<"open" | "closed">("forge.runners.history", "open", ["open", "closed"]);
   const [sort, setSort] = useState<SortState>({ key: "state", dir: 1 });
@@ -179,36 +188,32 @@ function RunnersPage() {
     const col = RUNNER_COLUMNS.find((c) => c.key === sort.key);
     let rows = views.filter((v) => (!stateF || v.state === stateF) && (!runnerF || v.id === runnerF));
     if (col?.sort) rows = [...rows].sort((a, b) => col.sort!(a, b) * sort.dir || a.id.localeCompare(b.id));
-    if (groupBy === "none") return [{ key: "all", views: rows }];
-    const by = new Map<string, RunnerView[]>();
-    for (const v of rows) {
-      const keys = groupBy === "tag" ? (v.runner.tags?.length ? v.runner.tags : ["(no tags)"]) : [v.runner.executor];
-      for (const k of keys) by.set(k, [...(by.get(k) ?? []), v]);
-    }
-    return [...by.entries()]
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([k, vs]) => {
-        const t = cap.byTag.find((x) => x.tag === k);
-        return {
-          key: k,
-          views: vs,
-          label: (
-            <>
-              <span className="mono">{k}</span>
-              <span className="muted">
+    return groupViews(rows, groupBy, cap).map((g) => {
+      if (groupBy === "none") return g;
+      // Tag groups use the tag's capacity; other groups count their members' slots.
+      const live = g.views.filter((v) => !v.stale);
+      const total = g.tag?.total ?? live.reduce((n, v) => n + v.slots, 0);
+      const available = g.tag?.available ?? live.filter((v) => v.state === "online" || v.state === "busy").reduce((n, v) => n + v.slots, 0);
+      return {
+        ...g,
+        label: (
+          <>
+            <span className="mono">{g.key}</span>
+            {g.inferred && (
+              <span className="muted" title="These runners don't report a pool; their tags match exactly one pool's">
                 {" "}
-                · {vs.length} runner{vs.length === 1 ? "" : "s"}
-                {t && (
-                  <>
-                    {" "}
-                    · <span className={t.available === 0 ? "text-danger" : ""}>{t.available}</span> / {t.total} slots available
-                  </>
-                )}
+                (by tags)
               </span>
-            </>
-          ),
-        };
-      });
+            )}
+            <span className="muted">
+              {" "}
+              · {g.views.length} runner{g.views.length === 1 ? "" : "s"} · <span className={available === 0 && total > 0 ? "text-danger" : ""}>{available}</span> / {total} slots
+              available
+            </span>
+          </>
+        ),
+      };
+    });
   }, [views, stateF, runnerF, sort, groupBy, cap]);
   const flat = useMemo(() => groups.flatMap((g) => g.views.map((v) => ({ key: rowKey(g.key, v.id), view: v }))), [groups]);
 
@@ -393,6 +398,7 @@ function RunnersPage() {
             <select value={groupBy} onChange={(e) => setGroupBy(e.target.value as GroupBy)} aria-label="Group runners by">
               <option value="none">None</option>
               <option value="tag">Tag</option>
+              <option value="pool">Pool</option>
               <option value="executor">Executor</option>
             </select>
           </label>

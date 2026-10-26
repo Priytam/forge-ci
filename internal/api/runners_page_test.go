@@ -366,3 +366,141 @@ func TestRunnerStreamSendsSnapshots(t *testing.T) {
 		t.Errorf("load range = %v, want 7d", span)
 	}
 }
+
+// TestRunnerPools: a runner's pool is the one it reports (RUNNER_POOL, set by
+// the docker provider), else the single pool whose tags equal its tags —
+// the autoscaler's own rule; a tag subset or two matching pools is no pool.
+func TestRunnerPools(t *testing.T) {
+	h := newEnforcedHarness(t)
+	ctx := context.Background()
+	admin := h.login("admin@acme.io")
+	for _, p := range []struct {
+		name string
+		tags []string
+	}{{"k8s-pool", []string{"k8s", "linux"}}, {"gpu-a", []string{"gpu"}}, {"gpu-b", []string{"gpu"}}} {
+		if _, err := h.db.Exec(ctx, `INSERT INTO runner_pools (name, provider, tags) VALUES ($1, 'exec', $2)`, p.name, p.tags); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, r := range []proto.AcquireRequest{
+		{RunnerID: "forge-builders-1", Executor: "docker", Tags: []string{"docker"}, Pool: "builders"},
+		{RunnerID: "gke-1", Executor: "kubernetes", Tags: []string{"linux", "k8s"}},
+		{RunnerID: "k8s-only", Executor: "kubernetes", Tags: []string{"k8s"}},
+		{RunnerID: "gpu-1", Executor: "shell", Tags: []string{"gpu"}},
+		{RunnerID: "lonely", Executor: "shell"},
+	} {
+		_ = acquireWith(t, h.srv, r)
+	}
+	list := listRunnersAs(t, h, admin)
+	for id, want := range map[string]struct {
+		pool     string
+		inferred bool
+	}{
+		"forge-builders-1": {"builders", false},
+		"gke-1":            {"k8s-pool", true},
+		"k8s-only":         {"", false},
+		"gpu-1":            {"", false}, // two pools match: ambiguous
+		"lonely":           {"", false},
+	} {
+		if r := list[id]; r.Pool != want.pool || r.PoolInferred != want.inferred {
+			t.Errorf("%s: pool %q inferred %v, want %q %v", id, r.Pool, r.PoolInferred, want.pool, want.inferred)
+		}
+	}
+	// A runner that stops reporting a pool falls back to inference.
+	_ = acquireWith(t, h.srv, proto.AcquireRequest{RunnerID: "forge-builders-1", Executor: "docker", Tags: []string{"k8s", "linux"}})
+	if r := listRunnersAs(t, h, admin)["forge-builders-1"]; r.Pool != "k8s-pool" || !r.PoolInferred {
+		t.Errorf("after dropping RUNNER_POOL: %+v", r)
+	}
+}
+
+// TestCapacitySnapshots: the per-minute snapshot counts slots by state like
+// the page does, is written once a minute, and feeds the history buckets and
+// summary (null where no snapshot fell).
+func TestCapacitySnapshots(t *testing.T) {
+	h := newEnforcedHarness(t)
+	ctx := context.Background()
+	for _, r := range []proto.AcquireRequest{
+		{RunnerID: "busy", Executor: "kubernetes", Tags: []string{"docker"}, Concurrency: 4},
+		{RunnerID: "paused", Executor: "docker", Tags: []string{"docker"}},
+		{RunnerID: "draining", Executor: "docker", Tags: []string{"docker", "staging"}},
+		{RunnerID: "gone", Executor: "shell", Tags: []string{"gpu"}},
+		{RunnerID: "dead", Executor: "shell", Tags: []string{"old"}},
+	} {
+		_ = acquireWith(t, h.srv, r)
+	}
+	_, _ = h.db.Exec(ctx, `UPDATE runners SET paused = true WHERE id = 'paused'`)
+	_, _ = h.db.Exec(ctx, `UPDATE runners SET draining = true WHERE id = 'draining'`)
+	_, _ = h.db.Exec(ctx, `UPDATE runners SET last_contact_at = now() - interval '1 hour' WHERE id = 'gone'`)
+	_, _ = h.db.Exec(ctx, `UPDATE runners SET last_contact_at = now() - interval '3 days' WHERE id = 'dead'`)
+	yml := "stages: [b]\njobs:\n  a:\n    stage: b\n    script: [x]\n  w:\n    stage: b\n    tags: [gpu]\n    script: [x]\n"
+	jobs, _ := compiler.Compile(yml, "main", compiler.SourceAPI, nil)
+	p, _ := h.st.CreatePipeline(ctx, proto.CreatePipelineRequest{Repo: "acme/x", Ref: "main", SHA: "s", Config: yml}, jobs, nil, false, false)
+	_, _ = h.db.Exec(ctx, `UPDATE jobs SET status='running', runner_id='busy', started_at=now() WHERE pipeline_id=$1 AND name='a'`, p.ID)
+	// A trigger stamps queued_at on entering pending; backdate it after.
+	_, _ = h.db.Exec(ctx, `UPDATE jobs SET status='pending' WHERE pipeline_id=$1 AND name='w'`, p.ID)
+	_, _ = h.db.Exec(ctx, `UPDATE jobs SET queued_at=now() - interval '3 minutes' WHERE pipeline_id=$1 AND name='w'`, p.ID)
+
+	snap, err := h.st.CurrentCapacity(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := store.CapacitySnapshot{TotalSlots: 7, AvailableSlots: 4, BusySlots: 1, PausedSlots: 1, DrainingSlots: 1, OfflineSlots: 1, Pending: 1}
+	if snap.TotalSlots != want.TotalSlots || snap.AvailableSlots != want.AvailableSlots || snap.BusySlots != want.BusySlots ||
+		snap.PausedSlots != want.PausedSlots || snap.DrainingSlots != want.DrainingSlots || snap.OfflineSlots != want.OfflineSlots ||
+		snap.Pending != 1 || snap.OldestWait < 170 || strings.Join(snap.Starved, ",") != "gpu,staging" {
+		t.Errorf("snapshot = %+v", snap)
+	}
+	if ok, err := h.st.RecordCapacitySnapshot(ctx); !ok || err != nil {
+		t.Fatalf("first record = %v %v", ok, err)
+	}
+	if ok, _ := h.st.RecordCapacitySnapshot(ctx); ok {
+		t.Error("second record in the same minute wrote a row")
+	}
+
+	// Two hours of history four and five hours ago: 6 then 2 available slots.
+	base := time.Now().UTC().Add(-5 * time.Hour).Truncate(time.Hour)
+	_, _ = h.db.Exec(ctx, `INSERT INTO runner_capacity_snapshots (at, total_slots, available_slots, pending, oldest_wait_s)
+		SELECT $1::timestamptz + make_interval(mins => i), 8, CASE WHEN i < 60 THEN 6 ELSE 2 END, CASE WHEN i < 60 THEN 0 ELSE 5 END, CASE WHEN i < 60 THEN 0 ELSE 400 END
+		FROM generate_series(0, 119) i`, base)
+	rg, _ := store.ParseRange("24h", "", "", "", time.Now())
+	buckets, sum, err := h.st.RunnerHistory(ctx, rg, store.HistoryFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byAt := map[time.Time]store.HistoryBucket{}
+	for _, b := range buckets {
+		byAt[b.At] = b
+	}
+	first, second, empty := byAt[base], byAt[base.Add(time.Hour)], byAt[base.Add(2*time.Hour)]
+	if fv(first.CapacityAvailable) != 6 || fv(first.CapacityTotal) != 8 || *first.QueuePendingMax != 0 {
+		t.Errorf("first hour = %+v", first)
+	}
+	if fv(second.CapacityAvailable) != 2 || *second.QueuePendingMax != 5 || *second.QueueOldestMax != 400 {
+		t.Errorf("second hour = %+v", second)
+	}
+	if empty.CapacityAvailable != nil || empty.QueuePendingMax != nil {
+		t.Errorf("hour without snapshots = %+v (want null)", empty)
+	}
+	// 121 snapshots: 60 × 6 + 60 × 2 + 1 × 4 available.
+	if sum.SnapshotSeconds != 121*60 || sum.AvailableSlotSeconds != (60*6+60*2+4)*60 || *sum.QueuePendingMax != 5 || *sum.QueueOldestMax != 400 {
+		t.Errorf("summary = %+v", sum)
+	}
+	if got := fv(sum.CapacityAvailable); got < 3.99 || got > 4.01 {
+		t.Errorf("avg available = %v, want ~4", got)
+	}
+	rec := h.do(h.login("dev@acme.io"), "GET", "/api/v1/runner-history?range=24h", nil)
+	if !strings.Contains(rec.Body.String(), `"capacity_available":6`) || !strings.Contains(rec.Body.String(), `"capacity_available":null`) {
+		t.Errorf("history JSON lacks capacity: %.400s", rec.Body.String())
+	}
+}
+
+// TestRunnerStaleAfterIsConfigurable: RUNNER_STALE_AFTER moves the line.
+func TestRunnerStaleAfterIsConfigurable(t *testing.T) {
+	t.Setenv("RUNNER_STALE_AFTER", "1h")
+	h := newEnforcedHarness(t)
+	_ = acquireWith(t, h.srv, proto.AcquireRequest{RunnerID: "r", Executor: "shell"})
+	_, _ = h.db.Exec(context.Background(), `UPDATE runners SET last_contact_at = now() - interval '2 hours' WHERE id = 'r'`)
+	if r := listRunnersAs(t, h, h.login("admin@acme.io"))["r"]; !r.Stale {
+		t.Errorf("2h-old runner with RUNNER_STALE_AFTER=1h: %+v", r)
+	}
+}

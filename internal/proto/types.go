@@ -284,6 +284,10 @@ type Runner struct {
 	// left out of capacity and tag counts, and removable.
 	Concurrency int  `json:"concurrency"`
 	Stale       bool `json:"stale"`
+	// Pool: the pool the runner reported, or — PoolInferred — the one pool
+	// whose tags equal the runner's (how the autoscaler counts its runners).
+	Pool         string `json:"pool,omitempty"`
+	PoolInferred bool   `json:"pool_inferred,omitempty"`
 }
 
 // ArtifactInfo is artifact metadata for list/download endpoints.
@@ -375,6 +379,8 @@ type AcquireRequest struct {
 	// Concurrency is how many jobs the runner runs in parallel (its slots);
 	// older runners omit it and count as 1.
 	Concurrency int `json:"concurrency,omitempty"`
+	// Pool is the autoscaled pool that launched the runner (RUNNER_POOL), if any.
+	Pool string `json:"pool,omitempty"`
 }
 
 type CompleteRequest struct {

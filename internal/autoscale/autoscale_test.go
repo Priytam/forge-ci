@@ -172,7 +172,8 @@ func TestDockerProviderStartsAndStopsRunners(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(fd.created) != 2 || !strings.Contains(fd.created[0], "RUNNER_TAGS=linux,docker") || !strings.Contains(fd.created[0], "RUNNER_TOKEN=frt_x") ||
-		!strings.Contains(fd.created[0], "RUNNER_DRAIN_GRACE=5m") || !strings.Contains(fd.created[0], "RUNNER_ID=forge-build-") {
+		!strings.Contains(fd.created[0], "RUNNER_DRAIN_GRACE=5m") || !strings.Contains(fd.created[0], "RUNNER_ID=forge-build-") ||
+		!strings.Contains(fd.created[0], "RUNNER_POOL=build") {
 		t.Errorf("created = %v", fd.created)
 	}
 	if n, _ := prov.Current(context.Background(), p); n != 4 {

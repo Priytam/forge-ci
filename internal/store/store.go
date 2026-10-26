@@ -52,6 +52,7 @@ type Store struct {
 	defaultJobTimeout time.Duration // DEFAULT_JOB_TIMEOUT, jobs without timeout:
 	maxJobTimeout     time.Duration // MAX_JOB_TIMEOUT, hard cap on job values
 	queueTimeout      time.Duration // QUEUE_TIMEOUT, max time in pending
+	runnerStaleAfter  time.Duration // RUNNER_STALE_AFTER: unseen this long → stale (not in capacity, removable)
 }
 
 func envDuration(key string, fallback time.Duration) time.Duration {
@@ -120,6 +121,7 @@ func New(ctx context.Context, dsn string) (*Store, error) {
 		affinityWait:      envDuration("RUNNER_AFFINITY_WAIT", time.Minute),
 		maxJobTimeout:     envDuration("MAX_JOB_TIMEOUT", 4*time.Hour),
 		queueTimeout:      envDuration("QUEUE_TIMEOUT", 24*time.Hour),
+		runnerStaleAfter:  envDuration("RUNNER_STALE_AFTER", defaultStaleAfter),
 	}
 	if err := s.initSecrets(ctx); err != nil {
 		return nil, err
@@ -1236,7 +1238,7 @@ func capCommitMessage(msg string) string {
 // protected refs and environment scope) overlaid by job-level YAML variables.
 // Returns (nil, nil) when the queue is empty.
 func (s *Store) AcquireJob(ctx context.Context, req proto.AcquireRequest) (*proto.RunnerJob, error) {
-	state, err := s.TouchRunnerV(ctx, req.RunnerID, req.Executor, req.Tags, req.Version, req.Concurrency)
+	state, err := s.TouchRunnerV(ctx, req)
 	if err != nil {
 		return nil, err
 	}

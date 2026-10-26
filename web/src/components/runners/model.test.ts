@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { actionImpact, buildViews, capacity, fleetUtilisation, runnerState, stateCounts } from "./model";
+import { actionImpact, buildViews, capacity, fleetUtilisation, groupViews, runnerState, snapshotUtilisation, stateCounts } from "./model";
 import { FLEET, loadFor, NOW, runner } from "./fixtures";
 
 describe("runnerState", () => {
@@ -73,5 +73,47 @@ describe("actionImpact", () => {
   it("removal keeps history", () => {
     const stale = views.find((v) => v.id === "gce-runner-dev")!;
     expect(actionImpact(stale, views, "remove").text).toMatch(/history stay/);
+  });
+});
+
+describe("groupViews", () => {
+  const fleet = [
+    runner({ id: "forge-b-1", pool: "builders" }),
+    runner({ id: "forge-b-2", pool: "builders" }),
+    runner({ id: "gke-1", tags: ["k8s", "linux"], pool: "k8s-pool", pool_inferred: true }),
+    runner({ id: "mac", tags: ["macos"] }),
+  ];
+  const views = buildViews(fleet, loadFor(fleet));
+  const cap = capacity(views);
+  it("groups by pool, pool-less runners last, marks inferred pools", () => {
+    const g = groupViews(views, "pool", cap);
+    expect(g.map((x) => [x.key, x.views.map((v) => v.id), x.inferred])).toEqual([
+      ["builders", ["forge-b-1", "forge-b-2"], false],
+      ["k8s-pool", ["gke-1"], true],
+      ["(not in a pool)", ["mac"], undefined],
+    ]);
+  });
+  it("by tag puts a runner in each of its tags, with the tag's capacity", () => {
+    const g = groupViews(views, "tag", cap);
+    expect(g.find((x) => x.key === "linux")!.views.map((v) => v.id)).toEqual(["gke-1"]);
+    expect(g.find((x) => x.key === "docker")!.tag).toMatchObject({ total: 2, available: 2 });
+  });
+  it("none is one group", () => {
+    expect(groupViews(views, "none", cap)).toEqual([{ key: "all", views }]);
+  });
+});
+
+describe("snapshotUtilisation", () => {
+  const day = 86400;
+  it("uses recorded available slot-time when snapshots cover the range", () => {
+    expect(snapshotUtilisation({ busy_seconds: 4 * 3600 * 6, available_slot_seconds: 4 * day, snapshot_seconds: day }, day)).toBeCloseTo(0.25);
+  });
+  it("scales to the range when coverage is partial but high", () => {
+    // 95% covered: the missing 5% is assumed like the rest.
+    expect(snapshotUtilisation({ busy_seconds: day, available_slot_seconds: 0.95 * day * 4, snapshot_seconds: 0.95 * day }, day)).toBeCloseTo(0.25);
+  });
+  it("is null (use the estimate) when snapshots are too sparse", () => {
+    expect(snapshotUtilisation({ busy_seconds: 100, available_slot_seconds: 1000, snapshot_seconds: 0.5 * day }, day)).toBeNull();
+    expect(snapshotUtilisation(null, day)).toBeNull();
   });
 });

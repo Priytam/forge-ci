@@ -67,6 +67,7 @@ export default function HistoryPanel({
       to: Date.parse(history.range.to),
       noData: nd,
       busy: b.map((x, i) => gap(i, x.busy_slots)),
+      available: b.map((x) => x.capacity_available),
       ok: b.map((x, i) => gap(i, x.jobs_started - x.failed)),
       failed: b.map((x, i) => gap(i, x.failed)),
       w50: b.map((x) => x.wait_p50),
@@ -98,6 +99,7 @@ export default function HistoryPanel({
     );
   }
   const h = compactCharts ? 120 : 160;
+  const capacityHistory = !filter.runner && d.available.some((v) => v != null);
   const common = {
     times: d.times,
     bucketMs: d.bucketMs,
@@ -130,8 +132,12 @@ export default function HistoryPanel({
           title="Utilisation"
           unitLabel="busy slots"
           unit="slots"
-          series={[{ key: "busy", name: "busy slots", kind: "area", color: C.busy, values: d.busy, format: (v) => compact(v, 2) }]}
-          refLines={capacity != null && capacity > 0 ? [{ value: capacity, label: `capacity now (${capacity})`, color: C.capacity }] : []}
+          series={[
+            { key: "busy", name: "busy slots", kind: "area", color: C.busy, values: d.busy, format: (v) => compact(v, 2) },
+            // Recorded capacity (fleet-wide) where snapshots exist; else today's as a line.
+            ...(capacityHistory ? [{ key: "cap", name: "available slots", kind: "step" as const, color: C.capacity, dashed: true, values: d.available, format: (v: number) => compact(v, 1) }] : []),
+          ]}
+          refLines={!capacityHistory && capacity != null && capacity > 0 ? [{ value: capacity, label: `capacity now (${capacity})`, color: C.capacity }] : []}
         />
         <TimeChart
           {...common}

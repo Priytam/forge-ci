@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/priytamjeepandey/forge-ci/internal/proto"
 )
 
 // Runner operations: drain / resume, version tracking, self-update requests
@@ -19,28 +21,30 @@ type RunnerState struct {
 	UpdateRequested bool
 }
 
-// TouchRunnerV records a runner's contact (with its version and job slots)
-// and returns its state. A runner that reconnects with the version it was
-// asked to update to has its update request cleared.
-func (s *Store) TouchRunnerV(ctx context.Context, id, executor string, tags []string, version string, concurrency int) (RunnerState, error) {
+// TouchRunnerV records a runner's contact (with its version, job slots and
+// pool) and returns its state. A runner that reconnects with the version it
+// was asked to update to has its update request cleared.
+func (s *Store) TouchRunnerV(ctx context.Context, req proto.AcquireRequest) (RunnerState, error) {
+	tags := req.Tags
 	if tags == nil {
 		tags = []string{}
 	}
+	concurrency := req.Concurrency
 	if concurrency < 1 {
 		concurrency = 1
 	}
 	var st RunnerState
 	err := s.pool.QueryRow(ctx,
-		`INSERT INTO runners (id, executor, tags, version, concurrency)
-		 VALUES ($1,$2,$3,$4,$5)
+		`INSERT INTO runners (id, executor, tags, version, concurrency, pool)
+		 VALUES ($1,$2,$3,$4,$5,$6)
 		 ON CONFLICT (id) DO UPDATE
 		   SET last_contact_at = now(), executor = EXCLUDED.executor, tags = EXCLUDED.tags,
-		       version = EXCLUDED.version, concurrency = EXCLUDED.concurrency,
+		       version = EXCLUDED.version, concurrency = EXCLUDED.concurrency, pool = EXCLUDED.pool,
 		       update_requested_at = CASE WHEN runners.update_requested_at IS NOT NULL AND runners.version <> EXCLUDED.version
 		                                  AND EXCLUDED.version <> '' THEN NULL ELSE runners.update_requested_at END,
 		       draining = CASE WHEN runners.update_requested_at IS NOT NULL AND runners.version <> EXCLUDED.version
 		                       AND EXCLUDED.version <> '' THEN FALSE ELSE runners.draining END
-		 RETURNING paused, draining, update_requested_at IS NOT NULL`, id, executor, tags, version, concurrency).
+		 RETURNING paused, draining, update_requested_at IS NOT NULL`, req.RunnerID, req.Executor, tags, req.Version, concurrency, req.Pool).
 		Scan(&st.Paused, &st.Draining, &st.UpdateRequested)
 	return st, err
 }

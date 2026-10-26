@@ -181,6 +181,7 @@ func startRunner(ctx context.Context, cli *dockerClient, p Pool, i int) error {
 		"RUNNER_ID=" + name,
 		"EXECUTOR=" + p.Settings.get("executor", "docker"),
 		"RUNNER_TAGS=" + strings.Join(p.Tags, ","),
+		"RUNNER_POOL=" + p.Name,
 	}
 	if u := p.Settings.get("server_url", ""); u != "" {
 		env = append(env, "SERVER_URL="+u)

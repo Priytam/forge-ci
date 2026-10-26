@@ -25,6 +25,7 @@ export default function AddRunnerDrawer({ isAdmin, onClose }: { isAdmin: boolean
   const [exec, setExec] = useState<Executor>("docker");
   const [tags, setTags] = useState("");
   const [conc, setConc] = useState(4);
+  const [pool, setPool] = useState("");
   const cleanTags = tags
     .split(",")
     .map((t) => t.trim())
@@ -36,6 +37,7 @@ export default function AddRunnerDrawer({ isAdmin, onClose }: { isAdmin: boolean
     `--executor=${exec}`,
     cleanTags && `--tags=${cleanTags}`,
     exec === "kubernetes" && `--concurrency=${conc}`,
+    pool.trim() && `--pool=${pool.trim()}`,
     "--token=$RUNNER_TOKEN",
   ]
     .filter(Boolean)
@@ -65,6 +67,10 @@ export default function AddRunnerDrawer({ isAdmin, onClose }: { isAdmin: boolean
         <label className="field">
           <span>Tags (comma-separated)</span>
           <input className="mono" placeholder="linux, docker" value={tags} onChange={(e) => setTags(e.target.value)} />
+        </label>
+        <label className="field">
+          <span>Pool (optional)</span>
+          <input className="mono" placeholder="the autoscaled pool it belongs to" value={pool} onChange={(e) => setPool(e.target.value)} />
         </label>
         {exec === "kubernetes" && (
           <label className="field">
