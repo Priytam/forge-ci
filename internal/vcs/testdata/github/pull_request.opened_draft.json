@@ -1,0 +1,23 @@
+{
+  "action": "opened",
+  "number": 43,
+  "pull_request": {
+    "html_url": "https://github.com/Letztrip/cos/pull/43",
+    "number": 43,
+    "state": "open",
+    "title": "WIP: refund on authorized",
+    "user": {"login": "priytam-travafa"},
+    "body": null,
+    "created_at": "2026-10-22T08:00:00Z",
+    "updated_at": "2026-10-22T08:00:00Z",
+    "closed_at": null,
+    "merged_at": null,
+    "labels": [],
+    "draft": true,
+    "head": {"ref": "fix/refund-authorized", "sha": "0102030405060708090a0b0c0d0e0f1011121314"},
+    "base": {"ref": "main", "sha": "aabbccddeeff00112233445566778899aabbccdd"},
+    "merged": false
+  },
+  "repository": {"full_name": "Letztrip/cos"},
+  "sender": {"login": "priytam-travafa"}
+}

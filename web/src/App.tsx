@@ -26,6 +26,8 @@ import TemplateCatalog from "./pages/TemplateCatalog";
 import AdminAbout from "./pages/AdminAbout";
 import Environments from "./pages/Environments";
 import TestHistory from "./pages/TestHistory";
+import Changes from "./pages/Changes";
+import ChangeDetail from "./pages/ChangeDetail";
 import Shell from "./components/Shell";
 
 /** Sign-in renders bare; every other page sits inside the app shell. */
@@ -61,6 +63,8 @@ export default function App() {
           <Route path="/admin/audit" element={<AdminAudit />} />
           <Route path="/admin/about" element={<AdminAbout />} />
           <Route path="/admin/runner-tokens" element={<AdminRunnerTokens />} />
+          <Route path="/changes" element={<Changes />} />
+          <Route path="/changes/:id" element={<ChangeDetail />} />
           <Route path="/pipelines" element={<AllPipelines />} />
           <Route path="/jobs" element={<Jobs />} />
           <Route path="/environments" element={<EnvironmentBoard />} />

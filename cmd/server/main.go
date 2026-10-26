@@ -16,6 +16,7 @@ import (
 	"github.com/priytamjeepandey/forge-ci/internal/autoscale"
 	"github.com/priytamjeepandey/forge-ci/internal/blob"
 	"github.com/priytamjeepandey/forge-ci/internal/logstore"
+	"github.com/priytamjeepandey/forge-ci/internal/review"
 	"github.com/priytamjeepandey/forge-ci/internal/scheduler"
 	"github.com/priytamjeepandey/forge-ci/internal/store"
 )
@@ -60,6 +61,7 @@ func main() {
 
 	go scheduler.New(st, blobs, logs).Run(ctx)
 	go autoscale.Loop(ctx, st) // runner pools (no-op until one is configured)
+	go review.Loop(ctx, st)    // code review: change refreshes + conditional reconcile
 
 	srv := &http.Server{Addr: addr, Handler: api.New(st, blobs, logs)}
 	go func() {

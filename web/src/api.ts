@@ -2114,3 +2114,147 @@ export function startRollout(): Promise<Rollout> {
 export function stopRollout(): Promise<void> {
   return requestVoid("DELETE", "/runners/rollout");
 }
+
+// ---- code review (batch 7) ----
+
+/** What a change's host supports natively; Forge provides the rest. The UI
+ *  branches on these, never on the provider's name. */
+export interface Capabilities {
+  changes: boolean;
+  native_changes: boolean;
+  threads: boolean;
+  suggestions: boolean;
+  resolve: boolean;
+  drafts: boolean;
+  merge_methods: string[];
+}
+
+/** One pull/merge request, from any host (an inbox row). */
+export interface Change {
+  id: number;
+  repo: string;
+  provider: string;
+  /** the host's per-repo number (Forge's own for native changes) */
+  number: string;
+  title: string;
+  author: string;
+  source_branch: string;
+  target_branch: string;
+  state: "open" | "merged" | "closed";
+  draft: boolean;
+  head_sha: string;
+  base_sha: string;
+  labels: string[];
+  /** the change on the host's web UI; absent when the host has none */
+  url?: string;
+  created_at?: string;
+  updated_at?: string;
+  synced_at?: string;
+  revisions: number;
+  /** reviewers whose latest decisive verdict is approve */
+  approvals: number;
+  changes_requested: number;
+  /** newest Forge pipeline on the head commit */
+  pipeline_id?: number;
+  pipeline_status?: string;
+}
+
+export interface ChangeRevision {
+  number: number;
+  head_sha: string;
+  base_sha: string;
+  pushed_at: string;
+}
+
+export interface ChangeReview {
+  id: number;
+  source: "host" | "forge";
+  reviewer: string;
+  verdict: "approve" | "request_changes" | "comment" | "dismissed";
+  body: string;
+  commit_sha?: string;
+  submitted_at: string;
+}
+
+export interface ChangeDetail extends Change {
+  body: string;
+  refresh_error?: string;
+  revision_list: ChangeRevision[];
+  reviews: ChangeReview[];
+}
+
+export interface ChangeFilter {
+  state?: string;
+  repo?: string;
+  q?: string;
+}
+
+/** The inbox: open changes across every repo and host (Postgres only — no
+ *  provider is called to render it). */
+export async function listChanges(f: ChangeFilter = {}): Promise<{ changes: Change[]; total: number }> {
+  const qs = new URLSearchParams();
+  if (f.state) qs.set("state", f.state);
+  if (f.repo) qs.set("repo", f.repo);
+  if (f.q) qs.set("q", f.q);
+  qs.set("limit", "200");
+  const res = await fetch(`${BASE}/changes?${qs}`, { headers: { Accept: "application/json" } });
+  if (!res.ok) throw await parseError(res);
+  return { changes: (await res.json()) as Change[], total: Number(res.headers.get("X-Total-Count") ?? 0) };
+}
+
+export function getChange(id: number | string): Promise<{ change: ChangeDetail; capabilities: Capabilities }> {
+  return getJSON(`/changes/${id}`);
+}
+
+export interface ProviderCallCount {
+  provider: string;
+  class: string;
+  result: string;
+  read_path: boolean;
+  calls: number;
+}
+
+export interface ProviderBudget {
+  credential: string;
+  provider: string;
+  capacity: number;
+  remaining: number;
+  reset_at?: string;
+}
+
+export interface CodeReviewStats {
+  window_hours: number;
+  calls: ProviderCallCount[];
+  total_calls: number;
+  not_modified: number;
+  not_modified_ratio: number;
+  /** provider calls attempted while serving a page — must be 0 */
+  read_path_calls: number;
+  open_changes: number;
+  calls_per_open_change: number;
+  budgets: ProviderBudget[];
+  refresh_backlog: number;
+  oldest_refresh_seconds: number;
+}
+
+export function getCodeReviewStats(): Promise<CodeReviewStats> {
+  return getJSON("/code-review/metrics");
+}
+
+/**
+ * Live change updates over SSE: onChange(id) fires once per changed change,
+ * so a page refetches only what moved (the server answers 304 when it did
+ * not). Returns the unsubscribe function.
+ */
+export function subscribeChanges(onChange: (id: number) => void): () => void {
+  if (typeof EventSource === "undefined") return () => undefined;
+  const es = new EventSource(`${BASE}/changes/stream`);
+  es.addEventListener("change", (e) => {
+    try {
+      onChange(Number(JSON.parse((e as MessageEvent).data).id));
+    } catch {
+      // a malformed frame is skipped; the next one refreshes the page
+    }
+  });
+  return () => es.close();
+}
