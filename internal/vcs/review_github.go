@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,7 +20,7 @@ import (
 func (githubProvider) Capabilities() Capabilities {
 	return Capabilities{
 		Changes: true, Threads: true, Suggestions: true, Resolve: true, Drafts: true,
-		MergeMethods: []string{"merge", "squash", "rebase"},
+		MergeMethods: []string{"merge", "squash", "rebase"}, StatusChecks: true,
 	}
 }
 
@@ -315,4 +316,83 @@ func (githubProvider) ListOpenChanges(ctx context.Context, c *ChangeClient, repo
 		next = nextLink(resp.Header)
 	}
 	return refs, got, true, nil
+}
+
+// PublishCheck sets the forge/merge-gate commit status on sha. Statuses are
+// keyed by context, so re-sending the same result is harmless.
+func (githubProvider) PublishCheck(ctx context.Context, c *ChangeClient, repo RepoRef, sha string, res CheckResult) error {
+	owner, name, ok := splitRepo(repo.Repo)
+	if !ok {
+		return fmt.Errorf("invalid repo %q (want owner/name)", repo.Repo)
+	}
+	desc := res.Description
+	if len(desc) > 140 {
+		desc = desc[:137] + "..."
+	}
+	body, _ := json.Marshal(map[string]string{
+		"state": res.State, "context": GateContext, "description": desc, "target_url": res.TargetURL,
+	})
+	req, err := http.NewRequest(http.MethodPost,
+		fmt.Sprintf("%s/repos/%s/%s/statuses/%s", c.githubBase, owner, name, sha), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/vnd.github+json")
+	for k, v := range bearer(repo.Token) {
+		req.Header.Set(k, v)
+	}
+	resp, err := c.do(ctx, "github", req)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	return nil
+}
+
+// Merge merges the pull request only if its head is still ExpectedHead
+// (GitHub answers 409 otherwise). 405 is GitHub's "not mergeable": conflicts,
+// branch protection, or a required check — its message says which.
+func (githubProvider) Merge(ctx context.Context, c *ChangeClient, repo RepoRef, id string, opts MergeOpts) (string, error) {
+	owner, name, ok := splitRepo(repo.Repo)
+	if !ok {
+		return "", fmt.Errorf("invalid repo %q (want owner/name)", repo.Repo)
+	}
+	method := opts.Method
+	if method == "" {
+		method = "merge"
+	}
+	body, _ := json.Marshal(map[string]string{"sha": opts.ExpectedHead, "merge_method": method})
+	req, err := http.NewRequest(http.MethodPut,
+		fmt.Sprintf("%s/repos/%s/%s/pulls/%s/merge", c.githubBase, owner, name, id), bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/vnd.github+json")
+	for k, v := range bearer(repo.Token) {
+		req.Header.Set(k, v)
+	}
+	resp, err := c.do(ctx, "github", req)
+	var se *StatusError
+	switch {
+	case errors.As(err, &se) && se.StatusCode == http.StatusConflict:
+		return "", fmt.Errorf("%w (%s)", ErrHeadMoved, se.Message)
+	case errors.As(err, &se) && se.StatusCode == http.StatusMethodNotAllowed:
+		return "", fmt.Errorf("%w: %s", ErrNotMergeable, se.Message)
+	case err != nil:
+		return "", err
+	}
+	defer resp.Body.Close()
+	var out struct {
+		SHA    string `json:"sha"`
+		Merged bool   `json:"merged"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil {
+		return "", fmt.Errorf("vcs: decode github merge: %w", err)
+	}
+	if !out.Merged {
+		return "", ErrNotMergeable
+	}
+	return out.SHA, nil
 }

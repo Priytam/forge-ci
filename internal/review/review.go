@@ -112,8 +112,9 @@ func Loop(ctx context.Context, st *store.Store) {
 	New(st).Run(ctx)
 }
 
-// Run drives refreshes every tick and reconciles every minute (each repo
-// only when its own schedule says so). The ticks read Postgres, not hosts.
+// Run drives refreshes, gate evaluations and queued writes every tick, and
+// reconciles every minute (each repo only when its own schedule says so).
+// The ticks read Postgres, not hosts.
 func (s *Service) Run(ctx context.Context) {
 	t := time.NewTicker(s.tick)
 	defer t.Stop()
@@ -127,6 +128,8 @@ func (s *Service) Run(ctx context.Context) {
 			return
 		case <-t.C:
 			s.RefreshDue(ctx)
+			s.EvaluateGates(ctx)
+			s.SendOutbox(ctx)
 		case <-first:
 			s.ReconcileAll(ctx)
 		case <-rec.C:

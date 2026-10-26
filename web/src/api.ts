@@ -2213,6 +2213,8 @@ export interface Capabilities {
   resolve: boolean;
   drafts: boolean;
   merge_methods: string[];
+  /** the host can show and require forge/merge-gate on a commit */
+  status_checks: boolean;
 }
 
 /** One pull/merge request, from any host (an inbox row). */
@@ -2243,6 +2245,9 @@ export interface Change {
   /** newest Forge pipeline on the head commit */
   pipeline_id?: number;
   pipeline_status?: string;
+  /** the merge gate on the head; absent when no merge rule applies */
+  gate_state?: "pass" | "pending" | "fail";
+  gate_summary?: string;
 }
 
 export interface ChangeRevision {
@@ -2288,8 +2293,123 @@ export async function listChanges(f: ChangeFilter = {}): Promise<{ changes: Chan
   return { changes: (await res.json()) as Change[], total: Number(res.headers.get("X-Total-Count") ?? 0) };
 }
 
-export function getChange(id: number | string): Promise<{ change: ChangeDetail; capabilities: Capabilities }> {
+export interface GateRule {
+  id: string;
+  label: string;
+  state: "pass" | "pending" | "fail";
+  detail: string;
+}
+
+export interface GateResult {
+  change_id: number;
+  head_sha: string;
+  policy_id?: number;
+  state: "pass" | "pending" | "fail";
+  summary: string;
+  rules: GateRule[];
+  evaluated_at: string;
+  /** what the host's forge/merge-gate shows ("" = not published yet) */
+  published_state: string;
+  published_at?: string;
+}
+
+/** A queued write to the host (gate publish, merge). */
+export interface ChangeAction {
+  id: number;
+  kind: "publish_gate" | "merge";
+  state: "pending" | "done" | "failed" | "superseded";
+  attempts: number;
+  next_attempt_at: string;
+  last_error?: string;
+  result?: Record<string, string>;
+  requested_by?: string;
+  created_at: string;
+  done_at?: string;
+}
+
+export interface ChangePage {
+  change: ChangeDetail;
+  capabilities: Capabilities;
+  gate: GateResult | null;
+  actions: ChangeAction[];
+  permissions: { can_review: boolean; can_merge: boolean };
+}
+
+export function getChange(id: number | string): Promise<ChangePage> {
   return getJSON(`/changes/${id}`);
+}
+
+/** Approve, request changes, or withdraw ("dismiss") your verdict. */
+export function reviewChange(
+  id: number,
+  verdict: "approve" | "request_changes" | "dismiss",
+  body = "",
+  reviewer?: string
+): Promise<{ reviewer: string; verdict: string }> {
+  return postJSON(`/changes/${id}/reviews`, { verdict, body, reviewer });
+}
+
+/** Queue a merge of exactly the head you reviewed. */
+export function mergeChange(id: number, expectedHead: string, method: string): Promise<{ action: ChangeAction }> {
+  return postJSON(`/changes/${id}/merge`, { expected_head: expectedHead, method });
+}
+
+export interface FreezeWindow {
+  start: string;
+  end: string;
+}
+
+export interface MergePolicy {
+  id?: number;
+  repo: string;
+  branch_pattern: string;
+  required_approvals: number;
+  approver_roles: string[];
+  required_group: string;
+  required_group_approvals: number;
+  allow_self_approval: boolean;
+  dismiss_on_push: boolean;
+  block_on_changes_requested: boolean;
+  require_ci: boolean;
+  required_jobs: string[];
+  required_labels: string[];
+  blocked_labels: string[];
+  ticket_pattern: string;
+  freeze_windows: FreezeWindow[];
+  timezone: string;
+  updated_by?: string;
+  updated_at?: string;
+}
+
+export function listMergePolicies(): Promise<MergePolicy[]> {
+  return getJSON("/merge-policies");
+}
+
+export function putMergePolicy(p: MergePolicy): Promise<MergePolicy> {
+  return putJSON("/merge-policies", p);
+}
+
+export function deleteMergePolicy(id: number): Promise<void> {
+  return requestVoid("DELETE", `/merge-policies/${id}`);
+}
+
+export interface HostIdentity {
+  provider: string;
+  login: string;
+  email: string;
+  created_at?: string;
+}
+
+export function listHostIdentities(): Promise<HostIdentity[]> {
+  return getJSON("/host-identities");
+}
+
+export function putHostIdentity(h: HostIdentity): Promise<void> {
+  return requestVoid("PUT", "/host-identities", h);
+}
+
+export function deleteHostIdentity(provider: string, login: string): Promise<void> {
+  return requestVoid("DELETE", `/host-identities/${encodeURIComponent(provider)}/${encodeURIComponent(login)}`);
 }
 
 export interface ProviderCallCount {
@@ -2321,6 +2441,9 @@ export interface CodeReviewStats {
   budgets: ProviderBudget[];
   refresh_backlog: number;
   oldest_refresh_seconds: number;
+  outbox_backlog: number;
+  oldest_outbox_seconds: number;
+  gates: { evaluations: number; blocked_by: Record<string, number> };
 }
 
 export function getCodeReviewStats(): Promise<CodeReviewStats> {

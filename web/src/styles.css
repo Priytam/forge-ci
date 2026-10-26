@@ -5698,3 +5698,31 @@ kbd {
   font: inherit;
   margin: 0;
 }
+
+/* Merge gate: one line per rule. */
+.gate-rules {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+}
+.gate-rule {
+  padding: 3px 0;
+}
+.gate-mark {
+  display: inline-block;
+  width: 1.2em;
+  font-weight: 600;
+}
+.gate-pass .gate-mark {
+  color: var(--success, #2da44e);
+}
+.gate-fail .gate-mark {
+  color: var(--danger, #cf222e);
+}
+.gate-actions {
+  margin-top: 12px;
+}
+.field-inline {
+  display: block;
+  margin: 6px 0;
+}

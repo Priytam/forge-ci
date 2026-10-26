@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { listChanges, relativeTime, type Change } from "../api";
 import StatusBadge from "../components/StatusBadge";
 import ChangeStateBadge from "../components/ChangeStateBadge";
+import GateBadge from "../components/GateBadge";
 import Avatar from "../components/Avatar";
 import { useChangeStream } from "../hooks/useChangeStream";
 
@@ -96,6 +97,7 @@ export default function Changes() {
             <thead>
               <tr>
                 <th style={{ width: 96 }}>CI</th>
+                <th style={{ width: 96 }}>Gate</th>
                 <th>Change</th>
                 <th>Repo</th>
                 <th>Branch</th>
@@ -107,6 +109,9 @@ export default function Changes() {
               {changes.map((c) => (
                 <tr key={c.id} className="row-link" onClick={() => navigate(`/changes/${c.id}`)}>
                   <td>{c.pipeline_status ? <StatusBadge status={c.pipeline_status} /> : <span className="muted">—</span>}</td>
+                  <td>
+                    <GateBadge change={c} />
+                  </td>
                   <td className="cell-title">
                     <span className="mono muted">#{c.number}</span> {c.title || <span className="muted">(untitled)</span>}{" "}
                     {(c.draft || c.state !== "open") && <ChangeStateBadge change={c} />}

@@ -32,6 +32,12 @@ type FakeGitHub struct {
 	reject   *rejection
 	requests int
 	delivery int
+	statuses map[string]map[string]fakeStatus // sha → context → status
+	required []string                         // branch protection: contexts that must be success
+}
+
+type fakeStatus struct {
+	State, Description, TargetURL string
 }
 
 type rejection struct {
@@ -66,7 +72,7 @@ const FakeRepo = "acme/shop"
 // NewFakeGitHub starts the fake and points GITHUB_API_BASE at it for the test.
 func NewFakeGitHub(t *testing.T) *FakeGitHub {
 	t.Helper()
-	f := &FakeGitHub{pulls: map[int]*fakePull{}, next: 1, rate: [2]int{4999, 5000},
+	f := &FakeGitHub{pulls: map[int]*fakePull{}, next: 1, rate: [2]int{4999, 5000}, statuses: map[string]map[string]fakeStatus{},
 		reset: time.Now().Add(time.Hour).Truncate(time.Second)}
 	f.Server = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.Server.Close)
@@ -144,6 +150,70 @@ func (f *FakeGitHub) Review(t *testing.T, id, reviewer, verdict string) {
 	p.reviews = append(p.reviews, fakeReview{id: int64(p.number)*1000 + p.reviewSeq, login: reviewer,
 		state: state, commit: p.head, submitted: time.Now().UTC().Truncate(time.Second)})
 	f.touch(p)
+}
+
+// Protect requires these status contexts to be success before any merge —
+// GitHub branch protection's "required status checks".
+func (f *FakeGitHub) Protect(contexts ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.required = contexts
+}
+
+// Check returns the state of a commit status ("" when none was posted).
+func (f *FakeGitHub) Check(_ *testing.T, sha, context string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.statuses[sha][context].State
+}
+
+// StatusOf returns the full commit status (state, description, link).
+func (f *FakeGitHub) StatusOf(sha, context string) (state, description, targetURL string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	s := f.statuses[sha][context]
+	return s.State, s.Description, s.TargetURL
+}
+
+// Head returns a pull request's current head sha.
+func (f *FakeGitHub) Head(t *testing.T, id string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.pull(t, id).head
+}
+
+// State returns a pull request's state (open | closed | merged).
+func (f *FakeGitHub) State(t *testing.T, id string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.pull(t, id).state
+}
+
+// HostMerge is someone clicking Merge on GitHub itself: refused while a
+// required check is not success, exactly like branch protection.
+func (f *FakeGitHub) HostMerge(t *testing.T, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p := f.pull(t, id)
+	if msg := f.blocked(p); msg != "" {
+		return fmt.Errorf("%s", msg)
+	}
+	p.state = "merged"
+	f.touch(p)
+	return nil
+}
+
+// blocked says why p cannot merge now ("" when it can).
+func (f *FakeGitHub) blocked(p *fakePull) string {
+	if p.state != "open" {
+		return "Pull Request is not mergeable"
+	}
+	for _, ctx := range f.required {
+		if f.statuses[p.head][ctx].State != "success" {
+			return `Required status check "` + ctx + `" is expected.`
+		}
+	}
+	return ""
 }
 
 func (f *FakeGitHub) RateLimit(remaining, limit int, reset time.Time) {
@@ -232,6 +302,11 @@ func (f *FakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		f.graphql(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/repos/"+FakeRepo+"/pulls":
 		f.list(w, r)
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/repos/"+FakeRepo+"/statuses/"):
+		f.postStatus(w, r, strings.TrimPrefix(r.URL.Path, "/repos/"+FakeRepo+"/statuses/"))
+	case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/repos/"+FakeRepo+"/pulls/") &&
+		strings.HasSuffix(r.URL.Path, "/merge"):
+		f.merge(w, r, strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/repos/"+FakeRepo+"/pulls/"), "/merge"))
 	default:
 		http.NotFound(w, r)
 	}
@@ -299,4 +374,52 @@ func (f *FakeGitHub) list(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
+}
+
+func (f *FakeGitHub) postStatus(w http.ResponseWriter, r *http.Request, sha string) {
+	var in struct {
+		State       string `json:"state"`
+		Context     string `json:"context"`
+		Description string `json:"description"`
+		TargetURL   string `json:"target_url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Context == "" ||
+		(in.State != "success" && in.State != "pending" && in.State != "failure" && in.State != "error") {
+		http.Error(w, `{"message":"Validation Failed"}`, http.StatusUnprocessableEntity)
+		return
+	}
+	if f.statuses[sha] == nil {
+		f.statuses[sha] = map[string]fakeStatus{}
+	}
+	f.statuses[sha][in.Context] = fakeStatus{State: in.State, Description: in.Description, TargetURL: in.TargetURL}
+	w.WriteHeader(http.StatusCreated)
+	_, _ = w.Write([]byte(`{"state":"` + in.State + `"}`))
+}
+
+func (f *FakeGitHub) merge(w http.ResponseWriter, r *http.Request, id string) {
+	n, _ := strconv.Atoi(id)
+	p, ok := f.pulls[n]
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	var in struct {
+		SHA         string `json:"sha"`
+		MergeMethod string `json:"merge_method"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&in)
+	w.Header().Set("Content-Type", "application/json")
+	if in.SHA != "" && in.SHA != p.head {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"message":"Head branch was modified. Review and try the merge again."}`))
+		return
+	}
+	if msg := f.blocked(p); msg != "" {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(map[string]string{"message": msg})
+		return
+	}
+	p.state = "merged"
+	f.touch(p)
+	_ = json.NewEncoder(w).Encode(map[string]any{"sha": f.sha(), "merged": true, "message": "Pull Request successfully merged"})
 }

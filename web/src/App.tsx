@@ -28,6 +28,7 @@ import Environments from "./pages/Environments";
 import TestHistory from "./pages/TestHistory";
 import Changes from "./pages/Changes";
 import ChangeDetail from "./pages/ChangeDetail";
+import AdminMergeRules from "./pages/AdminMergeRules";
 import Shell from "./components/Shell";
 
 /** Sign-in renders bare; every other page sits inside the app shell. */
@@ -59,6 +60,7 @@ export default function App() {
           <Route path="/admin/environments" element={<AdminEnvironments />} />
           <Route path="/admin/notifications" element={<AdminNotifications />} />
           <Route path="/admin/approver-groups" element={<AdminApproverGroups />} />
+          <Route path="/admin/merge-rules" element={<AdminMergeRules />} />
           <Route path="/admin/service-accounts" element={<AdminServiceAccounts />} />
           <Route path="/admin/audit" element={<AdminAudit />} />
           <Route path="/admin/about" element={<AdminAbout />} />

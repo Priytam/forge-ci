@@ -12,8 +12,10 @@ package vcs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -91,6 +93,9 @@ type Capabilities struct {
 	Resolve       bool     `json:"resolve"`
 	Drafts        bool     `json:"drafts"`
 	MergeMethods  []string `json:"merge_methods"`
+	// StatusChecks: the host can show (and require) a commit status, so the
+	// merge gate is enforced even when someone merges on the host.
+	StatusChecks bool `json:"status_checks"`
 }
 
 // ChangeSource is the read side of a host's change API.
@@ -107,6 +112,37 @@ type ChangeSource interface {
 	ListOpenChanges(ctx context.Context, c *ChangeClient, repo RepoRef, v Validators) (refs []ChangeRef, next Validators, complete bool, err error)
 }
 
+// GateContext is the commit-status name the merge gate is published under;
+// branch protection on the host requires it.
+const GateContext = "forge/merge-gate"
+
+// CheckResult is the merge gate as published on a head commit.
+type CheckResult struct {
+	State       string // success | pending | failure
+	Description string // one line (hosts cap it; GitHub at 140 characters)
+	TargetURL   string // the change page in Forge
+}
+
+// MergeOpts is a merge request. ExpectedHead makes it safe: the host refuses
+// when someone pushed since the gate passed (ErrHeadMoved).
+type MergeOpts struct {
+	Method       string // one of Capabilities.MergeMethods
+	ExpectedHead string
+}
+
+// ChangeWriter is the write side. Every call is made by the outbox worker,
+// never by a page, and goes through the ChangeClient like reads do.
+type ChangeWriter interface {
+	PublishCheck(ctx context.Context, c *ChangeClient, repo RepoRef, sha string, res CheckResult) error
+	Merge(ctx context.Context, c *ChangeClient, repo RepoRef, id string, opts MergeOpts) (mergeSHA string, err error)
+}
+
+// ChangeWriterFor returns the host's change writer, or nil when it has none.
+func ChangeWriterFor(provider string) ChangeWriter {
+	w, _ := Lookup(provider).(ChangeWriter)
+	return w
+}
+
 // Capable is implemented by providers that declare their capabilities.
 type Capable interface {
 	Capabilities() Capabilities
@@ -120,18 +156,29 @@ var (
 	// ErrChangeNotFound: the host does not know the change (deleted repo,
 	// wrong number, or a native change with no branches recorded).
 	ErrChangeNotFound = errors.New("change not found on host")
+	// ErrHeadMoved: a merge named a head the change no longer has.
+	ErrHeadMoved = errors.New("the change has new commits since it was approved")
+	// ErrNotMergeable: the host refused the merge (conflicts, its own rules,
+	// a required check). The wrapped StatusError says why.
+	ErrNotMergeable = errors.New("the host refused the merge")
 	// ErrReadPath: a provider call was attempted while serving a page. Pages
 	// read Postgres and the blob store only; the call is refused and counted.
 	ErrReadPath = errors.New("provider call refused on the read path")
 )
 
 // StatusError: the host answered with an error status (not rate limiting).
+// Message is the host's own one-line explanation, when it gave one (e.g.
+// GitHub's "Required status check ... is expected").
 type StatusError struct {
 	Provider   string
 	StatusCode int
+	Message    string
 }
 
 func (e *StatusError) Error() string {
+	if e.Message != "" {
+		return fmt.Sprintf("vcs: %s change API: HTTP %d: %s", e.Provider, e.StatusCode, e.Message)
+	}
 	return fmt.Sprintf("vcs: %s change API: HTTP %d", e.Provider, e.StatusCode)
 }
 
@@ -303,6 +350,7 @@ func (c *ChangeClient) do(ctx context.Context, provider string, req *http.Reques
 		c.report(ctx, CallInfo{Provider: provider, Result: "ok", Rate: rate})
 		return resp, nil
 	}
+	msg := hostMessage(resp.Body)
 	resp.Body.Close()
 	if rl := rateLimited(resp, rate); rl != nil {
 		c.report(ctx, CallInfo{Provider: provider, Result: "rate_limited", Rate: rate})
@@ -312,7 +360,23 @@ func (c *ChangeClient) do(ctx context.Context, provider string, req *http.Reques
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, ErrChangeNotFound
 	}
-	return nil, &StatusError{Provider: provider, StatusCode: resp.StatusCode}
+	return nil, &StatusError{Provider: provider, StatusCode: resp.StatusCode, Message: msg}
+}
+
+// hostMessage reads the "message" field of a JSON error body (GitHub, Gitea,
+// GitLab), capped, for showing why the host refused. Never the request.
+func hostMessage(body io.Reader) string {
+	var out struct {
+		Message string `json:"message"`
+	}
+	if err := json.NewDecoder(io.LimitReader(body, 4<<10)).Decode(&out); err != nil {
+		return ""
+	}
+	m := strings.TrimSpace(out.Message)
+	if len(m) > 200 {
+		m = m[:200]
+	}
+	return m
 }
 
 // parseRateHeaders reads the common X-RateLimit-* headers (GitHub, Gitea, and
