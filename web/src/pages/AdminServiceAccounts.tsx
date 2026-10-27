@@ -1,3 +1,4 @@
+import Menu from "../components/ui/Menu";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import {
   createServiceAccount,
@@ -95,7 +96,7 @@ function AccountTokens({ account, policy }: { account: ServiceAccount; policy: T
                   {!t.revoked && (
                     <button
                       type="button"
-                      className="btn btn-icon"
+                      className="btn btn-danger-quiet"
                       onClick={() => {
                         if (window.confirm(`Revoke fci_…${t.token_suffix}?`)) void revokeApiToken(t.id).then(reload);
                       }}
@@ -218,24 +219,23 @@ export default function AdminServiceAccounts() {
             </div>
             <div className="page-head-actions">
               <button type="button" className="btn" onClick={() => setOpen(open === a.id ? null : a.id)}>
-                {open === a.id ? "Hide tokens" : "Tokens"}
+                {open === a.id ? "Hide tokens" : `Tokens (${a.active_tokens})`}
               </button>
-              <button type="button" className="btn" onClick={() => void patch(a, { is_admin: !a.is_admin })}>
-                {a.is_admin ? "Remove admin" : "Make admin"}
-              </button>
-              <button type="button" className="btn" onClick={() => void patch(a, { disabled: !a.disabled })}>
-                {a.disabled ? "Enable" : "Disable"}
-              </button>
-              <button type="button" className="btn" onClick={() => void remove(a)}>
-                Delete
-              </button>
+              <Menu
+                label={`Actions for ${a.identity}`}
+                items={[
+                  { label: a.is_admin ? "Remove admin" : "Make admin", icon: "shield", onSelect: () => void patch(a, { is_admin: !a.is_admin }) },
+                  { label: a.disabled ? "Enable" : "Disable", icon: a.disabled ? "play" : "pause", onSelect: () => void patch(a, { disabled: !a.disabled }) },
+                  { label: "Delete", icon: "close", danger: true, onSelect: () => void remove(a) },
+                ]}
+              />
             </div>
           </div>
           {open === a.id && <AccountTokens account={a} policy={policy} />}
         </div>
       ))}
 
-      <form className="card settings-form" onSubmit={(e) => void create(e)} style={{ marginTop: 16 }}>
+      <form className="card settings-form" onSubmit={(e) => void create(e)}>
         <h2>New service account</h2>
         <div className="form-row">
           <label className="field">
@@ -251,9 +251,9 @@ export default function AdminServiceAccounts() {
           <input type="checkbox" checked={admin} onChange={(e) => setAdmin(e.target.checked)} />
           Platform admin (only if the automation manages Forge itself)
         </label>
-        <div className="form-actions">
+        <div className="card-foot">
           <button type="submit" className="btn btn-primary">
-            Create
+            Create account
           </button>
         </div>
       </form>

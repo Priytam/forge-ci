@@ -94,7 +94,7 @@ export default function AdminApproverGroups() {
                     <button type="button" className="btn btn-icon" onClick={() => edit(g)}>
                       Edit
                     </button>{" "}
-                    <button type="button" className="btn btn-icon" onClick={() => void remove(g)}>
+                    <button type="button" className="btn btn-danger-quiet" onClick={() => void remove(g)}>
                       Delete
                     </button>
                   </td>

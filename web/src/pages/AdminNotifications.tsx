@@ -131,7 +131,7 @@ function Routes() {
                     <button type="button" className="btn btn-icon" onClick={() => startEdit(r)}>
                       Edit
                     </button>{" "}
-                    <button type="button" className="btn btn-icon" onClick={() => void remove(r)}>
+                    <button type="button" className="btn btn-danger-quiet" onClick={() => void remove(r)}>
                       Delete
                     </button>
                   </td>

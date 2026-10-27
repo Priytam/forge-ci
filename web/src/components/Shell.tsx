@@ -6,7 +6,7 @@ import { getIsAdmin } from "../api";
 import AuthMenu from "./AuthMenu";
 import CommandPalette from "./CommandPalette";
 import Icon from "./Icon";
-import { crumbsFor, NAV, navActive } from "./nav";
+import { crumbsFor, NAV, navActive, SETTINGS_NAV } from "./nav";
 import { useTheme, type ThemePref } from "./theme";
 
 const COLLAPSE_KEY = "forge-sidebar-collapsed";
@@ -62,6 +62,8 @@ export default function Shell({ children }: { children: ReactNode }) {
   useEffect(() => setMenuOpen(false), [location.pathname]);
 
   const crumbs = crumbsFor(location.pathname, location.search);
+  // Settings swaps the sidebar for its own menu (one left menu at a time).
+  const inSettings = location.pathname === "/admin" || location.pathname.startsWith("/admin/");
   const isMac = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
 
   return (
@@ -73,7 +75,13 @@ export default function Shell({ children }: { children: ReactNode }) {
           <span className="sidebar-brand-name">Forge CI</span>
         </Link>
         <nav className="sidebar-nav">
-          {NAV.filter((s) => !s.adminOnly || isAdmin).map((s) => (
+          {inSettings && (
+            <Link to="/" className="nav-item nav-back" title={collapsed ? "Back to Forge" : undefined}>
+              <Icon name="collapse" />
+              <span className="nav-label">Back to Forge</span>
+            </Link>
+          )}
+          {(inSettings ? SETTINGS_NAV : NAV.filter((s) => !s.adminOnly || isAdmin)).map((s) => (
             <div key={s.title} className="nav-section">
               <div className="nav-section-title">{s.title}</div>
               {s.items.map((it) => (

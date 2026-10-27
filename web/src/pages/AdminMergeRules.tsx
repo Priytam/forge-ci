@@ -84,11 +84,13 @@ export default function AdminMergeRules() {
     <div className="cr-page">
       <div className="page-head">
         <h1>Merge rules</h1>
-        <div className="page-head-actions">
-          <button className="btn btn-primary" onClick={() => setEditing("new")}>
-            <Icon name="plus" size={14} /> New rule
-          </button>
-        </div>
+        {rules !== null && rules.length > 0 && (
+          <div className="page-head-actions">
+            <button className="btn btn-primary" onClick={() => setEditing("new")}>
+              <Icon name="plus" size={14} /> New rule
+            </button>
+          </div>
+        )}
       </div>
       <p className="page-lede">
         Forge's rules between a change and its merge. Each open change matching a rule gets a merge gate, published to

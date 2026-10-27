@@ -155,7 +155,7 @@ export default function AdminRunnerTokens() {
         <h1>Runner tokens</h1>
       </div>
 
-      <p className="muted">
+      <p className="muted page-lede">
         A runner needs one of these when the server is running with{" "}
         <code>RUNNER_AUTH=on</code> — pass it as <code>--token</code> (or
         <code> RUNNER_TOKEN</code>) when registering it. See{" "}
@@ -166,7 +166,7 @@ export default function AdminRunnerTokens() {
         <RevealPanel token={revealed} onDismiss={() => setRevealed(null)} />
       )}
 
-      <form className="inline-form" onSubmit={(e) => void onCreate(e)}>
+      <form className="card inline-form" onSubmit={(e) => void onCreate(e)}>
         <label className="field">
           <span>Description</span>
           <input
@@ -221,7 +221,7 @@ export default function AdminRunnerTokens() {
                     {!t.revoked && (
                       <button
                         type="button"
-                        className="btn btn-icon"
+                        className="btn btn-danger-quiet"
                         onClick={() => void onRevoke(t)}
                       >
                         Revoke

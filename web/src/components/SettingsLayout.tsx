@@ -1,41 +1,14 @@
-import { Link, Outlet, useLocation } from "react-router-dom";
-import Icon from "./Icon";
-import { navActive, SETTINGS_NAV } from "./nav";
+import { Outlet } from "react-router-dom";
 
 /**
- * Every admin page renders inside this: a grouped settings sub-navigation on
- * the left (a scrolling pill row on narrow screens) and the page on the right.
- * The main sidebar then needs only one "Settings" entry, however many
- * settings pages there are.
+ * Frame for every admin page. The settings menu itself lives in the main
+ * sidebar while you are under /admin (see Shell), so there is only ever one
+ * left-hand menu; this keeps every settings page to one column width.
  */
 export default function SettingsLayout() {
-  const { pathname } = useLocation();
   return (
-    <div className="settings-shell">
-      <nav className="settings-nav" aria-label="Settings">
-        {SETTINGS_NAV.map((s) => (
-          <div key={s.title} className="settings-nav-group">
-            <div className="settings-nav-title">{s.title}</div>
-            {s.items.map((it) => {
-              const active = navActive(it, pathname);
-              return (
-                <Link
-                  key={it.to}
-                  to={it.to}
-                  className={active ? "settings-nav-item active" : "settings-nav-item"}
-                  aria-current={active ? "page" : undefined}
-                >
-                  <Icon name={it.icon} size={14} />
-                  <span>{it.label}</span>
-                </Link>
-              );
-            })}
-          </div>
-        ))}
-      </nav>
-      <div className="settings-main">
-        <Outlet />
-      </div>
+    <div className="settings-main">
+      <Outlet />
     </div>
   );
 }

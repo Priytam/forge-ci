@@ -804,7 +804,7 @@ function MembersSection({ repo }: { repo: string }) {
                   <td style={{ textAlign: "right" }}>
                     <button
                       type="button"
-                      className="btn btn-icon"
+                      className="btn btn-danger-quiet"
                       onClick={() => void onDeleteRule(env.id, env.name, env.repo === "")}
                     >
                       Delete
@@ -1493,23 +1493,20 @@ export default function RepoSettings() {
   return (
     <div>
       <RepoHeader repo={repo} tab="settings" />
-      <div className="settings-shell">
-        <nav className="settings-nav" aria-label="Repository settings">
-          <div className="settings-nav-group">
-            {REPO_SECTIONS.map((x) => (
-              <Link
-                key={x.id}
-                to={`?section=${x.id}`}
-                replace
-                className={x.id === active ? "settings-nav-item active" : "settings-nav-item"}
-                aria-current={x.id === active ? "page" : undefined}
-              >
-                {x.label}
-              </Link>
-            ))}
-          </div>
-        </nav>
-        <div className="settings-main">
+      <nav className="subtabs" aria-label="Repository settings">
+        {REPO_SECTIONS.map((x) => (
+          <Link
+            key={x.id}
+            to={`?section=${x.id}`}
+            replace
+            className={x.id === active ? "subtab active" : "subtab"}
+            aria-current={x.id === active ? "page" : undefined}
+          >
+            {x.label}
+          </Link>
+        ))}
+      </nav>
+      <div className="repo-settings-body">
         {active === "variables" && (
         <Section
           title="Variables"
@@ -1642,7 +1639,6 @@ export default function RepoSettings() {
           <SchedulesSection repo={repo} />
         </Section>
         )}
-        </div>
       </div>
     </div>
   );

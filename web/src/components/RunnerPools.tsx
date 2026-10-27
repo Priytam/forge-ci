@@ -144,7 +144,7 @@ export default function RunnerPools() {
                     <button type="button" className="btn btn-icon" onClick={() => startEdit(p)}>
                       Edit
                     </button>{" "}
-                    <button type="button" className="btn btn-icon" onClick={() => void remove(p)}>
+                    <button type="button" className="btn btn-danger-quiet" onClick={() => void remove(p)}>
                       Delete
                     </button>
                   </td>

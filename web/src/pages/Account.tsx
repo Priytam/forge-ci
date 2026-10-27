@@ -25,7 +25,7 @@ export default function Account() {
   useEffect(reload, [reload]);
   const github = links?.find((l) => l.provider === "github");
   return (
-    <div>
+    <div className="settings-main">
       <div className="page-head">
         <h1>Linked accounts</h1>
       </div>

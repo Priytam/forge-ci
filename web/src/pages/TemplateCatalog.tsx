@@ -202,7 +202,7 @@ export default function TemplateCatalog() {
                             {isAdmin && (
                               <>
                                 {" · "}
-                                <button type="button" className="btn btn-icon" onClick={() => void remove(shown)}>
+                                <button type="button" className="btn btn-danger-quiet" onClick={() => void remove(shown)}>
                                   Remove this version
                                 </button>
                               </>

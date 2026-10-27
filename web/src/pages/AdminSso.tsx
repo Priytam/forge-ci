@@ -366,7 +366,7 @@ function GroupMappings() {
                   </td>
                   <td className="muted">{m.provider || "any"}</td>
                   <td style={{ textAlign: "right" }}>
-                    <button type="button" className="btn btn-icon" onClick={() => void remove(m)}>
+                    <button type="button" className="btn btn-danger-quiet" onClick={() => void remove(m)}>
                       Remove
                     </button>
                   </td>

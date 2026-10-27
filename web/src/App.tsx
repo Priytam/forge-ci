@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import SettingsLayout from "./components/SettingsLayout";
+import AdminApiTokens from "./pages/AdminApiTokens";
 import { SETTINGS_HOME } from "./components/nav";
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import Repos from "./pages/Repos";
@@ -81,6 +82,7 @@ export default function App() {
             <Route path="audit" element={<AdminAudit />} />
             <Route path="about" element={<AdminAbout />} />
             <Route path="runner-tokens" element={<AdminRunnerTokens />} />
+            <Route path="api-tokens" element={<AdminApiTokens />} />
           </Route>
           <Route path="/changes" element={<Changes />} />
           <Route path="/changes/:id" element={<ChangeDetail />} />

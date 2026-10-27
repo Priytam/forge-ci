@@ -67,7 +67,7 @@ export const SETTINGS_NAV: NavSection[] = [
       { to: "/admin/sso", label: "Sign-in & identity", icon: "lock", keywords: "sso login oidc okta keycloak ldap active directory groups roles session google microsoft github" },
       { to: "/admin/service-accounts", label: "Service accounts", icon: "key", keywords: "robot bot automation token" },
       { to: "/admin/runner-tokens", label: "Runner tokens", icon: "key", keywords: "register runner" },
-      { to: "/tokens#policy", label: "API token policy", icon: "shield", keywords: "expiry personal access token" },
+      { to: "/admin/api-tokens", label: "API tokens", icon: "shield", keywords: "token policy expiry personal access token revoke" },
     ],
   },
   {
@@ -115,6 +115,7 @@ const ADMIN_TITLES: Record<string, string> = {
   "merge-rules": "Merge rules",
   "service-accounts": "Service accounts",
   about: "About & maintenance",
+  "api-tokens": "API tokens",
 };
 
 export interface Crumb {

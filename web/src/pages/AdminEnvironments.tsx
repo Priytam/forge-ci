@@ -204,26 +204,29 @@ export default function AdminEnvironments() {
         </ol>
       )}
 
-      <div className="filter-bar" style={{ marginTop: 12 }}>
-        <button
-          type="button"
-          className="btn"
-          onClick={() => setRows([...rows, { name: "", tier: "other", aliases: "", allowed_refs: "", description: "", cancel_superseded: false }])}
-        >
-          + Add environment
-        </button>
-        <label className="field">
-          <span>Jobs naming an unlisted environment</span>
-          <select value={unknown} onChange={(e) => setUnknown(e.target.value as EnvPolicy["unknown"])}>
-            <option value="allow">Allow (use the name as written)</option>
-            <option value="deny">Refuse (fail the job, catches typos)</option>
-          </select>
-        </label>
+      <button
+        type="button"
+        className="btn env-reg-add"
+        onClick={() => setRows([...rows, { name: "", tier: "other", aliases: "", allowed_refs: "", description: "", cancel_superseded: false }])}
+      >
+        + Add environment
+      </button>
+
+      <div className="card">
+        <h2>Jobs naming an unlisted environment</h2>
+        <p className="muted">What happens when a pipeline uses an environment name that is not in the list above.</p>
+        <select value={unknown} onChange={(e) => setUnknown(e.target.value as EnvPolicy["unknown"])}>
+          <option value="allow">Allow (use the name as written)</option>
+          <option value="deny">Refuse (fail the job, catches typos)</option>
+        </select>
+      </div>
+
+      <div className="save-bar">
+        {msg && <span className={msg.ok ? "muted" : "save-bar-error"}>{msg.text}</span>}
         <button type="button" className="btn btn-primary" disabled={saving} onClick={() => void save()}>
-          {saving ? "Saving…" : "Save"}
+          {saving ? "Saving…" : "Save changes"}
         </button>
       </div>
-      {msg && <div className={msg.ok ? "muted" : "error-banner"}>{msg.text}</div>}
       <p className="muted">
         Patterns: <code>*</code> matches anything, including <code>/</code> —{" "}
         <code>release/*</code> covers <code>release/1.2</code>. Leave branches

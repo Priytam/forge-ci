@@ -1,5 +1,6 @@
 import Skeleton from "../components/ui/Skeleton";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { Link } from "react-router-dom";
 import {
   createApiToken,
   getIsAdmin,
@@ -23,7 +24,7 @@ const LIFETIMES: { label: string; days: number }[] = [
   { label: "1 year", days: 365 },
 ];
 
-function fmtDate(iso: string | null): string {
+export function fmtDate(iso: string | null): string {
   if (!iso) return "never";
   return new Date(iso).toLocaleDateString(undefined, {
     year: "numeric",
@@ -60,7 +61,7 @@ function CopyToken({ value }: { value: string }) {
   );
 }
 
-function TokenTable({
+export function TokenTable({
   tokens,
   showOwner,
   onRevoke,
@@ -115,7 +116,7 @@ function TokenTable({
                 {!t.revoked && (
                   <button
                     type="button"
-                    className="btn btn-icon"
+                    className="btn btn-danger-quiet"
                     onClick={() => onRevoke(t)}
                   >
                     Revoke
@@ -131,7 +132,7 @@ function TokenTable({
 }
 
 /** Admin-only: whether non-expiring tokens are allowed and a lifetime cap. */
-function PolicyPanel({
+export function PolicyPanel({
   policy,
   onSaved,
 }: {
@@ -162,38 +163,36 @@ function PolicyPanel({
   };
 
   return (
-    <div className="card" id="policy" style={{ marginBottom: 16 }}>
-      <h2 style={{ marginTop: 0 }}>Token policy (admin)</h2>
+    <form className="card" id="policy" onSubmit={(e) => void save(e)}>
+      <h2>Token policy</h2>
       <p className="muted">
-        Applies to everyone&apos;s tokens on every request: turning off
-        non-expiring tokens disables existing ones straight away (they come back
-        if you turn it on again), and a lifetime cap disables tokens older than
-        the cap.
+        Applies to everyone&apos;s tokens on every request: turning off non-expiring tokens disables
+        existing ones straight away (they come back if you turn it on again), and a lifetime cap
+        disables tokens older than the cap.
       </p>
-      <form className="inline-form" onSubmit={(e) => void save(e)}>
+      <div className="stack-sm">
         <label className="check-row">
-          <input
-            type="checkbox"
-            checked={allow}
-            onChange={(e) => setAllow(e.target.checked)}
-          />
+          <input type="checkbox" checked={allow} onChange={(e) => setAllow(e.target.checked)} />
           Allow tokens that never expire
         </label>
-        <label className="field">
-          <span>Max lifetime (days, blank = no cap)</span>
+        <label className="field field-narrow">
+          <span>Max lifetime (days)</span>
           <input
             type="number"
             min={0}
             value={maxDays}
             onChange={(e) => setMaxDays(e.target.value)}
+            placeholder="No cap"
           />
         </label>
-        <button type="submit" className="btn btn-primary" disabled={saving}>
-          Save policy
-        </button>
+      </div>
+      <div className="card-foot">
         {msg && <span className="muted">{msg}</span>}
-      </form>
-    </div>
+        <button type="submit" className="btn btn-primary" disabled={saving}>
+          {saving ? "Saving…" : "Save policy"}
+        </button>
+      </div>
+    </form>
   );
 }
 
@@ -201,7 +200,6 @@ export default function ApiTokens() {
   const [me, setMe] = useState<AuthUser | null | undefined>(undefined);
   const [isAdmin, setIsAdmin] = useState(false);
   const [policy, setPolicy] = useState<TokenPolicy | null>(null);
-  const [showAll, setShowAll] = useState(false);
 
   useEffect(() => {
     void getMe().then(setMe);
@@ -211,9 +209,8 @@ export default function ApiTokens() {
       .catch(() => setPolicy(null));
   }, []);
 
-  const fetcher = useCallback(() => listApiTokens(showAll), [showAll]);
+  const fetcher = useCallback(() => listApiTokens(false), []);
   const { data: tokens, error, loading, refresh } = usePoll(fetcher, 0, false);
-  useEffect(() => refresh(), [showAll, refresh]);
 
   const [description, setDescription] = useState("");
   const [lifetime, setLifetime] = useState("90");
@@ -274,7 +271,7 @@ export default function ApiTokens() {
   const signedIn = me !== null && me !== undefined && me.provider !== "api-token";
 
   return (
-    <div>
+    <div className="settings-main">
       <div className="page-head">
         <h1>API tokens</h1>
       </div>
@@ -287,8 +284,6 @@ export default function ApiTokens() {
       <pre className="mono" style={{ whiteSpace: "pre-wrap" }}>
         {`curl -H "Authorization: Bearer $FORGE_TOKEN" ${window.location.origin}/api/v1/pipelines?repo=acme/app`}
       </pre>
-
-      {isAdmin && policy && <PolicyPanel policy={policy} onSaved={setPolicy} />}
 
       {me === null && (
         <div className="empty card">
@@ -315,7 +310,7 @@ export default function ApiTokens() {
       )}
 
       {signedIn && (
-        <form className="inline-form" onSubmit={(e) => void onCreate(e)}>
+        <form className="card inline-form" onSubmit={(e) => void onCreate(e)}>
           <label className="field">
             <span>Description</span>
             <input
@@ -341,15 +336,11 @@ export default function ApiTokens() {
         </form>
       )}
 
-      {isAdmin && signedIn && (
-        <label className="check-row" style={{ margin: "12px 0" }}>
-          <input
-            type="checkbox"
-            checked={showAll}
-            onChange={(e) => setShowAll(e.target.checked)}
-          />
-          Show everyone&apos;s tokens (admin)
-        </label>
+      {isAdmin && (
+        <p className="muted small-note">
+          Admins: the token policy and everyone&apos;s tokens are in{" "}
+          <Link to="/admin/api-tokens">Settings → API tokens</Link>.
+        </p>
       )}
 
       {actionError && <div className="error-banner">{actionError}</div>}
@@ -359,7 +350,7 @@ export default function ApiTokens() {
         <div className="empty card">No tokens yet.</div>
       )}
       {tokens && tokens.length > 0 && (
-        <TokenTable tokens={tokens} showOwner={showAll} onRevoke={(t) => void onRevoke(t)} />
+        <TokenTable tokens={tokens} showOwner={false} onRevoke={(t) => void onRevoke(t)} />
       )}
     </div>
   );
