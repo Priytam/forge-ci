@@ -53,11 +53,15 @@ type Hub struct {
 	stop      context.CancelFunc
 
 	ops opWaiters
+	// autoWake: an ingest left an app out of sync; auto-sync looks now
+	// rather than at its next tick.
+	autoWake chan struct{}
 }
 
 // New returns a hub keeping up to cacheBytes of trees in memory.
 func New(st *store.Store, blobs blob.Store, cacheBytes int) *Hub {
-	return &Hub{st: st, blobs: blobs, trees: newLRU(cacheBytes), subs: map[*sub]struct{}{}, published: map[int64]*Tree{}}
+	return &Hub{st: st, blobs: blobs, trees: newLRU(cacheBytes), subs: map[*sub]struct{}{}, published: map[int64]*Tree{},
+		autoWake: make(chan struct{}, 1)}
 }
 
 func treeKey(digest string) string { return "live/trees/" + digest + ".json.gz" }
@@ -82,6 +86,7 @@ func (h *Hub) Ingest(ctx context.Context, targetID int64, b live.Batch, size int
 	var ack live.Ack
 	var trees []*Tree
 	var gone []int64
+	outOfSync := false
 	err := h.st.LiveIngest(ctx, targetID, func(tx *store.LiveTx) error {
 		t := tx.Target
 		t.Provider, t.Capabilities, t.AgentVersion, t.Stats = b.Provider, b.Capabilities, b.Version, b.Stats
@@ -112,6 +117,7 @@ func (h *Hub) Ingest(ctx context.Context, targetID int64, b live.Batch, size int
 			if removed != 0 {
 				gone = append(gone, removed)
 			}
+			outOfSync = outOfSync || d.Status != nil && d.Status.Sync == live.OutOfSync && !d.App.Orphans
 		}
 		if b.Synced {
 			stale, err := tx.StaleApps(ctx)
@@ -138,6 +144,12 @@ func (h *Hub) Ingest(ctx context.Context, targetID int64, b live.Batch, size int
 	for _, id := range gone {
 		h.trees.drop(id)
 	}
+	if outOfSync {
+		select {
+		case h.autoWake <- struct{}{}:
+		default:
+		}
+	}
 	return ack, nil
 }
 
@@ -156,7 +168,7 @@ func (h *Hub) apply(ctx context.Context, tx *store.LiveTx, d live.Delta) (*Tree,
 	}
 	now := time.Now()
 	if a == nil {
-		a = &store.LiveApp{Key: d.App.Key, Health: live.Unknown, HealthSince: now}
+		a = &store.LiveApp{Key: d.App.Key, Health: live.Unknown, HealthSince: now, Orphans: d.App.Orphans}
 		a.Name, a.Namespace, a.Group, a.Epoch = d.App.Name, d.App.Namespace, d.App.Group, tx.Target.Epoch
 		if err := tx.SaveApp(ctx, a, true); err != nil { // the id names its manifests
 			return nil, 0, err
@@ -301,7 +313,7 @@ func summaryChanged(a, b *store.LiveApp) bool {
 	return a.Name != b.Name || a.Namespace != b.Namespace || a.Group != b.Group || a.Health != b.Health ||
 		a.HealthMessage != b.HealthMessage || a.Resources != b.Resources || a.Pods != b.Pods ||
 		a.PodsReady != b.PodsReady || !slices.Equal(a.Images, b.Images) || a.Sync != b.Sync || a.Revision != b.Revision ||
-		a.SourceError != b.SourceError
+		a.SourceError != b.SourceError || a.Drifted != b.Drifted || a.Prunable != b.Prunable
 }
 
 // remove deletes an app and queues its blobs.

@@ -19,7 +19,8 @@ type Sink interface {
 	// Desired records the app's desired state (providers with Diff), and
 	// SetSync a resource's comparison with it.
 	Desired(app App, d Desired)
-	SetSync(app App, uid, sync string)
+	// prune: Forge applied the resource and Git no longer has it.
+	SetSync(app App, uid, sync string, prune bool)
 	// Synced: the initial report is complete.
 	Synced()
 }
@@ -209,7 +210,7 @@ func (t *Tracker) Desired(app App, d Desired) {
 }
 
 // SetSync records a resource's sync status (its other fields unchanged).
-func (t *Tracker) SetSync(app App, uid, sync string) {
+func (t *Tracker) SetSync(app App, uid, sync string, prune bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	a := t.apps[app.Key]
@@ -217,14 +218,14 @@ func (t *Tracker) SetSync(app App, uid, sync string) {
 		return
 	}
 	e, ok := a.resources[uid]
-	if !ok || e.res.Sync == sync {
+	if !ok || (e.res.Sync == sync && e.res.RequiresPruning == prune) {
 		return
 	}
-	e.res.Sync = sync
+	e.res.Sync, e.res.RequiresPruning = sync, prune
 	a.resources[uid] = e
 	a.touch(t.now())
 	if up, ok := a.upserts[uid]; ok {
-		up.Sync = sync
+		up.Sync, up.RequiresPruning = sync, prune
 		a.upserts[uid] = up
 		return
 	}

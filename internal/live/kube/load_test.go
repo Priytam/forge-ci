@@ -230,7 +230,7 @@ func TestAgentFootprint(t *testing.T) {
 	defer debug.SetMemoryLimit(debug.SetMemoryLimit(AgentMemoryLimit))
 	base := heapInuse()
 
-	p, err := New(nil, Config{})
+	p, err := New(nil, Config{Orphans: true}) // as forge-agent runs by default
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -147,9 +147,9 @@ cluster / cloud                         Forge server                         bro
 - **Sync** is server-side apply as field manager `forge`, in dependency order
   (namespaces, config and storage, services, workloads, autoscalers,
   ingresses). Without Force, a field someone else owns (a `kubectl scale`)
-  makes the apply fail and says so; Force takes it over. Prune deletes the
-  app's top-level objects Git no longer has. Dry run asks the API server and
-  changes nothing.
+  makes the apply fail and says so; Force takes it over. Prune deletes what
+  Forge applied to the app that Git no longer has (see phase C). Dry run asks
+  the API server and changes nothing.
 - **Rollback** is a sync to an earlier revision of the source. The app then
   shows *Out of sync* against the branch tip until Git catches up — as it
   should.
@@ -165,6 +165,65 @@ cluster / cloud                         Forge server                         bro
 - **Logs** stream from the cluster through the agent into Postgres (kept an
   hour, 8 MB and 15 minutes per stream at most) and to the page; leaving the
   tab stops the stream.
+
+## Auto-sync, self-heal, waves, hooks and orphans (phase C)
+
+- **Auto-sync** (the *Auto-sync* button on an app; `PUT
+  /api/v1/live/apps/{id}/policy`) makes Forge sync each new revision by
+  itself. **Prune** lets those syncs delete what Git dropped; **Self-heal**
+  undoes changes made in the cluster. The policy is stored per target and app
+  key (`live_app_policies`), so it outlives the app's row.
+- **It is the same operation a person starts.** The controller runs on every
+  server replica (`internal/live/hub/autosync.go`): it looks at out-of-sync
+  apps with auto-sync on every 5 s, and at once when an agent batch leaves an
+  app out of sync. What it starts is an ordinary `live_ops` row — requested by
+  *Forge auto-sync*, marked `auto-sync` or `self-heal` — so the per-app lock,
+  freezes, approvals, history and audit log all apply unchanged, and two
+  replicas can never start the same sync. Automatic syncs apply with force:
+  Git wins.
+- **The policy, in full** (`decideAuto`, table-tested):
+  - a revision not yet synced is synced;
+  - a failed sync is retried after 5, 10, 20, 40 s — five attempts, then it
+    stops and says why until a new revision lands or someone syncs by hand;
+  - once a revision is synced, drift is left alone unless self-heal is on;
+    then it is undone 5 s after the last sync, and more slowly (up to ~5 min)
+    when it has had to heal more than three times in ten minutes — the page
+    says something keeps changing the app;
+  - nothing happens while a sync or rollback is in flight or the environment
+    is frozen (the page says *Paused*);
+  - a protected environment's auto-syncs wait for approval like anyone's, and
+    self-heal is refused there (a heal that waits for a person is not one);
+  - when all that differs is what auto-sync would not prune, it does nothing.
+  The panel shows what auto-sync is doing or why it waits.
+- **Rollback turns auto-sync off** (it would undo the rollback at once), and
+  a sync to any revision other than Git's is refused while auto-sync is on.
+- **Prune only removes what Forge put there.** A live top-level object Git
+  does not have is *Out of sync — requires pruning* only when it carries
+  field manager `forge`; anything someone else created (a StatefulSet's
+  volume claims, a hand-made ConfigMap) is never pruned, manually or
+  automatically. Prune runs after the last Sync wave, dependents first.
+  The Sync status panel counts both kinds of difference ("1 changed or
+  missing · 1 to prune").
+- **Sync waves and hooks.** `forge.dev/sync-wave: "<n>"` orders resources
+  (default 0); `forge.dev/hook: PreSync | Sync | PostSync | SyncFail` makes a
+  resource a hook (usually a Job) and `forge.dev/hook-delete-policy:
+  BeforeHookCreation | HookSucceeded | HookFailed` says when it goes
+  (default BeforeHookCreation, so the next sync runs it again). Helm's
+  `helm.sh/hook` (pre/post-install and -upgrade), `hook-weight` and
+  `hook-delete-policy` are honoured too; test, delete and rollback hooks are
+  never applied. A sync runs PreSync hooks, then each wave lowest first,
+  then PostSync hooks; it waits for a wave to be healthy and its hooks to
+  complete before going on (5 minutes per wave), stops at the first Degraded
+  resource or failed hook, and then runs the SyncFail hooks. A dry run
+  applies every step server-side and lists hooks as *would run*; a sync of
+  selected resources runs no hooks. Hooks are never compared with Git or
+  pruned, and the tree tags them. Progress streams to the sync dialog.
+- **Orphaned resources.** With `--orphans` (the default) the agent also
+  reports, per namespace, the top-level objects no application claims —
+  never what an owner controls, what the root selector leaves out, or
+  `kube-root-ca.crt`. The *Orphaned* toggle on an app's tree adds its
+  namespace's orphans, dashed and tagged, followed live; their panels have
+  Summary, Events and Live manifest. They are never listed as applications.
 
 ## Providers
 
@@ -229,11 +288,14 @@ agent does (JSON + gzip). Apple M-series, Go 1.27.
 
 | | Budget | Measured |
 |---|---|---|
-| Heap at steady state | 150 MB | **74.0 MB** (776 B/object) |
-| Heap peak during start-up | 150 MB | **103 MB** (paged lists, 120 MiB soft limit) |
-| CPU at 200 pod updates/s | 0.2 vCPU | **0.09 vCPU** (including generating the updates) |
-| Bytes sent at that rate | — | **300 B/s per 1k resources** |
-| Initial report | — | 5.9 MB gzip, 3.9 s |
+| Heap at steady state | 150 MB | **81.3 MB** (852 B/object) |
+| Heap peak during start-up | 150 MB | **105 MB** (paged lists, 120 MiB soft limit) |
+| CPU at 200 pod updates/s | 0.2 vCPU | **0.08 vCPU** (including generating the updates) |
+| Bytes sent at that rate | — | **309 B/s per 1k resources** |
+| Initial report | — | 6.0 MB gzip, 3.9 s |
+
+(Phase C, with orphans on as the agent runs by default; phase B measured
+74 MB steady, 103 MB peak.)
 
 The default `go test` runs 20,000 objects and fails if the per-object cost
 would not fit the budget at 100,000.
@@ -269,6 +331,22 @@ A sync to the repo's first commit rolls cart-api back to image `v1` (the
 Diff then shows `echo-service:v1` against `:6c5b7c18` at the tip), and a
 sync to the tip brings it forward again.
 
+**Phase C, on the lab.** With auto-sync on and self-heal off, `kubectl scale
+deploy/cart-api --replicas=3` leaves cart-api *Out of sync* and the panel
+says *Live differs from 8ace259 since it was synced; self-heal is off*.
+Turning self-heal on heals it 3 s later. With self-heal on, `kubectl scale
+--replicas=5` → *Out of sync* → a self-heal sync → *Synced* at 2 replicas in
+**1.1 s** end to end; the replicas field is Forge's again (field manager
+`forge`). Waves and hooks, on a demo app in its own namespace (busybox
+pods): one sync ran the PreSync `db-migrate` Job to completion, wave -1
+(ConfigMap), wave 0 (Deployment, Service), wave 1 (worker Deployment), each
+healthy before the next, then the PostSync `smoke-test` Job, which was
+deleted once it succeeded (HookSucceeded) — 49 s, mostly pod start-up.
+Dropping the worker from Git showed it as *to prune*; auto-sync with prune
+synced the new revision (re-running the migration) and deleted it. A
+ConfigMap made by hand in that namespace appeared under *Orphaned*, with
+its live manifest. The lab was restored afterwards.
+
 **Cloud Run:** an unchanged fleet costs one list call per region per
 reconcile (720/day per region at the default period, shared by every
 service in it) plus one call per service per change; the bucket is never
@@ -276,7 +354,8 @@ exceeded (`TestCallBudget`, `TestReconcileIsConditional`).
 
 ## Not yet
 
-Auto-sync and self-heal, sync waves and hooks, orphaned-resource views
-(phase C); progressive delivery and fleet views (phase D). The Cloud Run
-reconcile becomes event-driven (audit logs → Pub/Sub). Applications link to
-their target's repo; linking each app to its own source repo is next.
+Progressive delivery and fleet views (phase D). The Cloud Run reconcile
+becomes event-driven (audit logs → Pub/Sub). Applications link to their
+target's repo; linking each app to its own source repo is next. Deleting an
+application (and its resources) from Forge, and per-app sync options set in
+Git (Argo-style annotations), are not built.

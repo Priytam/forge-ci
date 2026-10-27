@@ -1,7 +1,8 @@
 # Write access for forge-agent (Forge Live Sync, Rollback, Prune), on top of
 # deploy/live/agent.yaml. Apply it only where Forge should change the
 # cluster, and start the agent with --allow-sync. Narrow the rules to the
-# kinds your applications use; this grants what the lab's apps need.
+# kinds your applications use; this grants what the lab's apps need (sync
+# hooks that are Jobs included; hooks that are bare Pods also need pods).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:

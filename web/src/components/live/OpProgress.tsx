@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { approveLiveOp, cancelLiveOp, getLiveOp, relativeTime, shortSha, type LiveOp } from "../../api";
+import { approveLiveOp, cancelLiveOp, getLiveOp, relativeTime, shortSha, streamOpOutput, type LiveOp } from "../../api";
 import { Pill, type Tone } from "../ui/Pill";
+import { requester } from "./ui";
 
 const STATE: Record<LiveOp["state"], [Tone, string]> = {
   approval: ["warning", "Waiting for approval"],
@@ -12,14 +13,27 @@ const STATE: Record<LiveOp["state"], [Tone, string]> = {
 };
 
 const ACTION_TONE: Record<string, Tone> = {
-  created: "success", configured: "accent", unchanged: "neutral", pruned: "warning", failed: "danger",
+  created: "success", configured: "accent", unchanged: "neutral", pruned: "warning", failed: "danger", succeeded: "success", run: "accent",
 };
+
+/** Where a resource ran in the sync: its hook phase, or its wave. */
+function stage(r: { wave?: number; phase?: string }): string {
+  if (r.phase) return r.wave ? `${r.phase} hook · wave ${r.wave}` : `${r.phase} hook`;
+  return r.wave ? `wave ${r.wave}` : "";
+}
 
 /** An operation as it goes: approvals while it waits, then what it did to each resource. */
 export default function OpProgress({ op: initial, onDone }: { op: LiveOp; onDone?: (op: LiveOp) => void }) {
   const [op, setOp] = useState(initial);
   const [error, setError] = useState<string | null>(null);
+  const [progress, setProgress] = useState("");
   const finished = op.state === "succeeded" || op.state === "failed" || op.state === "canceled";
+  const running = op.state === "running";
+  // A sync with waves or hooks says what it is waiting for as it goes.
+  useEffect(() => {
+    if (!running || op.kind === "logs") return;
+    return streamOpOutput(op.id, (t) => setProgress((p) => (p + t).slice(-20_000)), () => undefined);
+  }, [running, op.id, op.kind]);
   useEffect(() => {
     if (finished) {
       onDone?.(op);
@@ -41,7 +55,7 @@ export default function OpProgress({ op: initial, onDone }: { op: LiveOp; onDone
         <span className="muted">
           {op.kind}
           {op.params.dry_run && " (dry run)"}
-          {op.revision && <> to <span className="mono">{shortSha(op.revision)}</span></>} · {op.requested_by || "someone"},{" "}
+          {op.revision && <> to <span className="mono">{shortSha(op.revision)}</span></>} · {requester(op)},{" "}
           {relativeTime(op.created_at)}
         </span>
         {!finished && (
@@ -66,13 +80,14 @@ export default function OpProgress({ op: initial, onDone }: { op: LiveOp; onDone
         </ul>
       )}
       {(op.result?.message || op.message) && <div className={`lv-op-msg${op.state === "failed" ? " lv-op-msg-bad" : ""}`}>{op.result?.message || op.message}</div>}
+      {progress && !finished && <pre className="lv-op-log">{progress.trimEnd().split("\n").slice(-8).join("\n")}</pre>}
       {(op.result?.resources?.length ?? 0) > 0 && (
         <table className="lv-op-table">
           <tbody>
             {op.result!.resources!.map((r) => (
               <tr key={r.key}>
                 <td className="muted">{r.kind}</td>
-                <td>{r.name}</td>
+                <td>{r.name}{stage(r) && <span className="lv-op-stage">{stage(r)}</span>}</td>
                 <td><Pill tone={ACTION_TONE[r.action.replace("would-", "")] ?? "neutral"}>{r.action.replace("-", " ")}</Pill></td>
                 <td className="lv-op-err">{r.message}</td>
               </tr>

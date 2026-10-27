@@ -64,12 +64,15 @@ export default function ResourceTree({
   selected,
   onSelect,
   filter,
+  orphans,
 }: {
   app: LiveApp;
   resources: LiveResource[];
   selected: string | null;
   onSelect: (uid: string | null) => void;
   filter: TreeFilter;
+  /** uids of orphaned resources shown alongside (dashed, never the app's) */
+  orphans?: Set<string>;
 }) {
   const [expanded, setExpanded] = useState<string[]>([]);
   const input = useMemo(() => ({ resources, expanded }), [resources, expanded]);
@@ -162,10 +165,13 @@ export default function ResourceTree({
           const r = byUid.get(n.id);
           if (!r) return null;
           const dim = filtering && !matches(r, filter);
+          const orphan = orphans?.has(r.uid);
+          const tag = orphan && !(r.parents ?? []).length ? "orphaned" : r.requires_pruning ? "prune" : r.hook ? `${r.hook} hook` : "";
           return (
             <button key={n.id} type="button" style={style}
-              className={`lv-node${selected === r.uid ? " lv-node-on" : ""}${dim ? " lv-node-dim" : ""}${r.health ? ` lv-node-${r.health.status.toLowerCase()}` : ""}${r.sync === "OutOfSync" ? " lv-node-drift" : ""}${r.uid.startsWith("desired:") ? " lv-node-missing" : ""}`}
-              onClick={() => onSelect(r.uid)} title={r.health?.message || `${r.kind} ${r.name}`}>
+              className={`lv-node${selected === r.uid ? " lv-node-on" : ""}${dim ? " lv-node-dim" : ""}${r.health ? ` lv-node-${r.health.status.toLowerCase()}` : ""}${r.sync === "OutOfSync" ? " lv-node-drift" : ""}${r.uid.startsWith("desired:") ? " lv-node-missing" : ""}${orphan ? " lv-node-orphan" : ""}${r.requires_pruning ? " lv-node-prune" : ""}`}
+              onClick={() => onSelect(r.uid)}
+              title={orphan ? "Orphaned: no application claims it" : r.requires_pruning ? "Forge applied it; Git no longer has it" : r.health?.message || `${r.kind} ${r.name}`}>
               <span className="lv-node-kind">
                 <KindIcon kind={r.kind} size={18} />
                 <span className="lv-node-tag">{KIND_SHORT[r.kind] ?? r.kind.toLowerCase()}</span>
@@ -173,6 +179,7 @@ export default function ResourceTree({
               <span className="lv-node-main">
                 <span className="lv-node-name">{r.name}</span>
                 <span className="lv-node-meta">
+                  {tag && <span className="lv-node-flag">{tag}</span>}
                   {r.summary.status && r.summary.status !== "Running" && <span className="lv-node-status">{r.summary.status}</span>}
                   {r.summary.ready && <span>{r.summary.ready}</span>}
                   {(r.summary.restarts ?? 0) > 0 && <span className="lv-restarts">↻ {r.summary.restarts}</span>}

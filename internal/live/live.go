@@ -70,7 +70,13 @@ type Resource struct {
 	Health  *Health  `json:"health,omitempty"` // nil: the kind has no health (a ConfigMap)
 	// Sync compares the resource with its desired state: Synced, OutOfSync,
 	// or "" when it has none (it is not in Git: a child, or not managed).
-	Sync      string    `json:"sync,omitempty"`
+	Sync string `json:"sync,omitempty"`
+	// RequiresPruning: Forge applied this resource and Git no longer has it
+	// (OutOfSync until a sync with Prune deletes it).
+	RequiresPruning bool `json:"requires_pruning,omitempty"`
+	// Hook is the sync phase of a hook resource (PreSync, Sync, PostSync,
+	// SyncFail): it runs during a sync and is never compared or pruned.
+	Hook      string    `json:"hook,omitempty"`
 	Summary   Summary   `json:"summary"`
 	CreatedAt time.Time `json:"created_at"`
 	// Manifest is the live object, trimmed (no managed fields, no
@@ -113,7 +119,13 @@ type App struct {
 	Name      string `json:"name"`                // what people call it
 	Namespace string `json:"namespace,omitempty"` // Kubernetes namespace, or cloud region
 	Group     string `json:"group,omitempty"`     // the system it is part of (app.kubernetes.io/part-of)
+	// Orphans marks a namespace's orphaned resources: top-level objects no
+	// application owns. Not an application — pages show them on request.
+	Orphans bool `json:"orphans,omitempty"`
 }
+
+// OrphansKey is the app key of namespace's orphaned resources.
+func OrphansKey(namespace string) string { return namespace + "/" }
 
 // Status is an application's state in one line: what the Applications page
 // lists and filters on.
@@ -126,6 +138,10 @@ type Status struct {
 	// Sync is the app's: OutOfSync when any resource is, Synced when every
 	// desired resource matches, "" when the app has no desired state.
 	Sync string `json:"sync,omitempty"`
+	// Drifted counts resources that differ from Git or are missing;
+	// Prunable those Forge applied that Git no longer has.
+	Drifted  int `json:"drifted,omitempty"`
+	Prunable int `json:"prunable,omitempty"`
 }
 
 // Event is something the platform said about a resource (Kubernetes events,
@@ -166,6 +182,11 @@ func StatusOf(resources iter.Seq[Resource]) Status {
 		switch {
 		case r.Sync == OutOfSync:
 			st.Sync = OutOfSync
+			if r.RequiresPruning {
+				st.Prunable++
+			} else {
+				st.Drifted++
+			}
 		case r.Sync == Synced && st.Sync == "":
 			st.Sync = Synced
 		}
@@ -246,6 +267,7 @@ type Capabilities struct {
 	Logs             bool `json:"logs"`     // the Logs tab
 	Pods             bool `json:"pods"`     // the Pods view
 	Network          bool `json:"network"`  // the Network view
+	Orphans          bool `json:"orphans"`  // orphaned resources of an app's namespace
 }
 
 // AgentStats is what an agent reports about itself with every batch.
@@ -306,6 +328,9 @@ type Op struct {
 	Force     bool     `json:"force,omitempty"`
 	Resources []string `json:"resources,omitempty"` // Keys; none = all
 	Hard      bool     `json:"hard,omitempty"`      // refresh
+	// Trigger says why Forge itself started the operation: auto-sync (a new
+	// revision) or self-heal (live drifted); "" when a person did.
+	Trigger string `json:"trigger,omitempty"`
 	// Image is the desired image for providers whose desired state is a
 	// Forge deploy record (Cloud Run).
 	Image string `json:"image,omitempty"`
@@ -329,6 +354,14 @@ type ResourceResult struct {
 	Key     string `json:"key"`
 	Kind    string `json:"kind"`
 	Name    string `json:"name"`
-	Action  string `json:"action"` // created | configured | unchanged | pruned | failed | would-*
+	Action  string `json:"action"` // created | configured | unchanged | pruned | failed | succeeded (a hook) | would-*
 	Message string `json:"message,omitempty"`
+	Wave    int    `json:"wave,omitempty"`
+	Phase   string `json:"phase,omitempty"` // a hook's: PreSync | Sync | PostSync | SyncFail
 }
+
+// Op triggers.
+const (
+	TriggerAutoSync = "auto-sync"
+	TriggerSelfHeal = "self-heal"
+)

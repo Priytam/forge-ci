@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import type { Health, LiveApp, LiveSummary } from "../../api";
+import type { Health, LiveApp, LiveOp, LiveSummary } from "../../api";
 import type { Tone } from "../ui/Pill";
 
 /** Health in Forge's status language: colour means status, nothing else. */
@@ -151,4 +151,23 @@ export function shortImage(img?: string): string {
 /** "2/3 pods" or "" when the app has none. */
 export function podsLabel(a: Pick<LiveApp, "pods" | "pods_ready">): string {
   return a.pods ? `${a.pods_ready}/${a.pods} pods` : "";
+}
+
+/** Who started an operation, in words: a person, or Forge itself. */
+export function requester(o: Pick<LiveOp, "params" | "requested_by">): string {
+  if (o.params.trigger === "self-heal") return "Self-heal";
+  if (o.params.trigger === "auto-sync") return "Auto-sync";
+  return o.requested_by || "someone";
+}
+
+/** "Auto-sync", with its options, when it is on. */
+export function AutoSyncBadge({ app }: { app: Pick<LiveApp, "policy"> }) {
+  const p = app.policy;
+  if (!p?.auto_sync) return null;
+  const opts = [p.prune && "prune", p.self_heal && "self-heal"].filter(Boolean).join(", ");
+  return (
+    <span className="lv-auto" title={`Auto-sync on${opts ? ` (${opts})` : ""}: Forge syncs each new revision itself`}>
+      <Glyph d={GLYPH.Synced} size={11} /> auto{p.self_heal ? " · heal" : ""}
+    </span>
+  );
 }

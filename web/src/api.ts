@@ -2791,6 +2791,30 @@ export interface LiveApp {
   source_path: string;
   source_tool: string;
   source_error: string;
+  /** resources behind an OutOfSync: changed or missing, and to prune */
+  drifted: number;
+  prunable: number;
+  policy: LivePolicy | null;
+}
+
+/** How Forge keeps an application in sync with Git. */
+export interface LivePolicy {
+  auto_sync: boolean;
+  prune: boolean;
+  self_heal: boolean;
+  /** what auto-sync is doing, or why it waits */
+  status: string;
+  updated_by: string;
+  updated_at: string | null;
+}
+
+export function setLivePolicy(app: number, p: Pick<LivePolicy, "auto_sync" | "prune" | "self_heal">): Promise<LiveApp> {
+  return putJSON(`/live/apps/${app}/policy`, p);
+}
+
+/** The orphaned resources of an app's namespace: top-level objects no application claims (null: none). */
+export function getLiveOrphans(app: number): Promise<{ id: number; tree: { version: number; resources: LiveResource[] } } | null> {
+  return fetchJSON(`/live/apps/${app}/orphans`);
 }
 
 export interface LiveResource {
@@ -2804,6 +2828,10 @@ export interface LiveResource {
   health?: { status: Health; message?: string };
   /** compared with the desired state: absent when the resource is not in Git */
   sync?: "Synced" | "OutOfSync";
+  /** Forge applied it and Git no longer has it */
+  requires_pruning?: boolean;
+  /** a sync hook's phase: run by syncs, never compared */
+  hook?: string;
   summary: {
     ready?: string;
     status?: string;
@@ -2825,6 +2853,7 @@ export interface LiveCapabilities {
   logs: boolean;
   pods: boolean;
   network: boolean;
+  orphans: boolean;
 }
 
 /** A resource's key, as desired manifests are filed: group/kind/namespace/name. */
@@ -2977,6 +3006,8 @@ export interface LiveOpParams {
   container?: string;
   tail?: number;
   follow?: boolean;
+  /** set when Forge started it itself */
+  trigger?: "auto-sync" | "self-heal";
 }
 
 export interface LiveOp {
@@ -2989,7 +3020,7 @@ export interface LiveOp {
     ok: boolean;
     message: string;
     revision?: string;
-    resources?: { key: string; kind: string; name: string; action: string; message?: string }[];
+    resources?: { key: string; kind: string; name: string; action: string; message?: string; wave?: number; phase?: string }[];
   } | null;
   message: string;
   revision: string;

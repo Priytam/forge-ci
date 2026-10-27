@@ -8182,3 +8182,56 @@ textarea {
 .lv-pod:hover { border-color: var(--border-strong); }
 .lv-pod-on { border-color: var(--accent); box-shadow: 0 0 0 2px var(--focus); }
 .lv-pod-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Forge Live phase C: auto-sync, prune, hooks, orphans */
+.lv-auto {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.btn.lv-auto-on { border-color: color-mix(in srgb, var(--success) 50%, var(--border)); color: var(--success-fg); }
+.lv-drift-counts { margin-left: 8px; font-size: var(--fs-sm); font-weight: 400; color: var(--text-muted); }
+.lv-auto-line { margin-top: 4px; overflow-wrap: anywhere; }
+.lv-policy { gap: 10px; }
+.lv-policy .check-row { display: flex; align-items: flex-start; gap: 8px; }
+.lv-policy .check-row input { margin-top: 3px; }
+.lv-policy-sub { padding-left: 22px; }
+.lv-policy .lv-off { opacity: 0.55; }
+.lv-policy-how { margin: 14px 0 8px; padding-left: 18px; font-size: var(--fs-sm); display: flex; flex-direction: column; gap: 4px; }
+.lv-op-log {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  max-height: 160px;
+  overflow: auto;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  font-size: var(--fs-xs);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.lv-op-stage { display: block; color: var(--text-subtle); font-size: var(--fs-xs); }
+.lv-diff-prune { margin: 4px 0 12px; font-size: var(--fs-sm); }
+.lv-node-flag {
+  padding: 0 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--warning) 14%, var(--surface));
+  color: var(--warning-fg);
+  font-size: 10px;
+  text-transform: lowercase;
+}
+.lv-node-prune { border-style: dashed; border-left-style: solid; border-left-color: var(--warning); }
+.lv-node-orphan { border-style: dashed; background: var(--surface-2); opacity: 0.85; }
+.lv-orphan-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-sm); white-space: nowrap; }
+.lv-orphan-toggle .num { color: var(--text-muted); }
+.lv-health-note.lv-tone-warning {
+  border-color: color-mix(in srgb, var(--warning) 40%, transparent);
+  background: color-mix(in srgb, var(--warning) 8%, var(--surface));
+}
+.lv-panel-foot .lv-auto-line { flex-basis: 100%; width: 100%; }

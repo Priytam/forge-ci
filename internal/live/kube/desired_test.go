@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/priytamjeepandey/forge-ci/internal/live"
@@ -108,6 +109,10 @@ func (f *fakeApplier) Delete(_ context.Context, _, _, kind, _, name string, _ bo
 	return nil
 }
 
+func (f *fakeApplier) Get(context.Context, string, string, string, string, string) (*unstructured.Unstructured, error) {
+	return nil, nil
+}
+
 // state is the last report for one app: resources by name, its desired state.
 type state struct {
 	sync    map[string]string // Kind/name → sync
@@ -178,9 +183,23 @@ func TestDesiredStateDriftAndSync(t *testing.T) {
 	if st.sync["ConfigMap/cart-config"] != "" {
 		t.Errorf("a live object not in Git has a sync status: %q", st.sync["ConfigMap/cart-config"])
 	}
-	if st.status.Sync != live.OutOfSync {
-		t.Errorf("app sync with a missing resource = %q", st.status.Sync)
+	if st.status.Sync != live.OutOfSync || st.status.Drifted != 1 || st.status.Prunable != 0 {
+		t.Errorf("app sync with a missing resource = %+v", st.status)
 	}
+
+	// Once Forge has applied it (field manager "forge"), a live object Git
+	// does not have requires pruning; until then it is someone else's.
+	cm, err := cluster.Client.CoreV1().ConfigMaps("team").Get(ctx, "cart-config", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cm.Data = map[string]string{"touched": "by forge"}
+	if _, err := cluster.Client.CoreV1().ConfigMaps("team").Update(ctx, cm, metav1.UpdateOptions{FieldManager: kube.FieldManager}); err != nil {
+		t.Fatal(err)
+	}
+	take(t, tr, st, "the prunable object", func() bool {
+		return st.sync["ConfigMap/cart-config"] == live.OutOfSync && st.status != nil && st.status.Prunable == 1
+	})
 
 	// Drift: someone scales by hand.
 	cluster.Change(t, "team/cart")

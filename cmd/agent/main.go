@@ -45,6 +45,7 @@ func main() {
 		sourcePath = flag.String("source-path", "apps/{group}/{name}", "an application's directory in the source ({group}, {name}, {namespace})")
 		sourcePoll = flag.Duration("source-poll", 30*time.Second, "how often the source is fetched")
 		allowSync  = flag.Bool("allow-sync", false, "let Forge sync and prune (needs deploy/live/agent-sync.yaml)")
+		orphans    = flag.Bool("orphans", true, "report orphaned resources: top-level objects no application claims")
 		project    = flag.String("project", "", "Cloud Run: GCP project")
 		regions    = flag.String("regions", "", "Cloud Run: comma-separated regions")
 		period     = flag.Duration("period", 2*time.Minute, "Cloud Run: time between reconciles")
@@ -74,7 +75,8 @@ func main() {
 		if err != nil {
 			fatal("kubernetes client: %v", err)
 		}
-		kc := kube.Config{AppLabels: split(*appLabels), GroupLabel: *groupLabel, RootSelector: *rootSel, ExcludeNamespaces: split(*excludeNS)}
+		kc := kube.Config{AppLabels: split(*appLabels), GroupLabel: *groupLabel, RootSelector: *rootSel, ExcludeNamespaces: split(*excludeNS),
+			Orphans: *orphans}
 		if *sourceURL != "" {
 			kc.Source = &kube.Source{URL: *sourceURL, Branch: *branch, Path: *sourcePath, Poll: *sourcePoll, Token: os.Getenv("GIT_TOKEN")}
 		}

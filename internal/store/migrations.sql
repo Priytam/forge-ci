@@ -1580,3 +1580,27 @@ CREATE TABLE IF NOT EXISTS live_op_output (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (op_id, seq)
 );
+
+-- Forge Live (batch 9, phase C): auto-sync, drift counts, orphaned resources.
+-- An app's orphans row holds its namespace's top-level objects no
+-- application claims (key "<namespace>/"); it is never listed as an app.
+ALTER TABLE live_apps ADD COLUMN IF NOT EXISTS orphans BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE live_apps ADD COLUMN IF NOT EXISTS drifted INT NOT NULL DEFAULT 0;
+ALTER TABLE live_apps ADD COLUMN IF NOT EXISTS prunable INT NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS live_apps_out_of_sync_idx ON live_apps (target_id, key) WHERE sync = 'OutOfSync';
+
+-- An application's sync policy. Keyed by target and app key, not the app's
+-- row, so it outlives the row (an app whose resources all go and come back).
+-- status says what auto-sync is doing, or why it is waiting.
+CREATE TABLE IF NOT EXISTS live_app_policies (
+    target_id  BIGINT      NOT NULL REFERENCES live_targets(id) ON DELETE CASCADE,
+    app_key    TEXT        NOT NULL,
+    auto_sync  BOOLEAN     NOT NULL DEFAULT FALSE,
+    prune      BOOLEAN     NOT NULL DEFAULT FALSE,
+    self_heal  BOOLEAN     NOT NULL DEFAULT FALSE,
+    status     TEXT        NOT NULL DEFAULT '',
+    updated_by TEXT        NOT NULL DEFAULT '',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (target_id, app_key)
+);
+CREATE INDEX IF NOT EXISTS live_app_policies_auto_idx ON live_app_policies (target_id, app_key) WHERE auto_sync;

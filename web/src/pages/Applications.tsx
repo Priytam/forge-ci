@@ -3,7 +3,7 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { listLiveApps, relativeTime, subscribeLive, type LiveApp, type LiveAppsPage, type LiveFacet } from "../api";
 import Avatar, { displayName } from "../components/Avatar";
 import Icon from "../components/Icon";
-import { HEALTH_ORDER, HEALTH_TONE, HealthIcon, HealthPill, KindIcon, podsLabel, shortImage, SyncPill } from "../components/live/ui";
+import { AutoSyncBadge, HEALTH_ORDER, HEALTH_TONE, HealthIcon, HealthPill, KindIcon, podsLabel, shortImage, SyncPill } from "../components/live/ui";
 import { Skeleton } from "../components/ui/Pill";
 
 const FACETS: { id: LiveFacet; label: string }[] = [
@@ -183,7 +183,7 @@ export function ApplicationList({ fixedRepo }: { fixedRepo?: string }) {
                     <tr key={a.id} onClick={() => navigate(`/applications/${a.id}`)} className="lv-click">
                       <td><Link to={`/applications/${a.id}`} className="lv-app-name">{a.name}</Link></td>
                       <td><HealthPill health={a.health} title={a.health_message} /></td>
-                      <td><SyncPill sync={a.sync} /></td>
+                      <td><SyncPill sync={a.sync} /> <AutoSyncBadge app={a} /></td>
                       <td>{a.environment || <span className="muted">—</span>}</td>
                       <td className="muted">{a.target}</td>
                       <td className="muted">{a.namespace}</td>
@@ -245,6 +245,7 @@ function Tile({ a }: { a: LiveApp }) {
       <div className="lv-tile-status">
         <HealthPill health={a.health} />
         <SyncPill sync={a.sync} />
+        <AutoSyncBadge app={a} />
       </div>
       <dl className="lv-tile-facts">
         <dt>Where</dt>

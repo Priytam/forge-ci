@@ -19,9 +19,11 @@ import (
 
 // root is a top-level object of an application, as last seen live.
 type root struct {
-	uid  string
-	app  *live.App
-	live []byte // trimmed manifest JSON
+	uid   string
+	app   *live.App
+	live  []byte // trimmed manifest JSON
+	forge bool   // Forge applied it
+	hook  bool   // a sync hook: run by syncs, never compared or pruned
 }
 
 // appDesired is an application's desired state at one revision.
@@ -50,40 +52,46 @@ func keyOf(u *unstructured.Unstructured) string {
 	return live.Key(group, u.GetKind(), u.GetNamespace(), u.GetName())
 }
 
-// syncOf compares a live root with its desired manifest ("" when the app has
-// no desired state or the object is not in it).
-func (d *appDesired) syncOf(key string, liveJSON []byte) string {
-	if d == nil {
-		return ""
+// syncOf compares a live root with its desired manifest: "" when the app has
+// no desired state, the root is a hook, or it is not in Git and Forge did
+// not put it there (someone else manages it). Not in Git but applied by
+// Forge, it is OutOfSync and requires pruning.
+func (d *appDesired) syncOf(key string, rt *root) (sync string, prune bool) {
+	if d == nil || rt.hook {
+		return "", false
 	}
 	obj := d.objs[key]
 	if obj == nil {
-		return ""
+		if rt.forge {
+			return live.OutOfSync, true
+		}
+		return "", false
 	}
 	var lv map[string]any
-	if json.Unmarshal(liveJSON, &lv) != nil {
-		return live.OutOfSync
+	if json.Unmarshal(rt.live, &lv) != nil {
+		return live.OutOfSync, false
 	}
 	if ok, _ := inSync(obj.Object, lv); ok {
-		return live.Synced
+		return live.Synced, false
 	}
-	return live.OutOfSync
+	return live.OutOfSync, false
 }
 
 // noteRoot records a live top-level object and sets its sync status (w.mu held).
 func (w *watcher) noteRoot(n *node, res *live.Resource) {
-	if w.p.repo == nil || n.owner != "" || n.app == nil {
+	if w.p.repo == nil || n.owner != "" || n.app == nil || n.app.Orphans {
 		return
 	}
 	key := res.Key()
 	n.key = key
-	w.roots[key] = &root{uid: res.UID, app: n.app, live: res.Manifest}
+	rt := &root{uid: res.UID, app: n.app, live: res.Manifest, forge: n.forge, hook: res.Hook != ""}
+	w.roots[key] = rt
 	if w.rootsByApp[n.app.Key] == nil {
 		w.rootsByApp[n.app.Key] = map[string]bool{}
 	}
 	w.rootsByApp[n.app.Key][key] = true
 	d := w.desired[n.app.Key]
-	res.Sync = d.syncOf(key, res.Manifest)
+	res.Sync, res.RequiresPruning = d.syncOf(key, rt)
 	if d != nil && d.missing[key] {
 		delete(d.missing, key)
 		w.sink.Delete(*n.app, live.DesiredPrefix+key)
@@ -133,6 +141,9 @@ func (w *watcher) setDesired(app live.App, rev live.Revision, path string, r *re
 		out.Tool = r.tool
 		d := &appDesired{rev: rev, objs: map[string]*unstructured.Unstructured{}, missing: map[string]bool{}}
 		for _, u := range r.objects {
+			if hookOf(u.GetAnnotations()).phase != "" {
+				continue // hooks run during a sync; they are not desired state
+			}
 			key := keyOf(u)
 			out.Manifests[key] = manifestJSON(u)
 			if watchedKinds[strings.SplitN(key, "/", 3)[0]+"/"+u.GetKind()] {
@@ -144,7 +155,8 @@ func (w *watcher) setDesired(app live.App, rev live.Revision, path string, r *re
 	d := w.desired[app.Key]
 	for key := range w.rootsByApp[app.Key] {
 		rt := w.roots[key]
-		w.sink.SetSync(*a, rt.uid, d.syncOf(key, rt.live))
+		sync, prune := d.syncOf(key, rt)
+		w.sink.SetSync(*a, rt.uid, sync, prune)
 	}
 	if prev != nil {
 		for key := range prev.missing {

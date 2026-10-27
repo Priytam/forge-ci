@@ -50,6 +50,9 @@ type Config struct {
 	Source *Source
 	// Applier, when set, lets Forge sync (server-side apply) and prune.
 	Applier Applier
+	// Orphans: also report each namespace's orphaned resources — top-level
+	// objects (no owner) that no application claims.
+	Orphans bool
 }
 
 // kind is one watched resource type.
@@ -176,7 +179,7 @@ func New(client kubernetes.Interface, cfg Config) (*Provider, error) {
 func (p *Provider) Name() string { return "kubernetes" }
 
 func (p *Provider) Capabilities() live.Capabilities {
-	return live.Capabilities{Events: true, Manifests: true, Watch: true, Logs: true, Pods: true,
+	return live.Capabilities{Events: true, Manifests: true, Watch: true, Logs: true, Pods: true, Orphans: p.cfg.Orphans,
 		Diff: p.repo != nil, Sync: p.applier != nil && p.repo != nil, Rollback: p.applier != nil && p.repo != nil}
 }
 
@@ -328,6 +331,7 @@ type node struct {
 	app      *live.App // nil: not part of an application
 	owner    string
 	key      string   // live.Key, for top-level objects tracked against desired state
+	forge    bool     // Forge applied it (field manager "forge"): prunable when Git drops it
 	self     []string // []string{uid}: every child's Parents, shared
 	children int32    // watched objects this one controls
 }
@@ -401,19 +405,56 @@ func (w *watcher) apply(k *kind, obj any) {
 		}
 		return
 	}
+	forge := false
+	if m, ok := obj.(metav1.Object); ok {
+		forge = managedByForge(m) // before convert trims managed fields
+	}
 	meta, res, ok := convert(k, obj)
 	if !ok {
 		return
 	}
+	res.Hook = hookOf(meta.GetAnnotations()).phase
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	owner := w.str(ownerOf(meta))
 	w.intern(&res)
 	var root *live.App
 	if owner == "" {
-		root = w.appFor(meta)
+		var named bool
+		root, named = w.appFor(meta)
+		// Orphans: nothing names their application (an object the root
+		// selector leaves out is someone else's, not an orphan).
+		if !named && w.p.cfg.Orphans && len(meta.GetOwnerReferences()) == 0 && !ignoredOrphan(k, meta) {
+			root = w.orphansOf(meta.GetNamespace())
+		}
 	}
-	w.place(k, res, owner, root)
+	w.place(k, res, owner, root, forge)
+}
+
+func managedByForge(m metav1.Object) bool {
+	for _, f := range m.GetManagedFields() {
+		if f.Manager == FieldManager {
+			return true
+		}
+	}
+	return false
+}
+
+// ignoredOrphan: objects every namespace has, which nobody would call orphaned.
+func ignoredOrphan(k *kind, m metav1.Object) bool {
+	return (k.name == "ConfigMap" && m.GetName() == "kube-root-ca.crt") ||
+		(k.name == "Service" && m.GetName() == "kubernetes" && m.GetNamespace() == "default")
+}
+
+// orphansOf is namespace's orphaned resources, reported like an application.
+func (w *watcher) orphansOf(namespace string) *live.App {
+	key := live.OrphansKey(namespace)
+	a := w.apps[key]
+	if a == nil {
+		a = &live.App{Key: key, Name: namespace, Namespace: namespace, Orphans: true}
+		w.apps[key] = a
+	}
+	return a
 }
 
 // Interning: thousands of pods share their namespace, images, node, owner
@@ -451,8 +492,10 @@ func (w *watcher) intern(r *live.Resource) {
 	}
 }
 
-// appFor names a top-level object's application from its labels.
-func (w *watcher) appFor(m metav1.Object) *live.App {
+// appFor names a top-level object's application from its labels; named
+// says whether a label names one at all (the root selector may still
+// leave it out).
+func (w *watcher) appFor(m metav1.Object) (app *live.App, named bool) {
 	l := m.GetLabels()
 	name := ""
 	for _, key := range w.p.cfg.AppLabels {
@@ -460,8 +503,11 @@ func (w *watcher) appFor(m metav1.Object) *live.App {
 			break
 		}
 	}
-	if name == "" || (w.p.selector != nil && !w.p.selector.Matches(labels.Set(l))) {
-		return nil
+	if name == "" {
+		return nil, false
+	}
+	if w.p.selector != nil && !w.p.selector.Matches(labels.Set(l)) {
+		return nil, true
 	}
 	key := m.GetNamespace() + "/" + name
 	a := w.apps[key]
@@ -469,12 +515,12 @@ func (w *watcher) appFor(m metav1.Object) *live.App {
 		a = &live.App{Key: key, Name: name, Namespace: m.GetNamespace(), Group: l[w.p.cfg.GroupLabel]}
 		w.apps[key] = a
 	}
-	return a
+	return a, true
 }
 
 // place records res under its application — the root's, or its owner's —
 // and settles any children that were waiting for it.
-func (w *watcher) place(k *kind, res live.Resource, owner string, app *live.App) {
+func (w *watcher) place(k *kind, res live.Resource, owner string, app *live.App, forge bool) {
 	uid := res.UID
 	if owner != "" {
 		on := w.nodes[owner]
@@ -510,7 +556,7 @@ func (w *watcher) place(k *kind, res live.Resource, owner string, app *live.App)
 			on.children++
 		}
 	}
-	n.app, n.owner = app, owner
+	n.app, n.owner, n.forge = app, owner, forge
 	w.noteRoot(n, &res)
 	if app != nil {
 		w.sink.Upsert(*app, res)
@@ -519,7 +565,7 @@ func (w *watcher) place(k *kind, res live.Resource, owner string, app *live.App)
 		delete(w.parked, uid)
 		for cuid, c := range kids {
 			delete(w.parkedBy, cuid)
-			w.place(c.kind, c.res, uid, nil)
+			w.place(c.kind, c.res, uid, nil, false)
 		}
 	}
 }

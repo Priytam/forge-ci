@@ -39,6 +39,10 @@ func (a *applyLog) Delete(context.Context, string, string, string, string, strin
 	return nil
 }
 
+func (a *applyLog) Get(context.Context, string, string, string, string, string) (*unstructured.Unstructured, error) {
+	return nil, nil
+}
+
 func gitSource(t *testing.T) string {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {

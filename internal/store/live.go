@@ -88,6 +88,22 @@ type LiveApp struct {
 	Repo            string      `json:"repo"`
 	Provider        string      `json:"provider"`
 	Deployed        *LiveDeploy `json:"deployed"`
+	// Drifted and Prunable count the resources behind an OutOfSync.
+	Drifted  int         `json:"drifted"`
+	Prunable int         `json:"prunable"`
+	Orphans  bool        `json:"-"` // a namespace's orphaned resources, not an app
+	Policy   *LivePolicy `json:"policy"`
+}
+
+// LivePolicy is how Forge keeps an application in sync with Git.
+type LivePolicy struct {
+	AutoSync bool `json:"auto_sync"` // sync each new revision
+	Prune    bool `json:"prune"`     // auto-syncs prune what Git dropped
+	SelfHeal bool `json:"self_heal"` // and undo live drift
+	// Status: what auto-sync is doing, or why it waits.
+	Status    string     `json:"status"`
+	UpdatedBy string     `json:"updated_by"`
+	UpdatedAt *time.Time `json:"updated_at"`
 }
 
 // SetStatus applies an agent's status; health_since moves only when the
@@ -98,6 +114,7 @@ func (a *LiveApp) SetStatus(st live.Status, now time.Time) {
 	}
 	a.Health, a.HealthMessage = st.Health.Status, st.Health.Message
 	a.Resources, a.Pods, a.PodsReady, a.Images = st.Resources, st.Pods, st.PodsReady, st.Images
+	a.Drifted, a.Prunable = st.Drifted, st.Prunable
 	if st.Sync != "" {
 		a.Sync = st.Sync
 	} else {
@@ -163,7 +180,7 @@ func (s *Store) LiveTargetByToken(ctx context.Context, token string) (*LiveTarge
 
 // LiveTargets lists every target with its application count.
 func (s *Store) LiveTargets(ctx context.Context) ([]LiveTarget, error) {
-	rows, err := s.pool.Query(ctx, `SELECT `+liveTargetCols+`, (SELECT count(*) FROM live_apps a WHERE a.target_id = t.id)
+	rows, err := s.pool.Query(ctx, `SELECT `+liveTargetCols+`, (SELECT count(*) FROM live_apps a WHERE a.target_id = t.id AND NOT a.orphans)
 		FROM live_targets t ORDER BY t.name`)
 	if err != nil {
 		return nil, err
@@ -309,13 +326,15 @@ func (s *Store) LiveIngest(ctx context.Context, targetID int64, fn func(*LiveTx)
 
 const liveAppCols = `a.id, a.target_id, a.key, a.name, a.namespace, a.app_group, a.health, a.health_message, a.health_since,
 	a.sync, a.resources, a.pods, a.pods_ready, a.images, a.tree, a.version, a.epoch, a.updated_at,
-	a.revision, a.revision_message, a.revision_author, a.revision_at, a.source_path, a.source_tool, a.source_error, a.desired_keys`
+	a.revision, a.revision_message, a.revision_author, a.revision_at, a.source_path, a.source_tool, a.source_error, a.desired_keys,
+	a.orphans, a.drifted, a.prunable`
 
 func scanLiveApp(row pgx.Row, extra ...any) (*LiveApp, error) {
 	var a LiveApp
 	dest := append([]any{&a.ID, &a.TargetID, &a.Key, &a.Name, &a.Namespace, &a.Group, &a.Health, &a.HealthMessage, &a.HealthSince,
 		&a.Sync, &a.Resources, &a.Pods, &a.PodsReady, &a.Images, &a.Tree, &a.Version, &a.Epoch, &a.UpdatedAt,
-		&a.Revision, &a.RevisionMessage, &a.RevisionAuthor, &a.RevisionAt, &a.SourcePath, &a.SourceTool, &a.SourceError, &a.DesiredKeys}, extra...)
+		&a.Revision, &a.RevisionMessage, &a.RevisionAuthor, &a.RevisionAt, &a.SourcePath, &a.SourceTool, &a.SourceError, &a.DesiredKeys,
+		&a.Orphans, &a.Drifted, &a.Prunable}, extra...)
 	if err := row.Scan(dest...); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
@@ -367,26 +386,28 @@ func (l *LiveTx) SaveApp(ctx context.Context, a *LiveApp, summary bool) error {
 	var err error
 	if a.ID == 0 {
 		err = l.tx.QueryRow(ctx, `INSERT INTO live_apps (target_id, key, name, namespace, app_group, health, health_message, health_since,
-			resources, pods, pods_ready, images, tree, version, epoch)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id, updated_at`,
+			resources, pods, pods_ready, images, tree, version, epoch, orphans)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id, updated_at`,
 			l.Target.ID, a.Key, a.Name, a.Namespace, a.Group, a.Health, a.HealthMessage, a.HealthSince,
-			a.Resources, a.Pods, a.PodsReady, a.Images, a.Tree, a.Version, a.Epoch).Scan(&a.ID, &a.UpdatedAt)
+			a.Resources, a.Pods, a.PodsReady, a.Images, a.Tree, a.Version, a.Epoch, a.Orphans).Scan(&a.ID, &a.UpdatedAt)
 		summary = true
 	} else {
 		err = l.tx.QueryRow(ctx, `UPDATE live_apps SET name=$2, namespace=$3, app_group=$4, health=$5, health_message=$6, health_since=$7,
 			resources=$8, pods=$9, pods_ready=$10, images=$11, tree=$12, version=$13, epoch=$14, sync=$15,
 			revision=$16, revision_message=$17, revision_author=$18, revision_at=$19, source_path=$20, source_tool=$21,
-			source_error=$22, desired_keys=$23, updated_at=now()
+			source_error=$22, desired_keys=$23, drifted=$24, prunable=$25, updated_at=now()
 			WHERE id=$1 RETURNING updated_at`,
 			a.ID, a.Name, a.Namespace, a.Group, a.Health, a.HealthMessage, a.HealthSince,
 			a.Resources, a.Pods, a.PodsReady, a.Images, a.Tree, a.Version, a.Epoch, a.Sync,
 			a.Revision, a.RevisionMessage, a.RevisionAuthor, a.RevisionAt, a.SourcePath, a.SourceTool,
-			a.SourceError, a.DesiredKeys).Scan(&a.UpdatedAt)
+			a.SourceError, a.DesiredKeys, a.Drifted, a.Prunable).Scan(&a.UpdatedAt)
 	}
 	if err != nil {
 		return err
 	}
-	return notifyLive(ctx, l.tx, liveNote{ID: a.ID, V: a.Version, Summary: summary})
+	// An orphans row is never on the Applications page: only a page showing
+	// it (subscribed to its patches) hears about it.
+	return notifyLive(ctx, l.tx, liveNote{ID: a.ID, V: a.Version, Summary: summary && !a.Orphans})
 }
 
 // DeleteApp removes an application (its events go with it).
@@ -458,7 +479,7 @@ func (q LiveAppQuery) values(dim string) []string {
 // ignore the facet's own selection, so picking Degraded still shows how
 // many are Healthy).
 func (q LiveAppQuery) where(skip string) (string, []any) {
-	conds, args := []string{"TRUE"}, []any{}
+	conds, args := []string{"NOT a.orphans"}, []any{}
 	for _, d := range liveDims {
 		if vs := q.values(d.name); len(vs) > 0 && d.name != skip {
 			args = append(args, vs)
@@ -483,16 +504,26 @@ const liveDeployJoin = ` LEFT JOIN LATERAL (
 	ORDER BY d.id DESC LIMIT 1) dep ON TRUE`
 
 const liveAppSelect = `SELECT ` + liveAppCols + `, t.name, t.environment, t.repo, t.provider,
-	dep.sha, dep.deployed_by, dep.deployed_at, dep.job_id, dep.pipeline_id, dep.digest` + liveAppFrom + liveDeployJoin
+	dep.sha, dep.deployed_by, dep.deployed_at, dep.job_id, dep.pipeline_id, dep.digest,
+	p.auto_sync, p.prune, p.self_heal, p.status, p.updated_by, p.updated_at` + liveAppFrom + liveDeployJoin +
+	` LEFT JOIN live_app_policies p ON p.target_id = a.target_id AND p.app_key = a.key`
 
 func scanLiveAppRow(row pgx.Row) (*LiveApp, error) {
 	var sha, by, digest *string
 	var at *time.Time
 	var job, pipe *int64
 	var target, env, repo, provider string
-	a, err := scanLiveApp(row, &target, &env, &repo, &provider, &sha, &by, &at, &job, &pipe, &digest)
+	var auto, prune, heal *bool
+	var status, pby *string
+	var pat *time.Time
+	a, err := scanLiveApp(row, &target, &env, &repo, &provider, &sha, &by, &at, &job, &pipe, &digest,
+		&auto, &prune, &heal, &status, &pby, &pat)
 	if err != nil {
 		return nil, err
+	}
+	a.Policy = &LivePolicy{}
+	if auto != nil {
+		a.Policy = &LivePolicy{AutoSync: *auto, Prune: *prune, SelfHeal: *heal, Status: *status, UpdatedBy: *pby, UpdatedAt: pat}
 	}
 	a.Target, a.Environment, a.Repo, a.Provider = target, env, repo, provider
 	if sha != nil {
@@ -603,7 +634,7 @@ func (s *Store) LiveAppEvents(ctx context.Context, appID int64, resourceUID stri
 // (all repos when nil).
 func (s *Store) LiveSummaries(ctx context.Context, repos []string) (map[string]map[string]*proto.LiveSummary, error) {
 	rows, err := s.pool.Query(ctx, `SELECT t.repo, t.environment, a.health, count(*)`+liveAppFrom+`
-		WHERE t.repo <> '' AND ($1::text[] IS NULL OR t.repo = ANY($1)) GROUP BY 1, 2, 3`, repos)
+		WHERE t.repo <> '' AND NOT a.orphans AND ($1::text[] IS NULL OR t.repo = ANY($1)) GROUP BY 1, 2, 3`, repos)
 	if err != nil {
 		return nil, err
 	}
@@ -634,7 +665,7 @@ func (s *Store) LiveSummaries(ctx context.Context, repos []string) (map[string]m
 
 // LiveHealthCounts counts apps per health (for metrics).
 func (s *Store) LiveHealthCounts(ctx context.Context) (map[string]int, error) {
-	rows, err := s.pool.Query(ctx, `SELECT health, count(*) FROM live_apps GROUP BY 1`)
+	rows, err := s.pool.Query(ctx, `SELECT health, count(*) FROM live_apps WHERE NOT orphans GROUP BY 1`)
 	if err != nil {
 		return nil, err
 	}

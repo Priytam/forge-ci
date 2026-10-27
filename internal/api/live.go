@@ -39,6 +39,7 @@ func (s *Server) liveReadRoutes() map[string]http.HandlerFunc {
 		"GET /api/v1/live/apps/{id}/ops":             s.liveAppOps,
 		"GET /api/v1/live/ops/{id}":                  s.getLiveOp,
 		"GET /api/v1/live/ops/{id}/output":           s.streamLiveOpOutput,
+		"GET /api/v1/live/apps/{id}/orphans":         s.liveOrphans,
 	}
 }
 
@@ -50,6 +51,7 @@ func (s *Server) registerLiveRoutes() {
 	s.mux.HandleFunc("DELETE /api/v1/live/targets/{id}", s.deleteLiveTarget)
 	s.mux.HandleFunc("POST /api/v1/live/agent/batches", s.liveAgentBatch)
 	s.mux.HandleFunc("POST /api/v1/live/apps/{id}/ops", s.createLiveOp)
+	s.mux.HandleFunc("PUT /api/v1/live/apps/{id}/policy", s.setLivePolicy)
 	s.mux.HandleFunc("POST /api/v1/live/ops/{id}/approve", s.approveLiveOp)
 	s.mux.HandleFunc("POST /api/v1/live/ops/{id}/cancel", s.cancelLiveOp)
 	s.mux.HandleFunc("POST /api/v1/live/agent/ops/next", s.liveAgentNextOp)
@@ -57,9 +59,12 @@ func (s *Server) registerLiveRoutes() {
 	s.mux.HandleFunc("POST /api/v1/live/agent/ops/{id}/result", s.liveAgentOpResult)
 }
 
-// RunLive runs Forge Live's background work (collecting unreferenced blobs)
-// until ctx ends.
-func (s *Server) RunLive(ctx context.Context) { s.live.Sweep(ctx) }
+// RunLive runs Forge Live's background work (auto-sync, collecting
+// unreferenced blobs) until ctx ends.
+func (s *Server) RunLive(ctx context.Context) {
+	go s.live.AutoSync(ctx)
+	s.live.Sweep(ctx)
+}
 
 // maxLiveBatch caps a decompressed agent batch (agents send ≤2 MiB of
 // resources per batch).
@@ -470,10 +475,18 @@ func (s *Server) createLiveOp(w http.ResponseWriter, r *http.Request) {
 	// Providers whose desired state is the deploy record (Cloud Run) sync
 	// to the image Forge last deployed.
 	if op.Kind == live.OpSync && !caps.Diff && op.Image == "" {
-		if op.Image = deployedImage(a); op.Image == "" {
+		if op.Image = a.DeployedImage(); op.Image == "" {
 			writeErr(w, http.StatusBadRequest, "no Forge deploy with an image digest to sync to")
 			return
 		}
+	}
+	// With auto-sync on, Git's revision is what runs: a sync to another
+	// one would be undone at once. A rollback turns auto-sync off instead.
+	offHead := op.Kind == live.OpRollback || op.Kind == live.OpSync && op.Revision != "" && op.Revision != a.Revision
+	if offHead && a.Policy.AutoSync && !op.DryRun && op.Kind == live.OpSync {
+		writeErr(w, http.StatusConflict, fmt.Sprintf("Auto-sync is on: it would sync %s straight back to %s. Roll back instead "+
+			"(that turns auto-sync off), or turn auto-sync off first.", a.Name, shortRev(a.Revision)))
+		return
 	}
 	o, err := s.store.CreateLiveOp(r.Context(), id, op, s.actorLabel(r))
 	switch {
@@ -489,23 +502,112 @@ func (s *Server) createLiveOp(w http.ResponseWriter, r *http.Request) {
 		s.audit(r, "live."+op.Kind, a.Target+"/"+a.Key, a.Repo, "requested", map[string]any{
 			"op": o.ID, "revision": op.Revision, "prune": op.Prune, "dry_run": op.DryRun, "force": op.Force, "state": o.State})
 	}
+	if offHead && a.Policy.AutoSync && !op.DryRun {
+		p := *a.Policy
+		p.AutoSync, p.Status = false, "Turned off by the rollback to "+shortRev(op.Revision)
+		if err := s.store.SetLivePolicy(r.Context(), id, p, s.actorLabel(r)); err != nil {
+			slog.Error("live: turn auto-sync off", "id", id, "err", err)
+		} else {
+			s.audit(r, "live.policy", a.Target+"/"+a.Key, a.Repo, "updated", map[string]any{"auto_sync": false, "reason": "rollback", "op": o.ID})
+		}
+	}
 	writeJSON(w, http.StatusCreated, o)
 }
 
-// deployedImage is the image the latest Forge deploy pushed: the running
-// image's repository at the deploy record's digest.
-func deployedImage(a *store.LiveApp) string {
-	if a.Deployed == nil || a.Deployed.Digest == "" || len(a.Images) == 0 {
-		return ""
+func shortRev(s string) string {
+	if len(s) > 7 {
+		return s[:7]
 	}
-	digest := a.Deployed.Digest
-	repo := a.Images[0]
-	if i := strings.Index(repo, "@"); i >= 0 {
-		repo = repo[:i]
-	} else if i := strings.LastIndex(repo, ":"); i > strings.LastIndex(repo, "/") {
-		repo = repo[:i]
+	return s
+}
+
+// setLivePolicy is PUT /api/v1/live/apps/{id}/policy: auto-sync, and with
+// it prune and self-heal. It needs the operate role and a target that can
+// sync; self-heal is refused where every change needs an approval (a heal
+// that waits for a person is not one).
+func (s *Server) setLivePolicy(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid application id")
+		return
 	}
-	return repo + "@" + digest
+	var p store.LivePolicy
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	a, err := s.store.LiveApp(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "application not found")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to load the application")
+		return
+	}
+	if !s.requireOperate(w, r, a.Repo) {
+		return
+	}
+	t, err := s.store.LiveAppTarget(r.Context(), id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to load the target")
+		return
+	}
+	if p.AutoSync && !t.Capabilities.Sync {
+		writeErr(w, http.StatusBadRequest, t.Name+"'s agent cannot sync (it has no write access)")
+		return
+	}
+	if p.AutoSync && p.SelfHeal {
+		_, approvals, err := s.store.LiveChangeGate(r.Context(), a.Repo, a.Environment)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "failed to read the environment's rules")
+			return
+		}
+		if approvals > 0 {
+			writeErr(w, http.StatusConflict, fmt.Sprintf("Every change to %s needs an approval, so it cannot heal itself. "+
+				"Auto-sync without self-heal works: each new revision waits for its approval.", a.Environment))
+			return
+		}
+	}
+	p.Status = ""
+	if err := s.store.SetLivePolicy(r.Context(), id, p, s.actorLabel(r)); err != nil {
+		slog.Error("live: set policy", "id", id, "err", err)
+		writeErr(w, http.StatusInternalServerError, "failed to save the sync policy")
+		return
+	}
+	s.audit(r, "live.policy", a.Target+"/"+a.Key, a.Repo, "updated", map[string]any{
+		"auto_sync": p.AutoSync, "prune": p.Prune, "self_heal": p.SelfHeal})
+	if a, err = s.store.LiveApp(r.Context(), id); err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to load the application")
+		return
+	}
+	writeJSON(w, http.StatusOK, a)
+}
+
+// liveOrphans is GET /api/v1/live/apps/{id}/orphans: the orphaned resources
+// of the app's namespace (top-level objects no application claims), as a
+// row and tree pages follow like an app's. Null when there are none.
+func (s *Server) liveOrphans(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid application id")
+		return
+	}
+	o, err := s.store.LiveOrphans(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeJSON(w, http.StatusOK, nil)
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to load orphaned resources")
+		return
+	}
+	tree, err := s.live.Tree(r.Context(), o)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to load orphaned resources")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": o.ID, "tree": tree})
 }
 
 func (s *Server) approveLiveOp(w http.ResponseWriter, r *http.Request) {

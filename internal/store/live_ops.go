@@ -82,18 +82,14 @@ func (s *Store) CreateLiveOp(ctx context.Context, appID int64, p live.Op, by str
 		return nil, err
 	}
 	state := "pending"
-	changes := p.Kind == live.OpSync || p.Kind == live.OpRollback
-	if changes && !p.DryRun && a.Environment != "" {
-		if frozen, err := s.IsFrozen(ctx, a.Repo, a.Environment); err != nil {
+	if (p.Kind == live.OpSync || p.Kind == live.OpRollback) && !p.DryRun {
+		frozen, approvals, err := s.LiveChangeGate(ctx, a.Repo, a.Environment)
+		switch {
+		case err != nil:
 			return nil, err
-		} else if frozen {
+		case frozen:
 			return nil, ErrFrozen
-		}
-		rule, err := s.resolveProtectedEnv(ctx, a.Repo, a.Environment)
-		if err != nil {
-			return nil, err
-		}
-		if rule != nil && rule.RequiredApprovals > 0 {
+		case approvals > 0:
 			state = "approval"
 		}
 	}

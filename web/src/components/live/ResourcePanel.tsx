@@ -18,10 +18,13 @@ export default function ResourcePanel({
   resource,
   byUid,
   caps,
+  orphan,
   onSelect,
   onClose,
 }: {
   appId: number;
+  /** an orphaned resource of the namespace (appId is then the orphans row) */
+  orphan?: boolean;
   resource: LiveResource;
   byUid: Map<string, LiveResource>;
   caps: LiveCapabilities;
@@ -30,7 +33,7 @@ export default function ResourcePanel({
 }) {
   const r = resource;
   const missing = r.uid.startsWith("desired:");
-  const inGit = r.sync !== undefined || missing;
+  const inGit = (r.sync !== undefined && !r.requires_pruning) || missing;
   const [tab, setTab] = useState<Tab>(r.sync === "OutOfSync" ? "diff" : "summary");
   const [diffOpts, setDiffOpts] = useState<DiffOptions>(DEFAULT_DIFF);
   const tabs: [Tab, string][] = [["summary", "Summary"]];
@@ -63,7 +66,14 @@ export default function ResourcePanel({
           </button>
         ))}
       </div>
-      {tab === "summary" && <Summary r={r} byUid={byUid} onSelect={onSelect} />}
+      {tab === "summary" && (
+        <>
+          {orphan && <div className="lv-health-note lv-tone-warning">Orphaned: no application claims this {r.kind}. Label it to adopt it into one, or delete it.</div>}
+          {r.requires_pruning && <div className="lv-health-note lv-tone-warning">Forge applied this and Git no longer has it: a sync with Prune deletes it.</div>}
+          {r.hook && <div className="lv-health-note lv-tone-neutral">A {r.hook} hook: syncs run it; it is never compared with Git or pruned.</div>}
+          <Summary r={r} byUid={byUid} onSelect={onSelect} />
+        </>
+      )}
       {tab === "events" && <Events appId={appId} uid={r.uid} />}
       {tab === "logs" && <LogsTab appId={appId} pod={r} />}
       {tab === "manifest" && <Manifest id={`live:${r.uid}`} load={() => getLiveManifest(appId, r.uid)} note="As last reported by the agent. Managed fields and large data values are left out." />}

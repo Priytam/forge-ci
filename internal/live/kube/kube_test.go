@@ -162,9 +162,9 @@ func (r *recorder) Delete(_ live.App, uid string)  { delete(r.res, uid); delete(
 func (r *recorder) Event(_ live.App, e live.Event) { r.events = append(r.events, e) }
 func (r *recorder) Synced()                        {}
 func (r *recorder) Desired(live.App, live.Desired) {}
-func (r *recorder) SetSync(_ live.App, uid, sync string) {
+func (r *recorder) SetSync(_ live.App, uid, sync string, prune bool) {
 	if res, ok := r.res[uid]; ok {
-		res.Sync = sync
+		res.Sync, res.RequiresPruning = sync, prune
 		r.res[uid] = res
 	}
 }
@@ -254,5 +254,47 @@ func TestGroupingRootSelectorAndRestart(t *testing.T) {
 	}
 	if rec.app["dep1"] != "checkout/basket" {
 		t.Errorf("deployment app = %q", rec.app["dep1"])
+	}
+}
+
+// With Orphans on, top-level objects no application claims are reported
+// per namespace — with their children — but never what an owner controls,
+// nor what every namespace has.
+func TestOrphans(t *testing.T) {
+	w, rec := newWatcher(t, Config{Orphans: true})
+	w.apply(kindNamed("Deployment"), &appsv1.Deployment{ObjectMeta: owned("cart-api", "dep1", "", "", appLabels)})
+	w.apply(kindNamed("Deployment"), &appsv1.Deployment{ObjectMeta: owned("debug-shell", "dep2", "", "", nil)})
+	w.apply(kindNamed("ReplicaSet"), &appsv1.ReplicaSet{ObjectMeta: owned("debug-shell-x", "rs2", "Deployment", "dep2", nil)})
+	w.apply(kindNamed("ConfigMap"), &corev1.ConfigMap{ObjectMeta: owned("kube-root-ca.crt", "cm0", "", "", nil)})
+	cron := owned("nightly-1", "job1", "", "", nil)
+	cron.OwnerReferences = []metav1.OwnerReference{{APIVersion: "batch/v1", Kind: "CronJob", UID: "cron1"}}
+	w.apply(kindNamed("Job"), &batchv1.Job{ObjectMeta: cron})
+	want := map[string]string{"dep1": "checkout/cart-api", "dep2": "checkout/", "rs2": "checkout/"}
+	if len(rec.app) != len(want) {
+		t.Fatalf("reported %v, want %v", rec.app, want)
+	}
+	for uid, app := range want {
+		if rec.app[uid] != app {
+			t.Errorf("%s in %q, want %q", uid, rec.app[uid], app)
+		}
+	}
+	if a := w.apps["checkout/"]; a == nil || !a.Orphans {
+		t.Errorf("orphans app = %+v", a)
+	}
+	// Labelling an orphan adopts it into its application.
+	w.apply(kindNamed("Deployment"), &appsv1.Deployment{ObjectMeta: owned("debug-shell", "dep2", "", "", appLabels)})
+	if rec.app["dep2"] != "checkout/cart-api" {
+		t.Errorf("adopted orphan in %q", rec.app["dep2"])
+	}
+}
+
+// Objects the root selector leaves out belong to someone else: not orphans.
+func TestOrphansRespectRootSelector(t *testing.T) {
+	w, rec := newWatcher(t, Config{Orphans: true, RootSelector: "app.kubernetes.io/part-of=checkout"})
+	w.apply(kindNamed("Deployment"), &appsv1.Deployment{ObjectMeta: owned("argocd-server", "a1", "", "", map[string]string{
+		"app.kubernetes.io/name": "argocd-server", "app.kubernetes.io/part-of": "argocd"})})
+	w.apply(kindNamed("ConfigMap"), &corev1.ConfigMap{ObjectMeta: owned("notes", "cm1", "", "", nil)})
+	if len(rec.app) != 1 || rec.app["cm1"] != "checkout/" {
+		t.Errorf("reported %v, want only the unlabelled ConfigMap as an orphan", rec.app)
 	}
 }
