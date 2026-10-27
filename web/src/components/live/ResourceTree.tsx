@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { relativeTime, type Health, type LiveApp, type LiveResource } from "../../api";
-import { HealthIcon, KindIcon, KIND_SHORT } from "./ui";
+import { HealthIcon, KindIcon, KIND_SHORT, SyncIcon } from "./ui";
 import {
   APP_ID,
   layoutTree,
@@ -164,7 +164,7 @@ export default function ResourceTree({
           const dim = filtering && !matches(r, filter);
           return (
             <button key={n.id} type="button" style={style}
-              className={`lv-node${selected === r.uid ? " lv-node-on" : ""}${dim ? " lv-node-dim" : ""}${r.health ? ` lv-node-${r.health.status.toLowerCase()}` : ""}`}
+              className={`lv-node${selected === r.uid ? " lv-node-on" : ""}${dim ? " lv-node-dim" : ""}${r.health ? ` lv-node-${r.health.status.toLowerCase()}` : ""}${r.sync === "OutOfSync" ? " lv-node-drift" : ""}${r.uid.startsWith("desired:") ? " lv-node-missing" : ""}`}
               onClick={() => onSelect(r.uid)} title={r.health?.message || `${r.kind} ${r.name}`}>
               <span className="lv-node-kind">
                 <KindIcon kind={r.kind} size={18} />
@@ -179,7 +179,10 @@ export default function ResourceTree({
                   <span>{relativeTime(r.created_at).replace(" ago", "")}</span>
                 </span>
               </span>
-              {r.health && <HealthIcon health={r.health.status} size={16} title={r.health.message || r.health.status} />}
+              <span className="lv-node-marks">
+                {r.sync && <SyncIcon sync={r.sync} />}
+                {r.health && <HealthIcon health={r.health.status} size={16} title={r.health.message || r.health.status} />}
+              </span>
             </button>
           );
         })}

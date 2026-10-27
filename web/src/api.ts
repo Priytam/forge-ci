@@ -2783,6 +2783,14 @@ export interface LiveApp {
   repo: string;
   provider: string;
   deployed: LiveDeploy | null;
+  /** the desired state's revision (Git), when the target has a source */
+  revision: string;
+  revision_message: string;
+  revision_author: string;
+  revision_at: string | null;
+  source_path: string;
+  source_tool: string;
+  source_error: string;
 }
 
 export interface LiveResource {
@@ -2794,6 +2802,8 @@ export interface LiveResource {
   uid: string;
   parents?: string[];
   health?: { status: Health; message?: string };
+  /** compared with the desired state: absent when the resource is not in Git */
+  sync?: "Synced" | "OutOfSync";
   summary: {
     ready?: string;
     status?: string;
@@ -2809,6 +2819,17 @@ export interface LiveCapabilities {
   manifests: boolean;
   watch: boolean;
   reconcile_seconds?: number;
+  diff: boolean;
+  sync: boolean;
+  rollback: boolean;
+  logs: boolean;
+  pods: boolean;
+  network: boolean;
+}
+
+/** A resource's key, as desired manifests are filed: group/kind/namespace/name. */
+export function resourceKey(r: Pick<LiveResource, "group" | "kind" | "namespace" | "name">): string {
+  return `${r.group ?? ""}/${r.kind}/${r.namespace ?? ""}/${r.name}`;
 }
 
 export interface LiveAppView {
@@ -2889,7 +2910,13 @@ export interface LivePatch {
  */
 export function subscribeLive(
   app: number | undefined,
-  on: { ready?: () => void; app?: (row: LiveApp) => void; gone?: (id: number) => void; patch?: (p: LivePatch) => void }
+  on: {
+    ready?: () => void;
+    app?: (row: LiveApp) => void;
+    gone?: (id: number) => void;
+    patch?: (p: LivePatch) => void;
+    op?: (o: LiveOp) => void;
+  }
 ): () => void {
   if (typeof EventSource === "undefined") return () => undefined;
   const es = new EventSource(`${BASE}/live/stream${app ? `?app=${app}` : ""}`);
@@ -2905,6 +2932,7 @@ export function subscribeLive(
   handle<LiveApp>("app", on.app);
   handle<{ id: number }>("gone", on.gone && ((g) => on.gone!(g.id)));
   handle<LivePatch>("patch", on.patch);
+  handle<LiveOp>("op", on.op);
   return () => es.close();
 }
 
@@ -2932,6 +2960,88 @@ export interface LiveTarget {
   created_at: string;
   token_suffix: string;
   apps: number;
+}
+
+export type LiveOpKind = "sync" | "rollback" | "refresh" | "logs";
+
+export interface LiveOpParams {
+  kind: LiveOpKind;
+  revision?: string;
+  prune?: boolean;
+  dry_run?: boolean;
+  force?: boolean;
+  resources?: string[];
+  hard?: boolean;
+  image?: string;
+  pod?: string;
+  container?: string;
+  tail?: number;
+  follow?: boolean;
+}
+
+export interface LiveOp {
+  id: number;
+  app_id: number;
+  kind: LiveOpKind;
+  state: "approval" | "pending" | "running" | "succeeded" | "failed" | "canceled";
+  params: LiveOpParams;
+  result: {
+    ok: boolean;
+    message: string;
+    revision?: string;
+    resources?: { key: string; kind: string; name: string; action: string; message?: string }[];
+  } | null;
+  message: string;
+  revision: string;
+  requested_by: string;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  approvals: { approver: string; verdict: string; comment: string; created_at: string }[];
+  rule?: { required_approvals: number; approver_roles: string[] } | null;
+}
+
+/** Starts a sync, rollback, refresh or log stream on an application. */
+export function createLiveOp(app: number, p: LiveOpParams): Promise<LiveOp> {
+  return postJSON(`/live/apps/${app}/ops`, p);
+}
+
+export function getLiveOp(id: number): Promise<LiveOp> {
+  return fetchJSON(`/live/ops/${id}`);
+}
+
+export function listLiveOps(app: number): Promise<LiveOp[]> {
+  return fetchJSON(`/live/apps/${app}/ops`);
+}
+
+export function approveLiveOp(id: number, verdict: "approved" | "rejected", comment = ""): Promise<LiveOp> {
+  return postJSON(`/live/ops/${id}/approve`, { verdict, comment });
+}
+
+export function cancelLiveOp(id: number): Promise<void> {
+  return requestVoid("POST", `/live/ops/${id}/cancel`);
+}
+
+/** A resource's desired manifest (null when it has none). */
+export async function getDesiredManifest(app: number, key: string): Promise<unknown | null> {
+  try {
+    return await fetchJSON(`/live/apps/${app}/desired?key=${encodeURIComponent(key)}`);
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404) return null;
+    throw e;
+  }
+}
+
+/** Follows an operation's output (pod logs); onEnd gets the finished operation. */
+export function streamOpOutput(id: number, onChunk: (text: string) => void, onEnd: (op: LiveOp) => void): () => void {
+  if (typeof EventSource === "undefined") return () => undefined;
+  const es = new EventSource(`${BASE}/live/ops/${id}/output`);
+  es.addEventListener("output", (e) => onChunk(JSON.parse((e as MessageEvent).data) as string));
+  es.addEventListener("end", (e) => {
+    es.close();
+    onEnd(JSON.parse((e as MessageEvent).data) as LiveOp);
+  });
+  return () => es.close();
 }
 
 export function listLiveTargets(): Promise<LiveTarget[]> {

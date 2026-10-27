@@ -68,7 +68,8 @@ func convert(k *kind, obj any) (meta metav1.Object, r live.Resource, ok bool) {
 	case *appsv1.Deployment:
 		r.Health = deploymentHealth(o)
 		r.Summary = live.Summary{Ready: ratio(o.Status.ReadyReplicas, o.Spec.Replicas), Images: images(o.Spec.Template.Spec)}
-		r.Summary.Info = facts("Strategy", string(o.Spec.Strategy.Type), "Revision", o.Annotations["deployment.kubernetes.io/revision"])
+		r.Summary.Info = facts("Strategy", string(o.Spec.Strategy.Type), "Revision", o.Annotations["deployment.kubernetes.io/revision"],
+			"Pod labels", labelString(o.Spec.Template.Labels))
 	case *appsv1.ReplicaSet:
 		r.Health = replicaSetHealth(o)
 		r.Summary = live.Summary{Ready: ratio(o.Status.ReadyReplicas, o.Spec.Replicas), Images: images(o.Spec.Template.Spec)}
@@ -76,19 +77,23 @@ func convert(k *kind, obj any) (meta metav1.Object, r live.Resource, ok bool) {
 	case *appsv1.StatefulSet:
 		r.Health = statefulSetHealth(o)
 		r.Summary = live.Summary{Ready: ratio(o.Status.ReadyReplicas, o.Spec.Replicas), Images: images(o.Spec.Template.Spec)}
-		r.Summary.Info = facts("Service", o.Spec.ServiceName, "Strategy", string(o.Spec.UpdateStrategy.Type))
+		r.Summary.Info = facts("Service", o.Spec.ServiceName, "Strategy", string(o.Spec.UpdateStrategy.Type),
+			"Pod labels", labelString(o.Spec.Template.Labels))
 	case *appsv1.DaemonSet:
 		r.Health = daemonSetHealth(o)
-		r.Summary = live.Summary{Ready: fmt.Sprintf("%d/%d", o.Status.NumberReady, o.Status.DesiredNumberScheduled), Images: images(o.Spec.Template.Spec)}
+		r.Summary = live.Summary{Ready: fmt.Sprintf("%d/%d", o.Status.NumberReady, o.Status.DesiredNumberScheduled), Images: images(o.Spec.Template.Spec),
+			Info: facts("Pod labels", labelString(o.Spec.Template.Labels))}
 	case *corev1.Pod:
 		r.Health = podHealth(o)
 		r.Summary = podSummary(o)
 	case *corev1.Service:
 		r.Health = serviceHealth(o)
-		r.Summary.Info = facts("Type", string(o.Spec.Type), "Cluster IP", o.Spec.ClusterIP, "Ports", servicePorts(o))
+		r.Summary.Info = facts("Type", string(o.Spec.Type), "Cluster IP", o.Spec.ClusterIP, "Ports", servicePorts(o),
+			"Selector", labelString(o.Spec.Selector))
 	case *networkingv1.Ingress:
 		r.Health = ingressHealth(o)
-		r.Summary.Info = facts("Hosts", ingressHosts(o), "Address", lbAddress(o.Status.LoadBalancer.Ingress), "Class", deref(o.Spec.IngressClassName))
+		r.Summary.Info = facts("Hosts", ingressHosts(o), "Address", lbAddress(o.Status.LoadBalancer.Ingress), "Class", deref(o.Spec.IngressClassName),
+			"Backends", ingressBackends(o))
 	case *batchv1.Job:
 		r.Health = jobHealth(o)
 		r.Summary = live.Summary{Ready: ratio(o.Status.Succeeded, o.Spec.Completions), Images: images(o.Spec.Template.Spec)}
@@ -237,4 +242,40 @@ func event(e *corev1.Event) (live.Event, bool) {
 		UID: string(e.UID), ResourceUID: string(e.InvolvedObject.UID), Kind: e.InvolvedObject.Kind, Name: e.InvolvedObject.Name,
 		Type: e.Type, Reason: e.Reason, Message: e.Message, Count: count, FirstSeen: first.UTC(), LastSeen: last.UTC(),
 	}, true
+}
+
+// labelString renders labels as a selector does ("app=cart,tier=web"),
+// sorted, so the Network view can match Services to workloads.
+func labelString(l map[string]string) string {
+	parts := make([]string, 0, len(l))
+	for k, v := range l {
+		parts = append(parts, k+"="+v)
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
+}
+
+// ingressBackends lists the Services an Ingress routes to.
+func ingressBackends(i *networkingv1.Ingress) string {
+	seen := map[string]bool{}
+	add := func(b *networkingv1.IngressBackend) {
+		if b != nil && b.Service != nil {
+			seen[b.Service.Name] = true
+		}
+	}
+	add(i.Spec.DefaultBackend)
+	for _, r := range i.Spec.Rules {
+		if r.HTTP == nil {
+			continue
+		}
+		for _, p := range r.HTTP.Paths {
+			add(&p.Backend)
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for n := range seen {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return strings.Join(out, ",")
 }

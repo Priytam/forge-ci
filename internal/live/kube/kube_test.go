@@ -161,6 +161,13 @@ func (r *recorder) Upsert(a live.App, res live.Resource) {
 func (r *recorder) Delete(_ live.App, uid string)  { delete(r.res, uid); delete(r.app, uid) }
 func (r *recorder) Event(_ live.App, e live.Event) { r.events = append(r.events, e) }
 func (r *recorder) Synced()                        {}
+func (r *recorder) Desired(live.App, live.Desired) {}
+func (r *recorder) SetSync(_ live.App, uid, sync string) {
+	if res, ok := r.res[uid]; ok {
+		res.Sync = sync
+		r.res[uid] = res
+	}
+}
 
 func newWatcher(t *testing.T, cfg Config) (*watcher, *recorder) {
 	p, err := New(nil, cfg)

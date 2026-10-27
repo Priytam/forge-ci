@@ -6,8 +6,8 @@ for Kubernetes and Cloud Run alike, with changes arriving as they happen.
 The layout is the one people know from Argo CD (status panels, a
 left-to-right resource tree, a slide-over per resource); everything is
 Forge's own and lives inside Forge, next to the repo, its changes and its
-pipelines. This is phase A of batch 9: seeing. Diff, sync and rollback come
-next (see the end).
+pipelines. Phases A and B of batch 9 are in: seeing (A), and comparing with
+Git, syncing, rolling back, logs (B). What comes next is at the end.
 
 ## Where it shows up
 
@@ -28,12 +28,23 @@ next (see the end).
 
 An application page has three status panels — **App health** (the worst of
 its resources', naming the one at fault: `Pod indexer-…: ImagePullBackOff`),
-**Sync status** (the revision Forge last deployed there, with its commit; the
-comparison with Git arrives with Diff, so until then it reads *Unknown*) and
-**Last sync** (that deploy job, who ran it, when) — then the resources as a
-**Tree** or a **List**. Large fan-outs collapse ("+42 pods", click to expand).
+**Sync status** (*Synced* or *Out of sync* against the app's directory in Git,
+at which commit, rendered with which tool) and **Last sync** (the latest sync
+or rollback from Forge — or the deploy job that last shipped it — who, when,
+how it went) — then the resources as a **Tree**, **Pods** (by node),
+**Network** (Ingress → Service → workload → Pods) or a **List**. Drifted
+resources carry an amber sync mark; resources Git has and the cluster does
+not show as *Missing*. Large fan-outs collapse ("+42 pods", click to expand).
 Click a resource for **Summary** (status, conditions, images, owner),
-**Events** and **Live manifest** (as YAML). Tabs follow what the provider can
+**Events**, **Logs** (pods: streamed, filterable, container picker), **Live
+manifest**, **Desired manifest** and **Diff** (as YAML).
+
+The header has **Diff** (every drifted resource, live against Git: side by
+side or inline, changed lines only, and by default only the fields Git sets,
+so defaults and status are never "drift"), **Sync** (revision, resources,
+Prune, Dry run, Force; it shows what will change before you confirm),
+**History** (every sync, rollback and refresh, with *Roll back to this*) and
+**Refresh** (the agent reads the source now). Tabs follow what the provider can
 show — its capabilities — never its name.
 
 ## How it works
@@ -110,6 +121,51 @@ cluster / cloud                         Forge server                         bro
   traffic split shown on each. The event-driven design (Cloud Audit Logs →
   Pub/Sub) replaces the timer later without changing what is reported.
 
+## Desired state, sync and rollback (phase B)
+
+- **Desired state is rendered in the agent.** Give it the GitOps repo
+  (`--source-url`, `--source-branch`, `--source-path` — default
+  `apps/{group}/{name}` — and `GIT_TOKEN` if it needs one). It keeps a bare
+  clone, fetches every `--source-poll` (30s) or on Refresh, and re-renders
+  only the apps whose directory the new commits touched: `kustomize build`
+  for a kustomization, `helm template` for a chart, the YAML files as they
+  are otherwise. Git credentials stay in the cluster.
+- **Drift is computed where both sides meet.** The agent compares each live
+  top-level object with its desired manifest whenever either changes:
+  *Synced* when the live object has every field Git sets with the same value
+  (quantities by amount, `0.5` = `500m`), *Out of sync* otherwise. Defaults,
+  status and fields the API server fills in never count. Desired objects of
+  kinds the agent watches and the cluster lacks show as *Missing*. Desired
+  manifests go to Forge (one blob per resource) for the Diff view.
+- **Operations go through Forge.** Sync, rollback, refresh and logs are rows
+  in `live_ops`; the target's agent long-polls for them (woken by Postgres
+  LISTEN/NOTIFY), runs them and reports. One sync or rollback per app at a
+  time. A sync or rollback to a **frozen** environment is refused; to a
+  **protected** one it waits for the environment's approvals — the same rule,
+  approver roles, required group and self-approval setting as deploy jobs.
+  Every request and result is in the audit log.
+- **Sync** is server-side apply as field manager `forge`, in dependency order
+  (namespaces, config and storage, services, workloads, autoscalers,
+  ingresses). Without Force, a field someone else owns (a `kubectl scale`)
+  makes the apply fail and says so; Force takes it over. Prune deletes the
+  app's top-level objects Git no longer has. Dry run asks the API server and
+  changes nothing.
+- **Rollback** is a sync to an earlier revision of the source. The app then
+  shows *Out of sync* against the branch tip until Git catches up — as it
+  should.
+- **Write access is opt-in.** `deploy/live/agent.yaml` is read-only (plus
+  `pods/log`). Sync needs `deploy/live/agent-sync.yaml` and `--allow-sync`;
+  without them the agent declares no Sync capability and the button is not
+  shown.
+- **Cloud Run**: the desired state is Forge's deploy record — the app is
+  *Synced* when it runs the image digest Forge last deployed. Sync sets that
+  image (a new revision takes the traffic); rollback sends all traffic to an
+  earlier revision; dry run validates only. Both need `--allow-sync` and
+  `roles/run.developer`.
+- **Logs** stream from the cluster through the agent into Postgres (kept an
+  hour, 8 MB and 15 minutes per stream at most) and to the page; leaving the
+  tab stops the stream.
+
 ## Providers
 
 A provider implements `live.Provider` (`internal/live`): `Watch(ctx, sink)`
@@ -127,6 +183,10 @@ reports.
 |---|---|---|---|
 | Kubernetes | `internal/live/kube` | reflectors (watch) | client-go fake clientset |
 | Cloud Run | `internal/live/cloudrun` | conditional reconcile | Cloud Run Admin API v2 fake |
+
+Providers that act implement `live.Operator`: `Operate(ctx, op, out)` runs a
+sync, rollback, refresh or log stream and returns what it did to each
+resource.
 
 ## Running an agent
 
@@ -196,16 +256,20 @@ about 1 KB/s on average. `kubectl -n checkout scale deploy/cart-api
 Healthy 3/3 on the page at 1.5 s. `payments/fraud-scorer` shows Degraded
 (`CrashLoopBackOff`), `search/indexer` Degraded (`ImagePullBackOff`).
 
+**Phase B, on the lab** (agent rendering all 100 apps from the lab's GitOps
+repo with Kustomize): every app *Synced* at the branch tip; `kubectl scale
+deploy/cart-api --replicas=3` shows *Out of sync* on the page **643 ms**
+later, and the Diff shows exactly `replicas: 3` against `replicas: 2`; a pod's
+logs stream to the Logs tab through the agent.
+
 **Cloud Run:** an unchanged fleet costs one list call per region per
 reconcile (720/day per region at the default period, shared by every
 service in it) plus one call per service per change; the bucket is never
 exceeded (`TestCallBudget`, `TestReconcileIsConditional`).
 
-## Not yet (phase B and later)
+## Not yet
 
-Desired manifests (Git: plain, Helm, Kustomize, or the deploy record),
-**Diff**, the **Sync** dialog, **History & rollback**, the Pods and Network
-views and the Logs tab (phase B); drift detection, auto-sync, self-heal,
-prune, sync waves (phase C); progressive delivery and fleet views (phase D).
-The Cloud Run reconcile becomes event-driven (audit logs → Pub/Sub); per-app
-source repos (beyond the target's) come with desired state.
+Auto-sync and self-heal, sync waves and hooks, orphaned-resource views
+(phase C); progressive delivery and fleet views (phase D). The Cloud Run
+reconcile becomes event-driven (audit logs → Pub/Sub). Applications link to
+their target's repo; linking each app to its own source repo is next.

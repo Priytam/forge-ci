@@ -53,3 +53,38 @@ func TestCallBudget(t *testing.T) {
 		t.Errorf("%d calls in 2s with a budget of 120/minute", calls)
 	}
 }
+
+// Sync sets the deployed image (a new revision takes the traffic), a dry
+// run validates only, rollback sends all traffic back to a revision.
+func TestOperate(t *testing.T) {
+	f := livetest.NewFakeCloudRun(t)
+	key := f.Deploy(t, "cart", live.Healthy)
+	p, err := cloudrun.New(cloudrun.Config{Project: "acme-prod", Regions: []string{"asia-south1"}, BaseURL: f.Server.URL,
+		Period: time.Hour, CallsPerMinute: 6000, AllowSync: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	app := live.App{Key: key}
+	if res := p.Operate(ctx, live.Op{Kind: live.OpSync, App: app, Image: "gcr.io/acme/cart@sha256:beef", DryRun: true}, nil); !res.OK ||
+		res.Resources[0].Action != "would-configure" {
+		t.Errorf("dry run = %+v", res)
+	}
+	if res := p.Operate(ctx, live.Op{Kind: live.OpSync, App: app, Image: "gcr.io/acme/cart@sha256:beef"}, nil); !res.OK ||
+		res.Resources[0].Action != "configured" {
+		t.Errorf("sync = %+v", res)
+	}
+	if res := p.Operate(ctx, live.Op{Kind: live.OpSync, App: app, Image: "gcr.io/acme/cart@sha256:beef"}, nil); res.Resources[0].Action != "unchanged" {
+		t.Errorf("a second sync changed something: %+v", res)
+	}
+	if res := p.Operate(ctx, live.Op{Kind: live.OpRollback, App: app, Revision: "cart-00001"}, nil); !res.OK {
+		t.Errorf("rollback = %+v", res)
+	}
+	if f.Patches != 3 {
+		t.Errorf("%d patches, want 3 (dry run, sync, rollback)", f.Patches)
+	}
+	ro, _ := cloudrun.New(cloudrun.Config{Project: "acme-prod", Regions: []string{"asia-south1"}, BaseURL: f.Server.URL})
+	if res := ro.Operate(ctx, live.Op{Kind: live.OpSync, App: app, Image: "x"}, nil); res.OK || ro.Capabilities().Sync {
+		t.Errorf("a read-only agent synced: %+v", res)
+	}
+}

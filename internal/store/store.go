@@ -1130,36 +1130,9 @@ func (s *Store) Approve(ctx context.Context, jobID int64, req proto.ApprovalRequ
 		return nil, ErrNotBlocked
 	}
 
-	// RBAC: enforced when the repo has members; a repo with no members runs
-	// in bootstrap mode (anyone may approve) — see docs/rbac-approvals.md.
-	hasMembers, err := s.repoHasMembers(ctx, repo)
+	group, err := s.checkApprover(ctx, tx, repo, rule, req.Approver, triggeredBy)
 	if err != nil {
 		return nil, err
-	}
-	// Members of the rule's required group may vote on this environment even
-	// without the repo role (that is what naming them on the rule means).
-	group, err := s.groupMembers(ctx, tx, rule.RequiredGroup)
-	if err != nil {
-		return nil, err
-	}
-	if hasMembers && !group[strings.ToLower(req.Approver)] {
-		role, err := s.memberRole(ctx, repo, req.Approver)
-		if err != nil {
-			return nil, err
-		}
-		allowed := false
-		for _, r := range rule.ApproverRoles {
-			if role == r {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
-			return nil, ErrForbidden
-		}
-	}
-	if !rule.AllowSelfApproval && triggeredBy != "" && req.Approver == triggeredBy {
-		return nil, ErrSelfApproval
 	}
 
 	if _, err := tx.Exec(ctx,
@@ -1211,6 +1184,43 @@ func (s *Store) Approve(ctx context.Context, jobID int64, req proto.ApprovalRequ
 		return nil, err
 	}
 	return s.GetJob(ctx, jobID)
+}
+
+// checkApprover reports whether approver may vote under rule (ErrForbidden,
+// ErrSelfApproval otherwise) and returns the rule's required group's members.
+// RBAC is enforced when the repo has members; a repo with no members runs in
+// bootstrap mode (anyone may approve) — see docs/rbac-approvals.md. Members
+// of the rule's required group may vote even without the repo role (that is
+// what naming them on the rule means).
+func (s *Store) checkApprover(ctx context.Context, tx pgx.Tx, repo string, rule *proto.ProtectedEnvironment, approver, requester string) (map[string]bool, error) {
+	hasMembers, err := s.repoHasMembers(ctx, repo)
+	if err != nil {
+		return nil, err
+	}
+	group, err := s.groupMembers(ctx, tx, rule.RequiredGroup)
+	if err != nil {
+		return nil, err
+	}
+	if hasMembers && !group[strings.ToLower(approver)] {
+		role, err := s.memberRole(ctx, repo, approver)
+		if err != nil {
+			return nil, err
+		}
+		allowed := false
+		for _, r := range rule.ApproverRoles {
+			if role == r {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return nil, ErrForbidden
+		}
+	}
+	if !rule.AllowSelfApproval && requester != "" && approver == requester {
+		return nil, ErrSelfApproval
+	}
+	return group, nil
 }
 
 // maxCommitMessageBytes bounds what a provider event can push into a pipeline

@@ -23,6 +23,8 @@ type FakeCloudRun struct {
 	services map[string]map[string]any // name → service JSON
 	revs     map[string][]map[string]any
 	calls    int
+	// Patches counts services.patch calls (validate-only included).
+	Patches int
 }
 
 const fakeProject, fakeRegion = "acme-prod", "asia-south1"
@@ -54,12 +56,58 @@ func (f *FakeCloudRun) serve(w http.ResponseWriter, r *http.Request) {
 			out = append(out, s)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"services": out})
+	case r.Method == http.MethodPatch && strings.HasPrefix(r.URL.Path, prefix+"/"):
+		f.patch(w, r, strings.TrimPrefix(r.URL.Path, prefix+"/"))
 	case strings.HasPrefix(r.URL.Path, prefix+"/") && strings.HasSuffix(r.URL.Path, "/revisions"):
 		name := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, prefix+"/"), "/revisions")
 		_ = json.NewEncoder(w).Encode(map[string]any{"revisions": f.revs[name]})
+	case strings.HasPrefix(r.URL.Path, prefix+"/"):
+		svc := f.services[strings.TrimPrefix(r.URL.Path, prefix+"/")]
+		if svc == nil {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(svc)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// patch is services.patch: a new image makes a new revision taking all
+// traffic; a traffic list moves traffic. validateOnly changes nothing.
+func (f *FakeCloudRun) patch(w http.ResponseWriter, r *http.Request, name string) {
+	svc := f.services[name]
+	if svc == nil {
+		http.NotFound(w, r)
+		return
+	}
+	f.Patches++
+	var body map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if r.URL.Query().Get("validateOnly") == "true" {
+		_, _ = w.Write([]byte(`{}`))
+		return
+	}
+	image := body["template"].(map[string]any)["containers"].([]any)[0].(map[string]any)["image"]
+	old := svc["template"].(map[string]any)["containers"].([]any)[0].(map[string]any)["image"]
+	full := svc["name"].(string)
+	if image != old {
+		n := len(f.revs[name]) + 1
+		rev := fmt.Sprintf("%s-%05d", name, n)
+		f.revs[name] = append(f.revs[name], map[string]any{"name": full + "/revisions/" + rev, "uid": fmt.Sprintf("%s-rev-%d", name, n),
+			"createTime": time.Now().UTC().Format(time.RFC3339), "conditions": []any{cond("Ready", "CONDITION_SUCCEEDED", "")},
+			"containers": []any{map[string]any{"image": image}}})
+		svc["template"] = body["template"]
+		svc["latestCreatedRevision"], svc["latestReadyRevision"] = full+"/revisions/"+rev, full+"/revisions/"+rev
+		svc["trafficStatuses"] = []any{map[string]any{"type": "TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION", "revision": rev, "percent": 100}}
+	} else if t, ok := body["traffic"].([]any); ok {
+		svc["trafficStatuses"] = t
+	}
+	svc["etag"] = fmt.Sprint(time.Now().UnixNano())
+	_, _ = w.Write([]byte(`{}`))
 }
 
 func (f *FakeCloudRun) Provider(t *testing.T) live.Provider {

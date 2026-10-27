@@ -1,0 +1,37 @@
+# Write access for forge-agent (Forge Live Sync, Rollback, Prune), on top of
+# deploy/live/agent.yaml. Apply it only where Forge should change the
+# cluster, and start the agent with --allow-sync. Narrow the rules to the
+# kinds your applications use; this grants what the lab's apps need.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: forge-agent-sync
+rules:
+  - apiGroups: [""]
+    resources: [services, configmaps, persistentvolumeclaims, serviceaccounts, namespaces]
+    verbs: [get, list, create, patch, update, delete]
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets, daemonsets]
+    verbs: [get, list, create, patch, update, delete]
+  - apiGroups: [batch]
+    resources: [jobs, cronjobs]
+    verbs: [get, list, create, patch, update, delete]
+  - apiGroups: [networking.k8s.io]
+    resources: [ingresses]
+    verbs: [get, list, create, patch, update, delete]
+  - apiGroups: [autoscaling]
+    resources: [horizontalpodautoscalers]
+    verbs: [get, list, create, patch, update, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: forge-agent-sync
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: forge-agent-sync
+subjects:
+  - kind: ServiceAccount
+    name: forge-agent
+    namespace: forge-live

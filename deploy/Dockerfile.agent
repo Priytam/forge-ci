@@ -7,10 +7,11 @@ COPY internal ./internal
 ARG VERSION=dev
 RUN CGO_ENABLED=0 go build -ldflags "-s -w -X github.com/priytamjeepandey/forge-ci/internal/buildinfo.Version=${VERSION}" -o /out/forge-agent ./cmd/agent
 
-# The agent needs nothing but CA certificates: it talks to the Kubernetes
-# API (in-cluster) or Google's APIs, and to Forge.
+# git, kustomize and helm render applications' desired state from their
+# GitOps repository (Forge Live Diff and Sync); the rest of the agent needs
+# only CA certificates to reach the Kubernetes API, Google's APIs and Forge.
 FROM alpine:3
-RUN apk add --no-cache ca-certificates && adduser -D -u 10001 forge
+RUN apk add --no-cache ca-certificates git kustomize helm && adduser -D -u 10001 forge
 USER 10001
 COPY --from=build /out/forge-agent /usr/local/bin/forge-agent
 ENTRYPOINT ["forge-agent"]

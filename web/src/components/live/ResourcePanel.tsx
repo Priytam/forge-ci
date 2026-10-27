@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
-import { getLiveEvents, getLiveManifest, relativeTime, type LiveCapabilities, type LiveEvent, type LiveResource } from "../../api";
+import { getDesiredManifest, getLiveEvents, getLiveManifest, relativeTime, resourceKey, type LiveCapabilities, type LiveEvent, type LiveResource } from "../../api";
+import LogsTab from "./LogsTab";
+import { DEFAULT_DIFF, DiffToggles, ResourceDiff, type DiffOptions } from "./ManifestDiff";
 import Drawer from "../ui/Drawer";
 import { Skeleton } from "../ui/Pill";
 import { HealthPill, KindIcon } from "./ui";
 import { toYaml } from "./yaml";
 
-type Tab = "summary" | "events" | "manifest";
+type Tab = "summary" | "events" | "logs" | "manifest" | "desired" | "diff";
 
 /**
  * A resource in the slide-over: Summary, Events and Live manifest. Tabs
@@ -26,11 +28,16 @@ export default function ResourcePanel({
   onSelect: (uid: string) => void;
   onClose: () => void;
 }) {
-  const [tab, setTab] = useState<Tab>("summary");
-  const tabs: [Tab, string][] = [["summary", "Summary"]];
-  if (caps.events) tabs.push(["events", "Events"]);
-  if (caps.manifests) tabs.push(["manifest", "Live manifest"]);
   const r = resource;
+  const missing = r.uid.startsWith("desired:");
+  const inGit = r.sync !== undefined || missing;
+  const [tab, setTab] = useState<Tab>(r.sync === "OutOfSync" ? "diff" : "summary");
+  const [diffOpts, setDiffOpts] = useState<DiffOptions>(DEFAULT_DIFF);
+  const tabs: [Tab, string][] = [["summary", "Summary"]];
+  if (caps.events && !missing) tabs.push(["events", "Events"]);
+  if (caps.logs && r.kind === "Pod") tabs.push(["logs", "Logs"]);
+  if (caps.manifests && !missing) tabs.push(["manifest", "Live manifest"]);
+  if (caps.diff && inGit) tabs.push(["desired", "Desired manifest"], ["diff", "Diff"]);
   return (
     <Drawer
       wide
@@ -58,7 +65,15 @@ export default function ResourcePanel({
       </div>
       {tab === "summary" && <Summary r={r} byUid={byUid} onSelect={onSelect} />}
       {tab === "events" && <Events appId={appId} uid={r.uid} />}
-      {tab === "manifest" && <Manifest appId={appId} uid={r.uid} />}
+      {tab === "logs" && <LogsTab appId={appId} pod={r} />}
+      {tab === "manifest" && <Manifest id={`live:${r.uid}`} load={() => getLiveManifest(appId, r.uid)} note="As last reported by the agent. Managed fields and large data values are left out." />}
+      {tab === "desired" && <Manifest id={`desired:${appId}:${resourceKey(r)}`} load={() => getDesiredManifest(appId, resourceKey(r))} note="Rendered by the agent from Git." />}
+      {tab === "diff" && (
+        <>
+          <DiffToggles opts={diffOpts} onChange={setDiffOpts} />
+          <ResourceDiff appId={appId} resource={r} opts={diffOpts} />
+        </>
+      )}
     </Drawer>
   );
 }
@@ -129,20 +144,20 @@ function Events({ appId, uid }: { appId: number; uid: string }) {
   );
 }
 
-function Manifest({ appId, uid }: { appId: number; uid: string }) {
+function Manifest({ id, load, note }: { id: string; load: () => Promise<unknown>; note: string }) {
   const [text, setText] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     setText(null);
     setError(null);
-    getLiveManifest(appId, uid).then((m) => setText(toYaml(m)), (e) => setError(String(e?.message ?? e)));
-  }, [appId, uid]);
+    load().then((m) => setText(m == null ? "" : toYaml(m)), (e) => setError(String(e?.message ?? e)));
+  }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
   if (error) return <div className="error-banner">{error}</div>;
   if (text === null) return <Skeleton h={200} />;
   return (
     <>
       <div className="lv-manifest-bar">
-        <span className="muted">As last reported by the agent. Managed fields and large data values are left out.</span>
+        <span className="muted">{note}</span>
         <button type="button" className="btn btn-sm" onClick={() => void navigator.clipboard?.writeText(text)}>Copy</button>
       </div>
       <pre className="lv-manifest">{text}</pre>

@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -42,6 +43,9 @@ type Config struct {
 	Heartbeat time.Duration
 }
 
+// errStop: Forge wants an operation's output no more.
+var errStop = errors.New("forge: stop")
+
 // errResync: Forge asked for a fresh epoch.
 var errResync = errors.New("forge asked for a fresh report")
 
@@ -62,6 +66,9 @@ func Run(ctx context.Context, cfg Config) error {
 		cfg.Client = &http.Client{Timeout: time.Minute}
 	}
 	a := &agent{cfg: cfg, started: time.Now()}
+	if op, ok := cfg.Provider.(live.Operator); ok {
+		go a.operations(ctx, op)
+	}
 	for failures := 0; ctx.Err() == nil; {
 		err := a.epoch(ctx)
 		switch {
@@ -164,6 +171,128 @@ func (a *agent) epoch(ctx context.Context) error {
 			slog.Info("live: initial report sent", "epoch", epoch, "apps", apps, "objects", objects, "batches", seq)
 		}
 	}
+}
+
+// ---- operations: Forge asks, the agent acts ----
+
+// operations long-polls Forge for operations and runs each in its own
+// goroutine (a log stream must not hold up a sync). Forge allows one sync
+// per application at a time.
+func (a *agent) operations(ctx context.Context, op live.Operator) {
+	for failures := 0; ctx.Err() == nil; {
+		var next *live.Op
+		err := a.call(ctx, http.MethodPost, "/api/v1/live/agent/ops/next", nil, &next)
+		if err != nil {
+			failures++
+			select {
+			case <-ctx.Done():
+			case <-time.After(backoff(failures)):
+			}
+			continue
+		}
+		failures = 0
+		if next != nil {
+			go a.run(ctx, op, *next)
+		}
+	}
+}
+
+// run carries out one operation, streaming its output and reporting how it
+// ended.
+func (a *agent) run(ctx context.Context, op live.Operator, o live.Op) {
+	slog.Info("live: operation", "id", o.ID, "kind", o.Kind, "app", o.App.Key)
+	path := fmt.Sprintf("/api/v1/live/agent/ops/%d", o.ID)
+	opCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var mu sync.Mutex
+	var pending []byte
+	flush := func() {
+		mu.Lock()
+		chunk := pending
+		pending = nil
+		mu.Unlock()
+		if len(chunk) > 0 {
+			if err := a.call(ctx, http.MethodPost, path+"/output", chunk, nil); errors.Is(err, errStop) {
+				cancel() // the page left, or the output is over its budget
+			}
+		}
+	}
+	stop := make(chan struct{})
+	flushed := make(chan struct{})
+	go func() {
+		defer close(flushed)
+		tick := time.NewTicker(300 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case <-stop:
+				flush()
+				return
+			case <-tick.C:
+				flush()
+			}
+		}
+	}()
+	res := op.Operate(opCtx, o, func(b []byte) {
+		mu.Lock()
+		pending = append(pending, b...)
+		mu.Unlock()
+	})
+	close(stop)
+	<-flushed
+	if err := a.call(ctx, http.MethodPost, path+"/result", res, nil); err != nil {
+		slog.Warn("live: report operation result", "id", o.ID, "err", err)
+	}
+}
+
+// call is one request to Forge's agent API: body is JSON (or raw bytes),
+// out is decoded when the answer has one.
+func (a *agent) call(ctx context.Context, method, path string, body any, out any) error {
+	var rd io.Reader
+	ct := "application/json"
+	switch b := body.(type) {
+	case nil:
+	case []byte:
+		rd, ct = bytes.NewReader(b), "application/octet-stream"
+	default:
+		raw, err := json.Marshal(b)
+		if err != nil {
+			return err
+		}
+		rd = bytes.NewReader(raw)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(a.cfg.URL, "/")+path, rd)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+a.cfg.Token)
+	req.Header.Set("Content-Type", ct)
+	resp, err := a.longPoll().Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNoContent {
+		return nil
+	}
+	if resp.StatusCode == http.StatusConflict {
+		return errStop
+	}
+	if resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(msg)))
+	}
+	if out == nil {
+		return nil
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+// longPoll is a client that waits longer than Forge holds an empty poll.
+func (a *agent) longPoll() *http.Client {
+	c := *a.cfg.Client
+	c.Timeout = 2 * time.Minute
+	return &c
 }
 
 func encode(b live.Batch) ([]byte, error) {

@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -50,6 +51,8 @@ type Hub struct {
 	subs      map[*sub]struct{}
 	published map[int64]*Tree // the last tree each watched app's subscribers were sent
 	stop      context.CancelFunc
+
+	ops opWaiters
 }
 
 // New returns a hub keeping up to cacheBytes of trees in memory.
@@ -61,6 +64,13 @@ func treeKey(digest string) string { return "live/trees/" + digest + ".json.gz" 
 
 func manifestKey(app int64, uid string) string {
 	return fmt.Sprintf("live/manifests/%d/%s.json", app, uid)
+}
+
+// desiredKey is where a desired manifest lives; resource keys hold slashes,
+// so the blob is named by their hash.
+func desiredKey(app int64, key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return fmt.Sprintf("live/desired/%d/%s.json", app, hex.EncodeToString(sum[:16]))
 }
 
 // ---- ingest ----
@@ -207,11 +217,36 @@ func (h *Hub) apply(ctx context.Context, tx *store.LiveTx, d live.Delta) (*Tree,
 		}
 		a.Tree, a.Version = key, next.Version
 	}
+	if d.Desired != nil {
+		g, err := h.setDesired(ctx, a, d.Desired)
+		if err != nil {
+			return nil, 0, err
+		}
+		garbage = append(garbage, g...)
+	}
 	if err := tx.Collect(ctx, garbage...); err != nil {
 		return nil, 0, err
 	}
 	if d.Status != nil {
 		a.SetStatus(*d.Status, now)
+	}
+	if a.SourceError != "" {
+		a.Sync = "Unknown"
+	}
+	if t := tx.Target; !t.Capabilities.Diff && t.Repo != "" && d.Status != nil {
+		// No Git (Cloud Run): the desired state is what Forge last deployed.
+		digest, err := h.st.LatestDeployDigest(ctx, t.Repo, t.Environment)
+		if err != nil {
+			return nil, 0, err
+		}
+		if digest != "" {
+			a.Sync = live.OutOfSync
+			for _, img := range a.Images {
+				if strings.HasSuffix(img, "@"+digest) {
+					a.Sync = live.Synced
+				}
+			}
+		}
 	}
 	a.Name, a.Namespace, a.Group, a.Epoch = d.App.Name, d.App.Namespace, d.App.Group, tx.Target.Epoch
 	if err := tx.UpsertEvents(ctx, a.ID, d.Events); err != nil {
@@ -233,16 +268,45 @@ func cmpString(a, b string) int {
 	return 0
 }
 
+// setDesired stores an app's desired manifests (one blob per resource key)
+// and its revision; it returns the blobs of keys no longer desired.
+func (h *Hub) setDesired(ctx context.Context, a *store.LiveApp, d *live.Desired) ([]string, error) {
+	keys := make([]string, 0, len(d.Manifests))
+	for key, m := range d.Manifests {
+		if _, err := h.blobs.Put(ctx, desiredKey(a.ID, key), bytes.NewReader(m)); err != nil {
+			return nil, err
+		}
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	var garbage []string
+	for _, k := range a.DesiredKeys {
+		if _, ok := d.Manifests[k]; !ok {
+			garbage = append(garbage, desiredKey(a.ID, k))
+		}
+	}
+	a.DesiredKeys = keys
+	r := d.Revision
+	a.Revision, a.RevisionMessage, a.RevisionAuthor = r.SHA, r.Message, r.Author
+	a.RevisionAt = nil
+	if !r.Time.IsZero() {
+		a.RevisionAt = &r.Time
+	}
+	a.SourcePath, a.SourceTool, a.SourceError = d.Source, d.Tool, d.Error
+	return garbage, nil
+}
+
 // summaryChanged: what the Applications page shows of a differs.
 func summaryChanged(a, b *store.LiveApp) bool {
 	return a.Name != b.Name || a.Namespace != b.Namespace || a.Group != b.Group || a.Health != b.Health ||
 		a.HealthMessage != b.HealthMessage || a.Resources != b.Resources || a.Pods != b.Pods ||
-		a.PodsReady != b.PodsReady || !slices.Equal(a.Images, b.Images)
+		a.PodsReady != b.PodsReady || !slices.Equal(a.Images, b.Images) || a.Sync != b.Sync || a.Revision != b.Revision ||
+		a.SourceError != b.SourceError
 }
 
 // remove deletes an app and queues its blobs.
 func (h *Hub) remove(ctx context.Context, tx *store.LiveTx, a *store.LiveApp) error {
-	keys, err := h.blobKeys(ctx, a.ID, a.Tree)
+	keys, err := h.blobKeys(ctx, a.ID, a.Tree, a.DesiredKeys)
 	if err != nil {
 		return err
 	}
@@ -252,16 +316,21 @@ func (h *Hub) remove(ctx context.Context, tx *store.LiveTx, a *store.LiveApp) er
 	return tx.DeleteApp(ctx, a.ID)
 }
 
-// blobKeys are every blob of an app: its tree and its manifests.
-func (h *Hub) blobKeys(ctx context.Context, app int64, tree string) ([]string, error) {
+// blobKeys are every blob of an app: its tree, its manifests and its
+// desired manifests.
+func (h *Hub) blobKeys(ctx context.Context, app int64, tree string, desired []string) ([]string, error) {
+	var keys []string
+	for _, k := range desired {
+		keys = append(keys, desiredKey(app, k))
+	}
 	if tree == "" {
-		return nil, nil
+		return keys, nil
 	}
 	t, err := h.loadTree(ctx, tree)
 	if err != nil {
 		return nil, err
 	}
-	keys := []string{tree}
+	keys = append(keys, tree)
 	for _, r := range t.Resources {
 		keys = append(keys, manifestKey(app, r.UID))
 	}
@@ -276,7 +345,7 @@ func (h *Hub) DeleteTarget(ctx context.Context, id int64) error {
 	}
 	var keys []string
 	for app, tree := range trees {
-		k, err := h.blobKeys(ctx, app, tree)
+		k, err := h.blobKeys(ctx, app, tree.Tree, tree.Desired)
 		if err != nil {
 			return err
 		}
@@ -342,6 +411,16 @@ func (h *Hub) tree(ctx context.Context, a *store.LiveApp) (*Tree, error) {
 // Tree returns an application's current resource tree.
 func (h *Hub) Tree(ctx context.Context, a *store.LiveApp) (*Tree, error) { return h.tree(ctx, a) }
 
+// DesiredManifest returns a resource's desired manifest by key.
+func (h *Hub) DesiredManifest(ctx context.Context, app int64, key string) ([]byte, error) {
+	rc, err := h.blobs.Get(ctx, desiredKey(app, key))
+	if err != nil {
+		return nil, store.ErrNotFound
+	}
+	defer rc.Close()
+	return io.ReadAll(rc)
+}
+
 // Manifest returns a resource's live manifest (store.ErrNotFound when the
 // provider sends none).
 func (h *Hub) Manifest(ctx context.Context, app int64, uid string) ([]byte, error) {
@@ -361,6 +440,9 @@ func (h *Hub) Sweep(ctx context.Context) {
 		keys, err := h.st.TakeLiveGarbage(ctx, 500)
 		if err != nil && ctx.Err() == nil {
 			slog.Warn("live: blob sweep", "err", err)
+		}
+		if err := h.st.ExpireLiveOps(ctx); err != nil && ctx.Err() == nil {
+			slog.Warn("live: expire operations", "err", err)
 		}
 		for _, k := range keys {
 			if err := h.blobs.Delete(ctx, k); err != nil {
@@ -490,8 +572,16 @@ func (h *Hub) notified(ctx context.Context, payload string) {
 		V       int64 `json:"v"`
 		Summary bool  `json:"s"`
 		Gone    bool  `json:"gone"`
+		Op      int64 `json:"op"`
 	}
 	if json.Unmarshal([]byte(payload), &n) != nil {
+		return
+	}
+	if n.Op != 0 {
+		if o, err := h.st.LiveOp(ctx, n.Op); err == nil {
+			data, _ := json.Marshal(o)
+			h.broadcast(func(s *sub) bool { return s.app == n.ID }, Event{Name: "op", Data: data})
+		}
 		return
 	}
 	if n.Gone {
@@ -622,5 +712,90 @@ func (c *lru) drop(app int64) {
 		c.size -= e.Value.(*Tree).cost()
 		c.order.Remove(e)
 		delete(c.items, app)
+	}
+}
+
+// ---- operations: agents wait for them ----
+
+// opWaiters are agents long-polling for operations, by target. One LISTEN
+// connection per server runs while any agent waits.
+type opWaiters struct {
+	mu   sync.Mutex
+	subs map[int64]map[chan struct{}]struct{}
+	stop context.CancelFunc
+}
+
+// NextOp waits up to wait for an operation for target's agent and claims
+// it (nil when none came).
+func (h *Hub) NextOp(ctx context.Context, target int64, wait time.Duration) (*store.LiveOp, error) {
+	wake, done := h.waitOps(target)
+	defer done()
+	deadline := time.After(wait)
+	for {
+		op, err := h.st.ClaimLiveOp(ctx, target)
+		if err != nil || op != nil {
+			return op, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, nil
+		case <-deadline:
+			return nil, nil
+		case <-wake:
+		case <-time.After(5 * time.Second): // a missed notification costs at most this
+		}
+	}
+}
+
+func (h *Hub) waitOps(target int64) (<-chan struct{}, func()) {
+	w := &h.ops
+	ch := make(chan struct{}, 1)
+	w.mu.Lock()
+	if w.subs == nil {
+		w.subs = map[int64]map[chan struct{}]struct{}{}
+	}
+	if w.subs[target] == nil {
+		w.subs[target] = map[chan struct{}]struct{}{}
+	}
+	w.subs[target][ch] = struct{}{}
+	if w.stop == nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		w.stop = cancel
+		go h.listenOps(ctx)
+	}
+	w.mu.Unlock()
+	return ch, func() {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		delete(w.subs[target], ch)
+		if len(w.subs[target]) == 0 {
+			delete(w.subs, target)
+		}
+		if len(w.subs) == 0 && w.stop != nil {
+			w.stop()
+			w.stop = nil
+		}
+	}
+}
+
+func (h *Hub) listenOps(ctx context.Context) {
+	for ctx.Err() == nil {
+		err := h.st.ListenLiveOps(ctx, func(target int64) {
+			h.ops.mu.Lock()
+			for ch := range h.ops.subs[target] {
+				select {
+				case ch <- struct{}{}:
+				default:
+				}
+			}
+			h.ops.mu.Unlock()
+		})
+		if ctx.Err() == nil {
+			slog.Warn("live: operations listener stopped, reconnecting", "err", err)
+			select {
+			case <-ctx.Done():
+			case <-time.After(2 * time.Second):
+			}
+		}
 	}
 }

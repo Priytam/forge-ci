@@ -278,14 +278,34 @@ func TestLiveReadRoutesServeFromForgeOnly(t *testing.T) {
 	app := live.App{Key: "checkout/cart-api", Name: "cart-api", Namespace: "checkout"}
 	ev := live.Event{UID: "e1", ResourceUID: "p1", Kind: "Pod", Name: "p1", Type: "Warning", Reason: "BackOff", Count: 3, FirstSeen: time.Now(), LastSeen: time.Now()}
 	h.batch(live.Batch{Epoch: "a", Seq: 1, Synced: true, Deltas: []live.Delta{{App: app, Status: &live.Status{Health: live.Health{Status: live.Healthy}},
-		Upserts: []live.Resource{res("d1", "Deployment"), res("p1", "Pod", "d1")}, Events: []live.Event{ev}, Keep: []string{"d1", "p1"}}}})
+		Upserts: []live.Resource{res("d1", "Deployment"), res("p1", "Pod", "d1")}, Events: []live.Event{ev}, Keep: []string{"d1", "p1"},
+		Desired: &live.Desired{Revision: live.Revision{SHA: "abc"}, Manifests: map[string]json.RawMessage{"apps/Deployment//d1": json.RawMessage(`{}`)}}}}})
 	id := h.apps("").Apps[0].ID
-	params := strings.NewReplacer("{id}", pid(id), "{uid}", "p1")
+	o, err := h.st.CreateLiveOp(context.Background(), id, live.Op{Kind: live.OpRefresh}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.st.FinishLiveOp(context.Background(), h.target, o.ID, live.OpResult{OK: true}); err == nil {
+		t.Fatal("finished an operation nobody claimed")
+	}
+	if _, err := h.st.ClaimLiveOp(context.Background(), h.target); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.st.FinishLiveOp(context.Background(), h.target, o.ID, live.OpResult{OK: true}); err != nil {
+		t.Fatal(err)
+	}
 	for pattern := range h.srv.liveReadRoutes() {
 		method, path, _ := strings.Cut(pattern, " ")
-		path = params.Replace(path)
-		if strings.HasSuffix(path, "/summary") {
+		ids := pid(id)
+		if strings.Contains(path, "/live/ops/") {
+			ids = pid(o.ID)
+		}
+		path = strings.NewReplacer("{id}", ids, "{uid}", "p1").Replace(path)
+		switch {
+		case strings.HasSuffix(path, "/summary"):
 			path += "?repo=lab/platform-gitops"
+		case strings.HasSuffix(path, "/desired"):
+			path += "?key=apps/Deployment//d1"
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 		rec := httptest.NewRecorder()

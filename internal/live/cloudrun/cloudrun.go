@@ -11,6 +11,7 @@
 package cloudrun
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -44,6 +45,9 @@ type Config struct {
 	BaseURL string
 	Tokens  oauth2.TokenSource
 	Client  *http.Client
+	// AllowSync lets Forge change services: set the deployed image, move
+	// traffic back to a revision (needs roles/run.developer).
+	AllowSync bool
 }
 
 // Provider reconciles Cloud Run services.
@@ -51,6 +55,7 @@ type Provider struct {
 	cfg    Config
 	bucket *bucket
 	calls  atomic.Int64
+	kick   chan struct{} // reconcile now (a refresh, after a change)
 }
 
 // New returns a provider for cfg.
@@ -70,13 +75,14 @@ func New(cfg Config) (*Provider, error) {
 	if cfg.Client == nil {
 		cfg.Client = &http.Client{Timeout: 30 * time.Second}
 	}
-	return &Provider{cfg: cfg, bucket: newBucket(cfg.CallsPerMinute)}, nil
+	return &Provider{cfg: cfg, bucket: newBucket(cfg.CallsPerMinute), kick: make(chan struct{}, 1)}, nil
 }
 
 func (p *Provider) Name() string { return "cloudrun" }
 
 func (p *Provider) Capabilities() live.Capabilities {
-	return live.Capabilities{Manifests: true, ReconcileSeconds: int(math.Ceil(p.cfg.Period.Seconds()))}
+	return live.Capabilities{Manifests: true, ReconcileSeconds: int(math.Ceil(p.cfg.Period.Seconds())),
+		Sync: p.cfg.AllowSync, Rollback: p.cfg.AllowSync}
 }
 
 // Calls is how many API calls the provider has made (the agent reports it).
@@ -161,6 +167,7 @@ func (p *Provider) Watch(ctx context.Context, sink live.Sink) error {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-p.kick:
 		case <-time.After(wait):
 		}
 	}
@@ -351,13 +358,25 @@ func (p *Provider) list(ctx context.Context, path, field string, out any) error 
 }
 
 func (p *Provider) get(ctx context.Context, u string, out any) error {
+	return p.do(ctx, http.MethodGet, u, nil, out)
+}
+
+// do is one API call under the budget.
+func (p *Provider) do(ctx context.Context, method, u string, body []byte, out any) error {
 	if err := p.bucket.take(ctx); err != nil {
 		return err
 	}
 	p.calls.Add(1)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	var rd io.Reader
+	if body != nil {
+		rd = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, u, rd)
 	if err != nil {
 		return err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	if p.cfg.Tokens != nil {
 		tok, err := p.cfg.Tokens.Token()
@@ -373,7 +392,10 @@ func (p *Provider) get(ctx context.Context, u string, out any) error {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("cloudrun: GET %s: HTTP %d: %s", u, resp.StatusCode, strings.TrimSpace(string(b)))
+		return fmt.Errorf("cloudrun: %s %s: HTTP %d: %s", method, u, resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	if out == nil {
+		return nil
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
 }
@@ -434,4 +456,67 @@ func (b *bucket) take(ctx context.Context) error {
 		case <-time.After(wait):
 		}
 	}
+}
+
+// Operate changes a service: sync sets the image Forge deployed, rollback
+// sends all traffic to an earlier revision, refresh reconciles at once.
+// Each is one read and one write of the service (a dry run validates only).
+func (p *Provider) Operate(ctx context.Context, op live.Op, _ func([]byte)) live.OpResult {
+	if op.Kind == live.OpRefresh {
+		select {
+		case p.kick <- struct{}{}:
+		default:
+		}
+		return live.OpResult{OK: true, Message: "Reconciling now"}
+	}
+	if !p.cfg.AllowSync {
+		return live.OpResult{Message: "this agent may not change services (--allow-sync)"}
+	}
+	region, name, ok := strings.Cut(op.App.Key, "/")
+	if !ok {
+		return live.OpResult{Message: "bad application key " + op.App.Key}
+	}
+	u := fmt.Sprintf("%s/v2/projects/%s/locations/%s/services/%s", p.cfg.BaseURL, p.cfg.Project, region, name)
+	var svc map[string]any
+	if err := p.get(ctx, u, &svc); err != nil {
+		return live.OpResult{Message: err.Error()}
+	}
+	rr := live.ResourceResult{Key: op.App.Key, Kind: "Service", Name: name, Action: "configured"}
+	switch op.Kind {
+	case live.OpSync:
+		tmpl, _ := svc["template"].(map[string]any)
+		cs, _ := tmpl["containers"].([]any)
+		if len(cs) == 0 {
+			return live.OpResult{Message: "the service has no container"}
+		}
+		c := cs[0].(map[string]any)
+		if c["image"] == op.Image {
+			rr.Action = "unchanged"
+		}
+		c["image"] = op.Image
+	case live.OpRollback:
+		svc["traffic"] = []any{map[string]any{"type": "TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION", "revision": op.Revision, "percent": 100}}
+	default:
+		return live.OpResult{Message: "Cloud Run cannot " + op.Kind}
+	}
+	if rr.Action != "unchanged" {
+		body, _ := json.Marshal(svc)
+		q := ""
+		if op.DryRun {
+			q, rr.Action = "?validateOnly=true", "would-configure"
+		}
+		if err := p.do(ctx, http.MethodPatch, u+q, body, nil); err != nil {
+			rr.Action, rr.Message = "failed", err.Error()
+			return live.OpResult{Message: err.Error(), Resources: []live.ResourceResult{rr}}
+		}
+		select {
+		case p.kick <- struct{}{}:
+		default:
+		}
+	}
+	msg := "Set " + name + " to " + op.Image
+	if op.Kind == live.OpRollback {
+		msg = "Sent all of " + name + "'s traffic to " + op.Revision
+	}
+	return live.OpResult{OK: true, Message: msg, Revision: op.Revision, Resources: []live.ResourceResult{rr}}
 }

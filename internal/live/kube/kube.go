@@ -45,6 +45,11 @@ type Config struct {
 	RootSelector string
 	// ExcludeNamespaces are never watched (filtered by the API server).
 	ExcludeNamespaces []string
+	// Source, when set, is where applications' desired state lives: the
+	// Diff view and sync status come from it.
+	Source *Source
+	// Applier, when set, lets Forge sync (server-side apply) and prune.
+	Applier Applier
 }
 
 // kind is one watched resource type.
@@ -127,6 +132,11 @@ type Provider struct {
 	// listWatch builds a kind's lister-watcher (the load test swaps in
 	// synthetic ones).
 	listWatch func(k *kind) cache.ListerWatcher
+	repo      *repo // nil: no desired state
+	applier   Applier
+
+	mu      sync.Mutex
+	current *watcher // the running Watch's, for operations
 }
 
 // New returns a provider for the cluster client talks to.
@@ -137,7 +147,14 @@ func New(client kubernetes.Interface, cfg Config) (*Provider, error) {
 	if cfg.GroupLabel == "" {
 		cfg.GroupLabel = "app.kubernetes.io/part-of"
 	}
-	p := &Provider{client: client, cfg: cfg}
+	p := &Provider{client: client, cfg: cfg, applier: cfg.Applier}
+	if cfg.Source != nil {
+		r, err := newRepo(*cfg.Source)
+		if err != nil {
+			return nil, err
+		}
+		p.repo = r
+	}
 	if cfg.RootSelector != "" {
 		sel, err := labels.Parse(cfg.RootSelector)
 		if err != nil {
@@ -159,7 +176,8 @@ func New(client kubernetes.Interface, cfg Config) (*Provider, error) {
 func (p *Provider) Name() string { return "kubernetes" }
 
 func (p *Provider) Capabilities() live.Capabilities {
-	return live.Capabilities{Events: true, Manifests: true, Watch: true}
+	return live.Capabilities{Events: true, Manifests: true, Watch: true, Logs: true, Pods: true,
+		Diff: p.repo != nil, Sync: p.applier != nil && p.repo != nil, Rollback: p.applier != nil && p.repo != nil}
 }
 
 // Watch runs one reflector per kind until ctx ends. It returns
@@ -173,6 +191,8 @@ func (p *Provider) Watch(ctx context.Context, sink live.Sink) error {
 		strs: map[string]string{}, healths: map[live.Health]*live.Health{},
 		parked: map[string]map[string]parkedChild{}, parkedBy: map[string]string{},
 		listedKinds: map[*kind]bool{}, listed: make(chan struct{}), restart: make(chan struct{}),
+		roots: map[string]*root{}, rootsByApp: map[string]map[string]bool{}, desired: map[string]*appDesired{},
+		refresh: make(chan refreshReq),
 	}
 	var wg sync.WaitGroup
 	run := func(k *kind) {
@@ -196,6 +216,16 @@ func (p *Provider) Watch(ctx context.Context, sink live.Sink) error {
 	}
 	run(eventKind)
 	sink.Synced()
+	p.mu.Lock()
+	p.current = w
+	p.mu.Unlock()
+	if p.repo != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			w.follow(ctx)
+		}()
+	}
 	select {
 	case <-ctx.Done():
 		return nil
@@ -297,6 +327,7 @@ type node struct {
 	kind     *kind
 	app      *live.App // nil: not part of an application
 	owner    string
+	key      string   // live.Key, for top-level objects tracked against desired state
 	self     []string // []string{uid}: every child's Parents, shared
 	children int32    // watched objects this one controls
 }
@@ -320,6 +351,13 @@ type watcher struct {
 	// are not ordered), by owner uid.
 	parked   map[string]map[string]parkedChild
 	parkedBy map[string]string
+
+	// Desired state (when the provider has a source).
+	roots      map[string]*root           // top-level objects of apps, by live.Key
+	rootsByApp map[string]map[string]bool // app key → root keys
+	desired    map[string]*appDesired     // app key → desired (nil: failed to render)
+	head       string                     // the source revision last read
+	refresh    chan refreshReq
 
 	listedKinds map[*kind]bool // kinds whose first list is in
 	listed      chan struct{}
@@ -473,6 +511,7 @@ func (w *watcher) place(k *kind, res live.Resource, owner string, app *live.App)
 		}
 	}
 	n.app, n.owner = app, owner
+	w.noteRoot(n, &res)
 	if app != nil {
 		w.sink.Upsert(*app, res)
 	}
@@ -505,6 +544,7 @@ func (w *watcher) removeLocked(uid string) {
 		return
 	}
 	delete(w.nodes, uid)
+	w.forgetRoot(n)
 	if on := w.nodes[n.owner]; on != nil {
 		on.children--
 	}

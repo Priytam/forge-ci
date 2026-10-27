@@ -16,8 +16,19 @@ type Sink interface {
 	Upsert(app App, r Resource)
 	Delete(app App, uid string)
 	Event(app App, e Event)
+	// Desired records the app's desired state (providers with Diff), and
+	// SetSync a resource's comparison with it.
+	Desired(app App, d Desired)
+	SetSync(app App, uid, sync string)
 	// Synced: the initial report is complete.
 	Synced()
+}
+
+// Operator is implemented by providers that act on what they watch: sync,
+// rollback, refresh, logs. out receives a logs operation's output as it
+// arrives; Operate returns when the operation is over.
+type Operator interface {
+	Operate(ctx context.Context, op Op, out func([]byte)) OpResult
 }
 
 // Provider is one platform Forge Live can watch. Implementations run in
@@ -79,6 +90,7 @@ type tracked struct {
 	upserts map[string]Resource
 	deletes map[string]bool
 	events  []Event
+	desired *Desired
 }
 
 // NewTracker returns an empty tracker that coalesces for window (at least
@@ -184,6 +196,42 @@ func (t *Tracker) Event(app App, e Event) {
 	a.events = append(a.events, e)
 }
 
+// Desired records the app's desired state; the latest one is sent.
+func (t *Tracker) Desired(app App, d Desired) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed {
+		return
+	}
+	a := t.get(app)
+	a.touch(t.now())
+	a.desired = &d
+}
+
+// SetSync records a resource's sync status (its other fields unchanged).
+func (t *Tracker) SetSync(app App, uid, sync string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	a := t.apps[app.Key]
+	if a == nil || t.closed {
+		return
+	}
+	e, ok := a.resources[uid]
+	if !ok || e.res.Sync == sync {
+		return
+	}
+	e.res.Sync = sync
+	a.resources[uid] = e
+	a.touch(t.now())
+	if up, ok := a.upserts[uid]; ok {
+		up.Sync = sync
+		a.upserts[uid] = up
+		return
+	}
+	t.pending += resourceCost(e.res)
+	a.upserts[uid] = e.res
+}
+
 // Synced marks the provider's initial report complete: every app now owes
 // the server its full uid list.
 func (t *Tracker) Synced() {
@@ -249,7 +297,8 @@ func (t *Tracker) Take(maxBytes int) (deltas []Delta, done bool) {
 			break
 		}
 		a := t.apps[k]
-		d := Delta{App: a.app, Events: a.events}
+		d := Delta{App: a.app, Events: a.events, Desired: a.desired}
+		a.desired = nil
 		if t.synced {
 			st := StatusOf(a.all())
 			d.Status = &st

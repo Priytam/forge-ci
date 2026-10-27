@@ -66,8 +66,11 @@ type Resource struct {
 	UID       string `json:"uid"`
 	// Parents are the uids of the resources that own this one within the
 	// application (a Pod's ReplicaSet); none for the application's top level.
-	Parents   []string  `json:"parents,omitempty"`
-	Health    *Health   `json:"health,omitempty"` // nil: the kind has no health (a ConfigMap)
+	Parents []string `json:"parents,omitempty"`
+	Health  *Health  `json:"health,omitempty"` // nil: the kind has no health (a ConfigMap)
+	// Sync compares the resource with its desired state: Synced, OutOfSync,
+	// or "" when it has none (it is not in Git: a child, or not managed).
+	Sync      string    `json:"sync,omitempty"`
 	Summary   Summary   `json:"summary"`
 	CreatedAt time.Time `json:"created_at"`
 	// Manifest is the live object, trimmed (no managed fields, no
@@ -75,6 +78,33 @@ type Resource struct {
 	// It travels in deltas only: the agent does not keep it, the server
 	// stores it apart from the tree.
 	Manifest json.RawMessage `json:"manifest,omitempty"`
+}
+
+// Sync statuses.
+const (
+	Synced    = "Synced"
+	OutOfSync = "OutOfSync"
+)
+
+// DesiredPrefix starts the uid of a resource that is in Git but not in the
+// cluster (shown as Missing until it is created).
+const DesiredPrefix = "desired:"
+
+// Key identifies a resource by what it is called, not its uid: how a
+// desired manifest finds its live counterpart.
+func Key(group, kind, namespace, name string) string {
+	return group + "/" + kind + "/" + namespace + "/" + name
+}
+
+// Key is the resource's identity key.
+func (r Resource) Key() string { return Key(r.Group, r.Kind, r.Namespace, r.Name) }
+
+// Revision is a desired state's source revision.
+type Revision struct {
+	SHA     string    `json:"sha"`
+	Message string    `json:"message,omitempty"`
+	Author  string    `json:"author,omitempty"`
+	Time    time.Time `json:"time,omitempty"`
 }
 
 // App identifies an application within a target.
@@ -93,6 +123,9 @@ type Status struct {
 	Pods      int      `json:"pods"`
 	PodsReady int      `json:"pods_ready"`
 	Images    []string `json:"images"`
+	// Sync is the app's: OutOfSync when any resource is, Synced when every
+	// desired resource matches, "" when the app has no desired state.
+	Sync string `json:"sync,omitempty"`
 }
 
 // Event is something the platform said about a resource (Kubernetes events,
@@ -129,6 +162,12 @@ func StatusOf(resources iter.Seq[Resource]) Status {
 			for _, img := range r.Summary.Images {
 				images[img] = true
 			}
+		}
+		switch {
+		case r.Sync == OutOfSync:
+			st.Sync = OutOfSync
+		case r.Sync == Synced && st.Sync == "":
+			st.Sync = Synced
 		}
 		if r.Health == nil || r.Health.Status == Healthy {
 			continue
@@ -175,8 +214,21 @@ type Delta struct {
 	Upserts []Resource `json:"upserts,omitempty"`
 	Deletes []string   `json:"deletes,omitempty"` // uids
 	Keep    []string   `json:"keep,omitempty"`
-	Events  []Event    `json:"events,omitempty"`
-	Gone    bool       `json:"gone,omitempty"` // the app has no resources left
+	// Desired is the app's desired state, sent when it changes: its
+	// revision and every desired manifest by resource Key (the whole set:
+	// keys not in it are no longer desired).
+	Desired *Desired `json:"desired,omitempty"`
+	Events  []Event  `json:"events,omitempty"`
+	Gone    bool     `json:"gone,omitempty"` // the app has no resources left
+}
+
+// Desired is an application's desired state at one revision.
+type Desired struct {
+	Revision  Revision                   `json:"revision"`
+	Source    string                     `json:"source,omitempty"` // the path rendered (apps/checkout/cart-api)
+	Tool      string                     `json:"tool,omitempty"`   // kustomize | helm | plain | image
+	Manifests map[string]json.RawMessage `json:"manifests"`
+	Error     string                     `json:"error,omitempty"` // rendering failed: the app's sync is Unknown
 }
 
 // Capabilities says what a provider can show; the UI branches on these,
@@ -188,6 +240,12 @@ type Capabilities struct {
 	// reconciles every ReconcileSeconds, under a call budget.
 	Watch            bool `json:"watch"`
 	ReconcileSeconds int  `json:"reconcile_seconds,omitempty"`
+	Diff             bool `json:"diff"`     // desired state, sync status and the Diff view
+	Sync             bool `json:"sync"`     // the agent may change what it watches
+	Rollback         bool `json:"rollback"` // to an earlier revision
+	Logs             bool `json:"logs"`     // the Logs tab
+	Pods             bool `json:"pods"`     // the Pods view
+	Network          bool `json:"network"`  // the Network view
 }
 
 // AgentStats is what an agent reports about itself with every batch.
@@ -224,4 +282,53 @@ type Ack struct {
 	// Resync asks the agent for a fresh epoch (the server lost track, or a
 	// batch is missing).
 	Resync bool `json:"resync,omitempty"`
+}
+
+// ---- operations: server → agent ----
+
+// Op kinds.
+const (
+	OpSync     = "sync"     // apply the desired state at Revision
+	OpRefresh  = "refresh"  // re-read the source (Hard: and report everything afresh)
+	OpRollback = "rollback" // back to an earlier revision
+	OpLogs     = "logs"     // stream a pod's logs
+)
+
+// Op is one operation an agent runs for Forge.
+type Op struct {
+	ID       int64  `json:"id"`
+	Kind     string `json:"kind"`
+	App      App    `json:"app"`
+	Revision string `json:"revision,omitempty"` // sync/rollback: the source revision ("" = latest)
+	// Sync options.
+	Prune     bool     `json:"prune,omitempty"`
+	DryRun    bool     `json:"dry_run,omitempty"`
+	Force     bool     `json:"force,omitempty"`
+	Resources []string `json:"resources,omitempty"` // Keys; none = all
+	Hard      bool     `json:"hard,omitempty"`      // refresh
+	// Image is the desired image for providers whose desired state is a
+	// Forge deploy record (Cloud Run).
+	Image string `json:"image,omitempty"`
+	// Logs.
+	Pod       string `json:"pod,omitempty"`
+	Container string `json:"container,omitempty"`
+	Tail      int    `json:"tail,omitempty"`
+	Follow    bool   `json:"follow,omitempty"`
+}
+
+// OpResult is how an operation ended.
+type OpResult struct {
+	OK        bool             `json:"ok"`
+	Message   string           `json:"message"`
+	Revision  string           `json:"revision,omitempty"`
+	Resources []ResourceResult `json:"resources,omitempty"`
+}
+
+// ResourceResult is what an operation did to one resource.
+type ResourceResult struct {
+	Key     string `json:"key"`
+	Kind    string `json:"kind"`
+	Name    string `json:"name"`
+	Action  string `json:"action"` // created | configured | unchanged | pruned | failed | would-*
+	Message string `json:"message,omitempty"`
 }

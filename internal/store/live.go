@@ -50,34 +50,44 @@ type LiveDeploy struct {
 	At         time.Time `json:"at"`
 	JobID      int64     `json:"job_id"`
 	PipelineID int64     `json:"pipeline_id"`
+	Digest     string    `json:"digest,omitempty"` // the image digest the deploy reported
 	Message    string    `json:"message,omitempty"`
 }
 
 // LiveApp is one application's indexable status.
 type LiveApp struct {
-	ID            int64       `json:"id"`
-	TargetID      int64       `json:"target_id"`
-	Key           string      `json:"key"`
-	Name          string      `json:"name"`
-	Namespace     string      `json:"namespace"`
-	Group         string      `json:"group"`
-	Health        string      `json:"health"`
-	HealthMessage string      `json:"health_message"`
-	HealthSince   time.Time   `json:"health_since"`
-	Sync          string      `json:"sync"`
-	Resources     int         `json:"resources"`
-	Pods          int         `json:"pods"`
-	PodsReady     int         `json:"pods_ready"`
-	Images        []string    `json:"images"`
-	Tree          string      `json:"-"`
-	Version       int64       `json:"version"`
-	Epoch         string      `json:"-"`
-	UpdatedAt     time.Time   `json:"updated_at"`
-	Target        string      `json:"target"`
-	Environment   string      `json:"environment"`
-	Repo          string      `json:"repo"`
-	Provider      string      `json:"provider"`
-	Deployed      *LiveDeploy `json:"deployed"`
+	ID            int64     `json:"id"`
+	TargetID      int64     `json:"target_id"`
+	Key           string    `json:"key"`
+	Name          string    `json:"name"`
+	Namespace     string    `json:"namespace"`
+	Group         string    `json:"group"`
+	Health        string    `json:"health"`
+	HealthMessage string    `json:"health_message"`
+	HealthSince   time.Time `json:"health_since"`
+	Sync          string    `json:"sync"`
+	Resources     int       `json:"resources"`
+	Pods          int       `json:"pods"`
+	PodsReady     int       `json:"pods_ready"`
+	Images        []string  `json:"images"`
+	Tree          string    `json:"-"`
+	Version       int64     `json:"version"`
+	Epoch         string    `json:"-"`
+	UpdatedAt     time.Time `json:"updated_at"`
+	// The desired state's revision and where it was rendered from.
+	Revision        string      `json:"revision"`
+	RevisionMessage string      `json:"revision_message"`
+	RevisionAuthor  string      `json:"revision_author"`
+	RevisionAt      *time.Time  `json:"revision_at"`
+	SourcePath      string      `json:"source_path"`
+	SourceTool      string      `json:"source_tool"`
+	SourceError     string      `json:"source_error"`
+	DesiredKeys     []string    `json:"-"`
+	Target          string      `json:"target"`
+	Environment     string      `json:"environment"`
+	Repo            string      `json:"repo"`
+	Provider        string      `json:"provider"`
+	Deployed        *LiveDeploy `json:"deployed"`
 }
 
 // SetStatus applies an agent's status; health_since moves only when the
@@ -88,6 +98,11 @@ func (a *LiveApp) SetStatus(st live.Status, now time.Time) {
 	}
 	a.Health, a.HealthMessage = st.Health.Status, st.Health.Message
 	a.Resources, a.Pods, a.PodsReady, a.Images = st.Resources, st.Pods, st.PodsReady, st.Images
+	if st.Sync != "" {
+		a.Sync = st.Sync
+	} else {
+		a.Sync = "Unknown"
+	}
 }
 
 func newLiveToken() (string, error) {
@@ -167,22 +182,28 @@ func (s *Store) LiveTargets(ctx context.Context) ([]LiveTarget, error) {
 	return out, rows.Err()
 }
 
-// LiveTargetTrees returns the tree keys of a target's applications by app id
-// (to collect their blobs before the target goes).
-func (s *Store) LiveTargetTrees(ctx context.Context, targetID int64) (map[int64]string, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id, tree FROM live_apps WHERE target_id = $1`, targetID)
+// LiveBlobs are an app's blob references: its tree and its desired keys.
+type LiveBlobs struct {
+	Tree    string
+	Desired []string
+}
+
+// LiveTargetTrees returns the blob references of a target's applications by
+// app id (to collect their blobs before the target goes).
+func (s *Store) LiveTargetTrees(ctx context.Context, targetID int64) (map[int64]LiveBlobs, error) {
+	rows, err := s.pool.Query(ctx, `SELECT id, tree, desired_keys FROM live_apps WHERE target_id = $1`, targetID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := map[int64]string{}
+	out := map[int64]LiveBlobs{}
 	for rows.Next() {
 		var id int64
-		var tree string
-		if err := rows.Scan(&id, &tree); err != nil {
+		var b LiveBlobs
+		if err := rows.Scan(&id, &b.Tree, &b.Desired); err != nil {
 			return nil, err
 		}
-		out[id] = tree
+		out[id] = b
 	}
 	return out, rows.Err()
 }
@@ -227,12 +248,13 @@ func (s *Store) DeleteLiveTarget(ctx context.Context, id int64, collect []string
 const liveChannel = "forge_live"
 
 // liveNote is a notification's payload: an app changed (to version V; its
-// summary row too when Summary), or is gone.
+// summary row too when Summary), is gone, or one of its operations moved.
 type liveNote struct {
 	ID      int64 `json:"id"`
 	V       int64 `json:"v,omitempty"`
 	Summary bool  `json:"s,omitempty"`
 	Gone    bool  `json:"gone,omitempty"`
+	Op      int64 `json:"op,omitempty"` // an operation of the app changed
 }
 
 func notifyLive(ctx context.Context, tx pgx.Tx, n liveNote) error {
@@ -286,12 +308,14 @@ func (s *Store) LiveIngest(ctx context.Context, targetID int64, fn func(*LiveTx)
 }
 
 const liveAppCols = `a.id, a.target_id, a.key, a.name, a.namespace, a.app_group, a.health, a.health_message, a.health_since,
-	a.sync, a.resources, a.pods, a.pods_ready, a.images, a.tree, a.version, a.epoch, a.updated_at`
+	a.sync, a.resources, a.pods, a.pods_ready, a.images, a.tree, a.version, a.epoch, a.updated_at,
+	a.revision, a.revision_message, a.revision_author, a.revision_at, a.source_path, a.source_tool, a.source_error, a.desired_keys`
 
 func scanLiveApp(row pgx.Row, extra ...any) (*LiveApp, error) {
 	var a LiveApp
 	dest := append([]any{&a.ID, &a.TargetID, &a.Key, &a.Name, &a.Namespace, &a.Group, &a.Health, &a.HealthMessage, &a.HealthSince,
-		&a.Sync, &a.Resources, &a.Pods, &a.PodsReady, &a.Images, &a.Tree, &a.Version, &a.Epoch, &a.UpdatedAt}, extra...)
+		&a.Sync, &a.Resources, &a.Pods, &a.PodsReady, &a.Images, &a.Tree, &a.Version, &a.Epoch, &a.UpdatedAt,
+		&a.Revision, &a.RevisionMessage, &a.RevisionAuthor, &a.RevisionAt, &a.SourcePath, &a.SourceTool, &a.SourceError, &a.DesiredKeys}, extra...)
 	if err := row.Scan(dest...); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
@@ -334,6 +358,12 @@ func (l *LiveTx) SaveApp(ctx context.Context, a *LiveApp, summary bool) error {
 	if a.Images == nil {
 		a.Images = []string{}
 	}
+	if a.DesiredKeys == nil {
+		a.DesiredKeys = []string{}
+	}
+	if a.Sync == "" {
+		a.Sync = "Unknown"
+	}
 	var err error
 	if a.ID == 0 {
 		err = l.tx.QueryRow(ctx, `INSERT INTO live_apps (target_id, key, name, namespace, app_group, health, health_message, health_since,
@@ -344,10 +374,14 @@ func (l *LiveTx) SaveApp(ctx context.Context, a *LiveApp, summary bool) error {
 		summary = true
 	} else {
 		err = l.tx.QueryRow(ctx, `UPDATE live_apps SET name=$2, namespace=$3, app_group=$4, health=$5, health_message=$6, health_since=$7,
-			resources=$8, pods=$9, pods_ready=$10, images=$11, tree=$12, version=$13, epoch=$14, updated_at=now()
+			resources=$8, pods=$9, pods_ready=$10, images=$11, tree=$12, version=$13, epoch=$14, sync=$15,
+			revision=$16, revision_message=$17, revision_author=$18, revision_at=$19, source_path=$20, source_tool=$21,
+			source_error=$22, desired_keys=$23, updated_at=now()
 			WHERE id=$1 RETURNING updated_at`,
 			a.ID, a.Name, a.Namespace, a.Group, a.Health, a.HealthMessage, a.HealthSince,
-			a.Resources, a.Pods, a.PodsReady, a.Images, a.Tree, a.Version, a.Epoch).Scan(&a.UpdatedAt)
+			a.Resources, a.Pods, a.PodsReady, a.Images, a.Tree, a.Version, a.Epoch, a.Sync,
+			a.Revision, a.RevisionMessage, a.RevisionAuthor, a.RevisionAt, a.SourcePath, a.SourceTool,
+			a.SourceError, a.DesiredKeys).Scan(&a.UpdatedAt)
 	}
 	if err != nil {
 		return err
@@ -444,27 +478,39 @@ const liveAppFrom = ` FROM live_apps a JOIN live_targets t ON t.id = a.target_id
 // liveDeployJoin finds the latest successful deployment of the target's
 // repo to its environment (deployments_repo_env_id_idx).
 const liveDeployJoin = ` LEFT JOIN LATERAL (
-	SELECT d.sha, d.deployed_by, d.deployed_at, d.job_id, d.pipeline_id FROM deployments d
+	SELECT d.sha, d.deployed_by, d.deployed_at, d.job_id, d.pipeline_id, d.digest FROM deployments d
 	WHERE t.repo <> '' AND d.repo = t.repo AND d.environment = t.environment AND d.status = 'success'
 	ORDER BY d.id DESC LIMIT 1) dep ON TRUE`
 
 const liveAppSelect = `SELECT ` + liveAppCols + `, t.name, t.environment, t.repo, t.provider,
-	dep.sha, dep.deployed_by, dep.deployed_at, dep.job_id, dep.pipeline_id` + liveAppFrom + liveDeployJoin
+	dep.sha, dep.deployed_by, dep.deployed_at, dep.job_id, dep.pipeline_id, dep.digest` + liveAppFrom + liveDeployJoin
 
 func scanLiveAppRow(row pgx.Row) (*LiveApp, error) {
-	var sha, by *string
+	var sha, by, digest *string
 	var at *time.Time
 	var job, pipe *int64
 	var target, env, repo, provider string
-	a, err := scanLiveApp(row, &target, &env, &repo, &provider, &sha, &by, &at, &job, &pipe)
+	a, err := scanLiveApp(row, &target, &env, &repo, &provider, &sha, &by, &at, &job, &pipe, &digest)
 	if err != nil {
 		return nil, err
 	}
 	a.Target, a.Environment, a.Repo, a.Provider = target, env, repo, provider
 	if sha != nil {
-		a.Deployed = &LiveDeploy{SHA: *sha, By: *by, At: *at, JobID: *job, PipelineID: *pipe}
+		a.Deployed = &LiveDeploy{SHA: *sha, By: *by, At: *at, JobID: *job, PipelineID: *pipe, Digest: *digest}
 	}
 	return a, nil
+}
+
+// LatestDeployDigest is the image digest of the latest successful deploy of
+// repo to env ("" when none reported one).
+func (s *Store) LatestDeployDigest(ctx context.Context, repo, env string) (string, error) {
+	var d string
+	err := s.pool.QueryRow(ctx, `SELECT digest FROM deployments WHERE repo=$1 AND environment=$2 AND status='success'
+		ORDER BY id DESC LIMIT 1`, repo, env).Scan(&d)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	return d, err
 }
 
 // LiveFacets counts apps per value of each dimension.

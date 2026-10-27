@@ -58,11 +58,20 @@ export function HealthPill({ health, title }: { health: Health; title?: string }
 
 /** Sync as icon + word. Until desired state is compared (phase B) it is Unknown. */
 export function SyncPill({ sync }: { sync: string }) {
-  const title = sync === "Unknown" ? "Comparing the live state with Git comes with Diff and Sync" : undefined;
+  const title = sync === "Unknown" ? "Not compared: the agent has no source for this app, or it could not render it" : undefined;
   return (
     <span className={`pill2 pill2-${SYNC_TONE[sync] ?? "neutral"}`} title={title}>
       <Glyph d={GLYPH[sync] ?? GLYPH.Unknown} size={12} />
       {sync === "OutOfSync" ? "Out of sync" : sync}
+    </span>
+  );
+}
+
+/** A sync icon alone: green synced, amber out of sync. */
+export function SyncIcon({ sync, size = 14 }: { sync: string; size?: number }) {
+  return (
+    <span className={`lv-ic lv-tone-${SYNC_TONE[sync] ?? "neutral"}`} title={sync === "OutOfSync" ? "Out of sync with Git" : sync}>
+      <Glyph d={GLYPH[sync] ?? GLYPH.Unknown} size={size} />
     </span>
   );
 }

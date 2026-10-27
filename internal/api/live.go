@@ -35,6 +35,10 @@ func (s *Server) liveReadRoutes() map[string]http.HandlerFunc {
 		"GET /api/v1/live/summary":                   s.liveSummary,
 		"GET /api/v1/live/stream":                    s.streamLive,
 		"GET /api/v1/live/targets":                   s.listLiveTargets,
+		"GET /api/v1/live/apps/{id}/desired":         s.liveDesired,
+		"GET /api/v1/live/apps/{id}/ops":             s.liveAppOps,
+		"GET /api/v1/live/ops/{id}":                  s.getLiveOp,
+		"GET /api/v1/live/ops/{id}/output":           s.streamLiveOpOutput,
 	}
 }
 
@@ -45,6 +49,12 @@ func (s *Server) registerLiveRoutes() {
 	s.mux.HandleFunc("POST /api/v1/live/targets", s.createLiveTarget)
 	s.mux.HandleFunc("DELETE /api/v1/live/targets/{id}", s.deleteLiveTarget)
 	s.mux.HandleFunc("POST /api/v1/live/agent/batches", s.liveAgentBatch)
+	s.mux.HandleFunc("POST /api/v1/live/apps/{id}/ops", s.createLiveOp)
+	s.mux.HandleFunc("POST /api/v1/live/ops/{id}/approve", s.approveLiveOp)
+	s.mux.HandleFunc("POST /api/v1/live/ops/{id}/cancel", s.cancelLiveOp)
+	s.mux.HandleFunc("POST /api/v1/live/agent/ops/next", s.liveAgentNextOp)
+	s.mux.HandleFunc("POST /api/v1/live/agent/ops/{id}/output", s.liveAgentOpOutput)
+	s.mux.HandleFunc("POST /api/v1/live/agent/ops/{id}/result", s.liveAgentOpResult)
 }
 
 // RunLive runs Forge Live's background work (collecting unreferenced blobs)
@@ -58,14 +68,8 @@ const maxLiveBatch = 64 << 20
 // liveAgentBatch is POST /api/v1/live/agent/batches: one agent batch,
 // authenticated by the target's agent token, answered with an Ack.
 func (s *Server) liveAgentBatch(w http.ResponseWriter, r *http.Request) {
-	t, err := s.store.LiveTargetByToken(r.Context(), bearerToken(r))
-	if errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusUnauthorized, "invalid agent token")
-		return
-	}
-	if err != nil {
-		slog.Error("live: resolve agent token", "err", err)
-		writeErr(w, http.StatusInternalServerError, "token check failed")
+	t, ok := s.liveAgent(w, r)
+	if !ok {
 		return
 	}
 	counted := &countingReader{r: http.MaxBytesReader(w, r.Body, maxLiveBatch)}
@@ -94,6 +98,21 @@ func (s *Server) liveAgentBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, ack)
+}
+
+// liveAgent authenticates an agent request by its target's token.
+func (s *Server) liveAgent(w http.ResponseWriter, r *http.Request) (*store.LiveTarget, bool) {
+	t, err := s.store.LiveTargetByToken(r.Context(), bearerToken(r))
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusUnauthorized, "invalid agent token")
+		return nil, false
+	}
+	if err != nil {
+		slog.Error("live: resolve agent token", "err", err)
+		writeErr(w, http.StatusInternalServerError, "token check failed")
+		return nil, false
+	}
+	return t, true
 }
 
 type countingReader struct {
@@ -342,4 +361,359 @@ func (s *Server) streamLive(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+// ---- desired state and operations (phase B) ----
+
+// liveDesired is GET /api/v1/live/apps/{id}/desired?key=: one desired
+// manifest, as the agent rendered it from the source.
+func (s *Server) liveDesired(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid application id")
+		return
+	}
+	b, err := s.live.DesiredManifest(r.Context(), id, r.URL.Query().Get("key"))
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "no desired manifest for this resource")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "private, no-cache")
+	_, _ = w.Write(b)
+}
+
+// liveAppOps is an application's history: its syncs, rollbacks and
+// refreshes, newest first.
+func (s *Server) liveAppOps(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid application id")
+		return
+	}
+	ops, err := s.store.LiveAppOps(r.Context(), id, 100)
+	if err != nil {
+		slog.Error("live: ops", "id", id, "err", err)
+		writeErr(w, http.StatusInternalServerError, "failed to load the history")
+		return
+	}
+	writeJSONCached(w, r, ops)
+}
+
+func (s *Server) getLiveOp(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid operation id")
+		return
+	}
+	o, err := s.store.LiveOp(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "operation not found")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to load the operation")
+		return
+	}
+	writeJSON(w, http.StatusOK, o)
+}
+
+// createLiveOp is POST /api/v1/live/apps/{id}/ops: sync, rollback, refresh
+// or logs. It needs the operate role on the app's repo, a target that can
+// do it (capabilities), and for a sync or rollback an environment that is
+// not frozen; a protected environment's approvals come first.
+func (s *Server) createLiveOp(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid application id")
+		return
+	}
+	var op live.Op
+	if err := json.NewDecoder(r.Body).Decode(&op); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	a, err := s.store.LiveApp(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "application not found")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to load the application")
+		return
+	}
+	if !s.requireOperate(w, r, a.Repo) {
+		return
+	}
+	t, err := s.store.LiveAppTarget(r.Context(), id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to load the target")
+		return
+	}
+	caps := t.Capabilities
+	switch op.Kind {
+	case live.OpSync:
+		ok = caps.Sync
+	case live.OpRollback:
+		ok = caps.Rollback && op.Revision != ""
+	case live.OpRefresh:
+		ok = true
+	case live.OpLogs:
+		ok = caps.Logs && op.Pod != ""
+	default:
+		ok = false
+	}
+	if !ok {
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("%s cannot %s this application", t.Name, op.Kind))
+		return
+	}
+	// Providers whose desired state is the deploy record (Cloud Run) sync
+	// to the image Forge last deployed.
+	if op.Kind == live.OpSync && !caps.Diff && op.Image == "" {
+		if op.Image = deployedImage(a); op.Image == "" {
+			writeErr(w, http.StatusBadRequest, "no Forge deploy with an image digest to sync to")
+			return
+		}
+	}
+	o, err := s.store.CreateLiveOp(r.Context(), id, op, s.actorLabel(r))
+	switch {
+	case errors.Is(err, store.ErrFrozen), errors.Is(err, store.ErrOpBusy):
+		writeErr(w, http.StatusConflict, err.Error())
+		return
+	case err != nil:
+		slog.Error("live: create op", "id", id, "err", err)
+		writeErr(w, http.StatusInternalServerError, "failed to start the operation")
+		return
+	}
+	if op.Kind != live.OpLogs {
+		s.audit(r, "live."+op.Kind, a.Target+"/"+a.Key, a.Repo, "requested", map[string]any{
+			"op": o.ID, "revision": op.Revision, "prune": op.Prune, "dry_run": op.DryRun, "force": op.Force, "state": o.State})
+	}
+	writeJSON(w, http.StatusCreated, o)
+}
+
+// deployedImage is the image the latest Forge deploy pushed: the running
+// image's repository at the deploy record's digest.
+func deployedImage(a *store.LiveApp) string {
+	if a.Deployed == nil || a.Deployed.Digest == "" || len(a.Images) == 0 {
+		return ""
+	}
+	digest := a.Deployed.Digest
+	repo := a.Images[0]
+	if i := strings.Index(repo, "@"); i >= 0 {
+		repo = repo[:i]
+	} else if i := strings.LastIndex(repo, ":"); i > strings.LastIndex(repo, "/") {
+		repo = repo[:i]
+	}
+	return repo + "@" + digest
+}
+
+func (s *Server) approveLiveOp(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid operation id")
+		return
+	}
+	var req struct {
+		Verdict  string `json:"verdict"`
+		Comment  string `json:"comment"`
+		Approver string `json:"approver"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	// As for deploy jobs: with a session the approver is who is signed in.
+	if sess := s.currentSession(r); sess != nil {
+		req.Approver = sess.Email
+	} else if s.ssoEnforced(r.Context()) {
+		writeErr(w, http.StatusUnauthorized, "authentication required — sign in via SSO")
+		return
+	}
+	if req.Approver == "" {
+		req.Approver = s.actorLabel(r)
+	}
+	if req.Verdict != "approved" && req.Verdict != "rejected" {
+		writeErr(w, http.StatusBadRequest, `verdict must be "approved" or "rejected"`)
+		return
+	}
+	o, err := s.store.ApproveLiveOp(r.Context(), id, req.Approver, req.Verdict, req.Comment)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		writeErr(w, http.StatusNotFound, "operation not found")
+	case errors.Is(err, store.ErrNotBlocked):
+		writeErr(w, http.StatusConflict, "this operation is not waiting for approval")
+	case errors.Is(err, store.ErrDuplicateVote):
+		writeErr(w, http.StatusConflict, "you have already voted")
+	case errors.Is(err, store.ErrForbidden), errors.Is(err, store.ErrSelfApproval):
+		writeErr(w, http.StatusForbidden, err.Error())
+	case err != nil:
+		slog.Error("live: approve op", "id", id, "err", err)
+		writeErr(w, http.StatusInternalServerError, "failed to record the vote")
+	default:
+		s.audit(r, "live.approve", strconv.FormatInt(id, 10), "", req.Verdict, nil)
+		writeJSON(w, http.StatusOK, o)
+	}
+}
+
+func (s *Server) cancelLiveOp(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid operation id")
+		return
+	}
+	o, err := s.store.LiveOp(r.Context(), id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "operation not found")
+		return
+	}
+	a, err := s.store.LiveApp(r.Context(), o.AppID)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "application not found")
+		return
+	}
+	if !s.requireOperate(w, r, a.Repo) {
+		return
+	}
+	if err := s.store.CancelLiveOp(r.Context(), id, s.actorLabel(r)); err != nil && !errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusInternalServerError, "failed to cancel")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// streamLiveOpOutput is GET /api/v1/live/ops/{id}/output: an operation's
+// output (pod logs) as server-sent "output" events, then "end". Leaving the
+// page stops a log stream.
+func (s *Server) streamLiveOpOutput(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid operation id")
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeErr(w, http.StatusInternalServerError, "streaming unsupported")
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	var last int64
+	tick := time.NewTicker(300 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		o, err := s.store.LiveOp(r.Context(), id)
+		if err != nil {
+			return
+		}
+		chunks, next, err := s.store.LiveOpOutput(r.Context(), id, last)
+		if err != nil {
+			return
+		}
+		last = next
+		for _, c := range chunks {
+			data, _ := json.Marshal(string(c))
+			if _, err := fmt.Fprintf(w, "event: output\ndata: %s\n\n", data); err != nil {
+				return
+			}
+		}
+		if o.FinishedAt != nil && len(chunks) == 0 {
+			data, _ := json.Marshal(o)
+			fmt.Fprintf(w, "event: end\ndata: %s\n\n", data)
+			flusher.Flush()
+			return
+		}
+		flusher.Flush()
+		select {
+		case <-r.Context().Done():
+			if o.Kind == live.OpLogs {
+				_ = s.store.CancelLiveOp(context.WithoutCancel(r.Context()), id, "the page")
+			}
+			return
+		case <-tick.C:
+		}
+	}
+}
+
+// ---- agent side ----
+
+// liveAgentNextOp is the agent's long poll: an operation (200) or none
+// within 25 seconds (204).
+func (s *Server) liveAgentNextOp(w http.ResponseWriter, r *http.Request) {
+	t, ok := s.liveAgent(w, r)
+	if !ok {
+		return
+	}
+	o, err := s.live.NextOp(r.Context(), t.ID, 25*time.Second)
+	if err != nil {
+		slog.Error("live: next op", "target", t.Name, "err", err)
+		writeErr(w, http.StatusInternalServerError, "failed to read operations")
+		return
+	}
+	if o == nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	writeJSON(w, http.StatusOK, o.Params)
+}
+
+// liveAgentOpOutput stores a chunk of an operation's output; 409 tells the
+// agent to stop (canceled, or over its budget).
+func (s *Server) liveAgentOpOutput(w http.ResponseWriter, r *http.Request) {
+	t, ok := s.liveAgent(w, r)
+	if !ok {
+		return
+	}
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid operation id")
+		return
+	}
+	chunk, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "unreadable body")
+		return
+	}
+	kept, err := s.store.AppendLiveOpOutput(r.Context(), t.ID, id, chunk)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to store output")
+		return
+	}
+	if !kept {
+		writeErr(w, http.StatusConflict, "stop: the operation is over")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) liveAgentOpResult(w http.ResponseWriter, r *http.Request) {
+	t, ok := s.liveAgent(w, r)
+	if !ok {
+		return
+	}
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid operation id")
+		return
+	}
+	var res live.OpResult
+	if err := json.NewDecoder(r.Body).Decode(&res); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid result")
+		return
+	}
+	o, err := s.store.FinishLiveOp(r.Context(), t.ID, id, res)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "no such running operation")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to record the result")
+		return
+	}
+	if o.Kind != live.OpLogs {
+		s.auditAs(r, "agent:"+t.Name, "live."+o.Kind+".finished", strconv.FormatInt(o.ID, 10), "", o.State, map[string]any{"message": o.Message})
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

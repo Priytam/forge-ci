@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
-import { commitSubject, getLiveApp, relativeTime, shortSha, subscribeLive, type Health, type LiveAppView, type LivePatch } from "../api";
+import { commitSubject, createLiveOp, getLiveApp, listLiveOps, relativeTime, shortSha, subscribeLive, type Health, type LiveAppView, type LiveOp, type LivePatch } from "../api";
+import { DiffPanel, HistoryPanel, SyncDialog } from "../components/live/AppPanels";
+import { networkTree, PodsView } from "../components/live/views";
 import Avatar, { displayName } from "../components/Avatar";
 import ResourceList from "../components/live/ResourceList";
 import ResourcePanel from "../components/live/ResourcePanel";
@@ -26,13 +28,21 @@ function applyPatch(v: LiveAppView, p: LivePatch): LiveAppView | null {
 export default function ApplicationDetail() {
   const id = Number(useParams<{ id: string }>().id);
   const [params, setParams] = useSearchParams();
-  const mode = params.get("view") === "list" ? "list" : "tree";
+  const asked = params.get("view");
+  const mode = asked === "list" || asked === "pods" || asked === "network" ? asked : "tree";
+  const panel = params.get("panel");
   const selected = params.get("node");
   const [view, setView] = useState<LiveAppView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [gone, setGone] = useState(false);
   const [q, setQ] = useState("");
   const [health, setHealth] = useState<Health[]>([]);
+  const [lastOp, setLastOp] = useState<LiveOp | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const loadOps = useCallback(() => {
+    listLiveOps(id).then((ops) => setLastOp(ops.find((o) => o.kind === "sync" || o.kind === "rollback") ?? null), () => undefined);
+  }, [id]);
+  useEffect(loadOps, [loadOps]);
 
   const load = useCallback(() => {
     getLiveApp(id).then(
@@ -57,6 +67,7 @@ export default function ApplicationDetail() {
           });
         },
         gone: (g) => g === id && setGone(true),
+        op: (o) => (o.kind === "sync" || o.kind === "rollback") && setLastOp(o),
       }),
     [id, load]
   );
@@ -77,8 +88,19 @@ export default function ApplicationDetail() {
   if (error && !view) return <div className="error-banner">Failed to load the application: {error}</div>;
   if (!view) return <Skeleton h={240} />;
   const { app, target } = view;
+  const caps = target.capabilities;
   const node = selected ? byUid.get(selected) : undefined;
   const d = app.deployed;
+  const refresh = () => {
+    setRefreshing(true);
+    createLiveOp(app.id, { kind: "refresh" })
+      .catch(() => undefined)
+      .finally(() => {
+        setRefreshing(false);
+        load();
+      });
+  };
+  const shown = mode === "network" ? networkTree(view.tree.resources) : view.tree.resources;
 
   return (
     <div className="lv-page">
@@ -99,7 +121,12 @@ export default function ApplicationDetail() {
           </div>
         </div>
         <div className="page-head-actions">
-          <button type="button" className="btn" onClick={load} title="Reload from Forge">Refresh</button>
+          {caps.diff && <button type="button" className="btn" onClick={() => set("panel", "diff")}>Diff</button>}
+          {caps.sync && <button type="button" className="btn btn-primary" onClick={() => set("panel", "sync")}>Sync</button>}
+          <button type="button" className="btn" onClick={() => set("panel", "history")}>History</button>
+          <button type="button" className="btn" onClick={refresh} disabled={refreshing} title="Ask the agent to read the source now">
+            {refreshing ? "Refreshing…" : "Refresh"}
+          </button>
         </div>
       </div>
       {gone && <div className="error-banner">This application no longer exists on {target.name}.</div>}
@@ -111,24 +138,54 @@ export default function ApplicationDetail() {
           {app.health_message && <div className="lv-panel-detail">{app.health_message}</div>}
           <div className="lv-panel-foot muted">since {relativeTime(app.health_since)} · {app.resources} resources{app.pods ? ` · ${app.pods_ready}/${app.pods} pods ready` : ""}</div>
         </section>
-        <section className="card lv-panel">
+        <section className={`card lv-panel${app.sync === "OutOfSync" ? " lv-panel-warning" : app.sync === "Synced" ? " lv-panel-success" : ""}`}>
           <h2>Sync status</h2>
           <div className="lv-panel-value"><SyncPill sync={app.sync} /></div>
-          {d ? (
+          {app.revision ? (
+            <div className="lv-panel-detail">
+              to <span className="mono">{shortSha(app.revision)}</span> — {app.revision_message}
+              {app.revision_author && <span className="muted"> by {app.revision_author}</span>}
+            </div>
+          ) : d ? (
             <div className="lv-panel-detail">
               to <Link to={`/pipelines/${d.pipeline_id}`} className="mono">{shortSha(d.sha)}</Link>
               {d.message && <> — {commitSubject(d.message)}</>}
             </div>
           ) : (
-            <div className="lv-panel-detail muted">No Forge deploy of {app.repo || "a repo"} to {app.environment || "this environment"} yet.</div>
+            <div className="lv-panel-detail muted">No desired state for this app yet.</div>
           )}
-          <div className="lv-panel-foot muted">Comparing with Git arrives with Diff and Sync.</div>
+          <div className="lv-panel-foot muted">
+            {app.source_error ? (
+              <span className="lv-bad">Could not render {app.source_path}: {app.source_error}</span>
+            ) : app.source_path ? (
+              <>{app.source_path} · {app.source_tool}</>
+            ) : caps.diff ? (
+              "Waiting for the agent to render the source"
+            ) : (
+              "Compared with the image Forge last deployed"
+            )}
+          </div>
         </section>
-        <section className="card lv-panel">
+        <section className={`card lv-panel${lastOp?.state === "failed" ? " lv-panel-danger" : ""}`}>
           <h2>Last sync</h2>
-          {d ? (
+          {lastOp ? (
             <>
-              <div className="lv-panel-value"><HealthIcon health="Healthy" size={18} /> Succeeded</div>
+              <div className="lv-panel-value">
+                <HealthIcon health={lastOp.state === "succeeded" ? "Healthy" : lastOp.state === "failed" ? "Degraded" : "Progressing"} size={18} />
+                {lastOp.state === "succeeded" ? "Succeeded" : lastOp.state === "failed" ? "Failed" : lastOp.state === "approval" ? "Waiting for approval" : "In progress"}
+              </div>
+              <div className="lv-panel-detail">
+                {lastOp.kind === "rollback" ? "Rollback" : "Sync"}{lastOp.revision && <> to <span className="mono">{shortSha(lastOp.revision)}</span></>}
+                {" "}— {lastOp.result?.message || lastOp.message || "started " + relativeTime(lastOp.created_at)}
+              </div>
+              <div className="lv-panel-foot actor">
+                <Avatar identity={lastOp.requested_by} size={18} /> <span className="actor-name">{displayName(lastOp.requested_by) || "unknown"}</span>
+                <span className="muted">{relativeTime(lastOp.finished_at ?? lastOp.created_at)}</span>
+              </div>
+            </>
+          ) : d ? (
+            <>
+              <div className="lv-panel-value"><HealthIcon health="Healthy" size={18} /> Deployed by Forge</div>
               <div className="lv-panel-detail">
                 <Link to={`/jobs/${d.job_id}?pipeline=${d.pipeline_id}`}>Deploy job #{d.job_id}</Link> succeeded {relativeTime(d.at)}
               </div>
@@ -137,7 +194,7 @@ export default function ApplicationDetail() {
               </div>
             </>
           ) : (
-            <div className="lv-panel-detail muted">Nothing deployed through Forge yet.</div>
+            <div className="lv-panel-detail muted">Nothing synced or deployed through Forge yet.</div>
           )}
         </section>
       </div>
@@ -145,6 +202,8 @@ export default function ApplicationDetail() {
       <div className="table-toolbar lv-toolbar">
         <div className="segmented" role="group" aria-label="View">
           <button type="button" className={mode === "tree" ? "seg-btn seg-active" : "seg-btn"} onClick={() => set("view", null)}>Tree</button>
+          {caps.pods && <button type="button" className={mode === "pods" ? "seg-btn seg-active" : "seg-btn"} onClick={() => set("view", "pods")}>Pods</button>}
+          {caps.pods && <button type="button" className={mode === "network" ? "seg-btn seg-active" : "seg-btn"} onClick={() => set("view", "network")}>Network</button>}
           <button type="button" className={mode === "list" ? "seg-btn seg-active" : "seg-btn"} onClick={() => set("view", "list")}>List</button>
         </div>
         <div className="state-chips" role="group" aria-label="Health">
@@ -162,8 +221,10 @@ export default function ApplicationDetail() {
         </div>
       </div>
 
-      {mode === "tree" ? (
-        <ResourceTree app={app} resources={view.tree.resources} selected={selected} onSelect={(uid) => set("node", uid)} filter={{ q, health }} />
+      {mode === "tree" || mode === "network" ? (
+        <ResourceTree key={mode} app={app} resources={shown} selected={selected} onSelect={(uid) => set("node", uid)} filter={{ q, health }} />
+      ) : mode === "pods" ? (
+        <PodsView resources={view.tree.resources} selected={selected} onSelect={(uid) => set("node", uid)} />
       ) : (
         <ResourceList
           resources={view.tree.resources.filter((r) => (!q || r.name.toLowerCase().includes(q.toLowerCase())) && (health.length === 0 || (r.health && health.includes(r.health.status))))}
@@ -175,6 +236,9 @@ export default function ApplicationDetail() {
           onSelect={(uid) => set("node", uid)} onClose={() => set("node", null)} />
       )}
       {selected && !node && <div className="muted lv-gone-node">That resource is gone.</div>}
+      {panel === "diff" && <DiffPanel view={view} onClose={() => set("panel", null)} />}
+      {panel === "sync" && <SyncDialog view={view} onClose={() => set("panel", null)} />}
+      {panel === "history" && <HistoryPanel view={view} onClose={() => set("panel", null)} />}
       <p className="muted lv-foot">
         Updated {relativeTime(app.updated_at)} · version {view.tree.version}
         {target.last_seen_at && <> · agent seen {relativeTime(target.last_seen_at)}</>}

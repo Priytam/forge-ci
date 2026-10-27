@@ -21,6 +21,9 @@ rules:
   - apiGroups: [""]
     resources: [pods, services, configmaps, persistentvolumeclaims, events]
     verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
   - apiGroups: [apps]
     resources: [deployments, replicasets, statefulsets, daemonsets]
     verbs: [get, list, watch]
@@ -71,6 +74,12 @@ spec:
           args:
             - --provider=kubernetes
             - --exclude-namespaces=kube-system,kube-public,kube-node-lease,forge-live
+            # Desired state (Diff, sync status): the GitOps repo and one app's
+            # directory in it. A token, if needed, goes in the secret as GIT_TOKEN.
+            # - --source-url=https://git.example.com/acme/platform-gitops.git
+            # - --source-path=apps/{group}/{name}
+            # Sync, rollback, prune: also apply deploy/live/agent-sync.yaml.
+            # - --allow-sync
           envFrom: [{ secretRef: { name: forge-agent } }]
           env:
             - { name: GOMEMLIMIT, value: 120MiB }
@@ -78,3 +87,7 @@ spec:
             requests: { cpu: 50m, memory: 64Mi }
             limits: { cpu: 200m, memory: 150Mi }
           securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
+          # The source's clone and renders.
+          volumeMounts: [{ name: work, mountPath: /tmp }]
+      volumes:
+        - { name: work, emptyDir: { sizeLimit: 1Gi } }

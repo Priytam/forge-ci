@@ -1526,3 +1526,57 @@ CREATE TABLE IF NOT EXISTS live_blob_gc (
     due_at TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS live_blob_gc_due_idx ON live_blob_gc (due_at);
+
+-- Forge Live (batch 9, phase B): desired state and operations. An app's
+-- desired state is its directory in the target's source, rendered by the
+-- agent at a revision; its manifests are blobs (one per resource key).
+ALTER TABLE live_apps ADD COLUMN IF NOT EXISTS revision TEXT NOT NULL DEFAULT '';
+ALTER TABLE live_apps ADD COLUMN IF NOT EXISTS revision_message TEXT NOT NULL DEFAULT '';
+ALTER TABLE live_apps ADD COLUMN IF NOT EXISTS revision_author TEXT NOT NULL DEFAULT '';
+ALTER TABLE live_apps ADD COLUMN IF NOT EXISTS revision_at TIMESTAMPTZ;
+ALTER TABLE live_apps ADD COLUMN IF NOT EXISTS source_path TEXT NOT NULL DEFAULT '';
+ALTER TABLE live_apps ADD COLUMN IF NOT EXISTS source_tool TEXT NOT NULL DEFAULT '';
+ALTER TABLE live_apps ADD COLUMN IF NOT EXISTS source_error TEXT NOT NULL DEFAULT '';
+ALTER TABLE live_apps ADD COLUMN IF NOT EXISTS desired_keys TEXT[] NOT NULL DEFAULT '{}';
+
+-- Operations Forge asks an agent to run: sync, rollback, refresh, logs.
+-- One sync or rollback per app at a time; a sync to a protected
+-- environment waits in 'approval' for the environment's approvals.
+CREATE TABLE IF NOT EXISTS live_ops (
+    id           BIGSERIAL   PRIMARY KEY,
+    app_id       BIGINT      NOT NULL REFERENCES live_apps(id) ON DELETE CASCADE,
+    target_id    BIGINT      NOT NULL REFERENCES live_targets(id) ON DELETE CASCADE,
+    kind         TEXT        NOT NULL CHECK (kind IN ('sync','rollback','refresh','logs')),
+    state        TEXT        NOT NULL DEFAULT 'pending'
+        CHECK (state IN ('approval','pending','running','succeeded','failed','canceled')),
+    params       JSONB       NOT NULL DEFAULT '{}',
+    result       JSONB,
+    message      TEXT        NOT NULL DEFAULT '',
+    revision     TEXT        NOT NULL DEFAULT '',
+    requested_by TEXT        NOT NULL DEFAULT '',
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    started_at   TIMESTAMPTZ,
+    finished_at  TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX IF NOT EXISTS live_ops_one_change_idx ON live_ops (app_id)
+    WHERE kind IN ('sync','rollback') AND state IN ('approval','pending','running');
+CREATE INDEX IF NOT EXISTS live_ops_pending_idx ON live_ops (target_id, id) WHERE state = 'pending';
+CREATE INDEX IF NOT EXISTS live_ops_app_idx ON live_ops (app_id, id DESC);
+
+CREATE TABLE IF NOT EXISTS live_op_approvals (
+    op_id      BIGINT      NOT NULL REFERENCES live_ops(id) ON DELETE CASCADE,
+    approver   TEXT        NOT NULL,
+    verdict    TEXT        NOT NULL CHECK (verdict IN ('approved','rejected')),
+    comment    TEXT        NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (op_id, approver)
+);
+
+-- An operation's output as the agent streams it (logs); kept an hour.
+CREATE TABLE IF NOT EXISTS live_op_output (
+    op_id      BIGINT      NOT NULL REFERENCES live_ops(id) ON DELETE CASCADE,
+    seq        BIGSERIAL,
+    chunk      BYTEA       NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (op_id, seq)
+);
