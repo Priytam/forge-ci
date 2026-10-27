@@ -123,9 +123,10 @@ type EnvAttempt struct {
 
 // EnvCell is one repo × environment cell of the board.
 type EnvCell struct {
-	Current *proto.Deployment `json:"current"`
-	Latest  *EnvAttempt       `json:"latest"`
-	Frozen  bool              `json:"frozen"`
+	Current *proto.Deployment  `json:"current"`
+	Latest  *EnvAttempt        `json:"latest"`
+	Frozen  bool               `json:"frozen"`
+	Live    *proto.LiveSummary `json:"live,omitempty"`
 }
 
 // EnvMatrixRow is one repo's row: environment name → cell (absent = never

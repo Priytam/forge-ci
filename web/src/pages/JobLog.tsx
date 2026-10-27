@@ -25,6 +25,7 @@ import RetryJobButton from "../components/RetryJobButton";
 import LogTools from "../components/LogTools";
 import RepoHeader from "../components/RepoHeader";
 import { StatusBar } from "../components/review/ui";
+import { KindIcon, liveLink } from "../components/live/ui";
 import type { Tone } from "../components/ui/Pill";
 import type { IconName } from "../components/Icon";
 
@@ -336,7 +337,13 @@ export default function JobLog() {
         ) : (
           `stage ${job.stage}`
         )
-      } />}
+      }>
+        {job.environment && job.status === "success" && (
+          <Link className="btn lv-open-live" to={liveLink(job.environment, repo ?? undefined)}>
+            <KindIcon kind="App" size={14} /> Open Live view
+          </Link>
+        )}
+      </StatusBar>}
       {job?.status_reason && (
         <div className="error-banner">
           This job did not run: {job.status_reason}. An admin sets which branches

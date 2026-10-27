@@ -100,6 +100,8 @@ func authExempt(path string) bool {
 	switch {
 	case strings.HasPrefix(path, "/api/v1/runner/"),
 		strings.HasPrefix(path, "/api/v1/webhooks/"),
+		// Agents authenticate with their target's token (live.go).
+		strings.HasPrefix(path, "/api/v1/live/agent/"),
 		strings.HasPrefix(path, "/api/v1/auth/"),
 		// Act-by-link approvals carry their own signed token (email links).
 		path == "/api/v1/approvals/link",

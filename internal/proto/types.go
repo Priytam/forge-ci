@@ -490,13 +490,21 @@ const (
 // EnvironmentBoard is one card on the per-repo environments board: the current
 // deployment plus derived indicators.
 type EnvironmentBoard struct {
-	Repo            string      `json:"repo"`
-	Environment     string      `json:"environment"`
-	Current         *Deployment `json:"current"`          // latest successful deployment
-	DeploymentCount int         `json:"deployment_count"` // total successful deployments to this env
-	Drift           string      `json:"drift"`            // in_sync | drifted | unknown
-	RefTipSHA       string      `json:"ref_tip_sha,omitempty"`
-	Frozen          bool        `json:"frozen"` // an active deploy freeze covers this env now
+	Repo            string       `json:"repo"`
+	Environment     string       `json:"environment"`
+	Current         *Deployment  `json:"current"`          // latest successful deployment
+	DeploymentCount int          `json:"deployment_count"` // total successful deployments to this env
+	Drift           string       `json:"drift"`            // in_sync | drifted | unknown
+	RefTipSHA       string       `json:"ref_tip_sha,omitempty"`
+	Frozen          bool         `json:"frozen"` // an active deploy freeze covers this env now
+	Live            *LiveSummary `json:"live,omitempty"`
+}
+
+// LiveSummary is what Forge Live sees running for one repo × environment.
+type LiveSummary struct {
+	Apps   int            `json:"apps"`
+	Health string         `json:"health"` // the worst of the apps'
+	Counts map[string]int `json:"counts"` // apps per health
 }
 
 // RollbackRequest targets a prior deployment to re-deploy. Exactly one of the

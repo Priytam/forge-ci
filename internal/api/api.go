@@ -16,6 +16,7 @@ import (
 
 	"github.com/priytamjeepandey/forge-ci/internal/blob"
 	"github.com/priytamjeepandey/forge-ci/internal/compiler"
+	"github.com/priytamjeepandey/forge-ci/internal/live/hub"
 	"github.com/priytamjeepandey/forge-ci/internal/logstore"
 	"github.com/priytamjeepandey/forge-ci/internal/oidc"
 	"github.com/priytamjeepandey/forge-ci/internal/proto"
@@ -42,6 +43,7 @@ type Server struct {
 	sso     ssoCache
 	policy  policyCache // personal API token policy (api_tokens.go)
 	changes changeHub   // live change notifications for SSE pages (code_review.go)
+	live    *hub.Hub    // Forge Live: agent batches in, app trees and patches out (live.go)
 
 	diffCache *byteLRU     // recently served diff blobs (diffs.go)
 	diffOpens *latencyRing // how long diff opens took on this instance
@@ -66,6 +68,7 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 		maxWebhookBytes:  envBytes("WEBHOOK_MAX_BYTES", defaultMaxWebhookBytes),
 		diffCache:        newByteLRU(diffCacheBytes),
 		diffOpens:        newLatencyRing(1000),
+		live:             hub.New(s, blobs, int(envBytes("LIVE_TREE_CACHE_BYTES", 256<<20))),
 	}
 	srv.initRunnerAuth()
 	m := srv.mux
@@ -127,6 +130,7 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 	srv.registerRunnerLiveRoutes()
 	srv.registerCodeReviewRoutes()
 	srv.registerRunnerTaskRoutes()
+	srv.registerLiveRoutes()
 
 	return srv
 }

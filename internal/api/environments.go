@@ -109,6 +109,11 @@ func (s *Server) listEnvironments(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, card)
 	}
+	if sums := s.liveSummaries(r, []string{repo}); sums != nil {
+		for i := range out {
+			out[i].Live = sums[repo][out[i].Environment]
+		}
+	}
 	writeJSON(w, http.StatusOK, out)
 }
 

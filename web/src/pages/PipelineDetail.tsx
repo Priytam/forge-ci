@@ -7,7 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   duration,
   getPipeline,
@@ -16,7 +16,9 @@ import {
   sourceLabel,
   triggerVerb,
   commitSubject,
+  getLiveSummary,
   type Job,
+  type LiveSummary,
   type Pipeline,
 } from "../api";
 import { usePoll } from "../hooks/usePoll";
@@ -29,6 +31,7 @@ import PipelineActions from "../components/PipelineActions";
 import JobListView from "../components/JobListView";
 import RepoHeader from "../components/RepoHeader";
 import { StatusBar } from "../components/review/ui";
+import { HealthIcon, liveLink } from "../components/live/ui";
 import type { Tone } from "../components/ui/Pill";
 import type { IconName } from "../components/Icon";
 
@@ -41,6 +44,8 @@ interface Stage {
 interface Edge {
   key: string;
   d: string;
+  /** a Deploy → Live edge */
+  live?: boolean;
 }
 
 interface Box {
@@ -281,6 +286,16 @@ export default function PipelineDetail() {
   }, []);
 
   const jobs = data?.jobs;
+  // Forge Live: what runs in each environment this pipeline deploys to.
+  const deployJobs = useMemo(() => (jobs ?? []).filter((j) => j.environment), [jobs]);
+  const repo = data?.pipeline.repo ?? "";
+  const liveFetcher = useCallback(
+    () => (repo && deployJobs.length ? getLiveSummary(repo) : Promise.resolve({} as Record<string, LiveSummary>)),
+    [repo, deployJobs.length]
+  );
+  const { data: live, refresh: refreshLive } = usePoll(liveFetcher, 10_000);
+  useEffect(() => refreshLive(), [liveFetcher, refreshLive]);
+  const liveRefs = useRef(new Map<number, HTMLAnchorElement>());
 
   const computeEdges = useCallback(() => {
     const board = boardRef.current;
@@ -322,6 +337,20 @@ export default function PipelineDetail() {
         next.push({ key: `${needId}-${job.id}`, d: edgePath(x1, y1, x2, y2, boxes) });
       }
     }
+    // Deploy → Live: each deploy job to its environment's Live node.
+    for (const [jobId, liveEl] of liveRefs.current) {
+      const fromEl = cardRefs.current.get(jobId);
+      if (!fromEl) continue;
+      const a = fromEl.getBoundingClientRect();
+      const b = liveEl.getBoundingClientRect();
+      next.push({
+        key: `live-${jobId}`,
+        live: true,
+        d: edgePath(
+          a.right - boardRect.left + scrollLeft, a.top + a.height / 2 - boardRect.top + scrollTop,
+          b.left - boardRect.left + scrollLeft, b.top + b.height / 2 - boardRect.top + scrollTop, boxes),
+      });
+    }
     setEdges(next);
     setOverlaySize({ w: board.scrollWidth, h: board.scrollHeight });
   }, [jobs]);
@@ -329,7 +358,7 @@ export default function PipelineDetail() {
   // Recompute after every poll render and whenever the grouping changes...
   useLayoutEffect(() => {
     computeEdges();
-  }, [computeEdges, mode]);
+  }, [computeEdges, mode, live]);
 
   // ...and on window resize.
   useEffect(() => {
@@ -464,7 +493,7 @@ export default function PipelineDetail() {
           aria-hidden="true"
         >
           {edges.map((e) => (
-            <path key={e.key} d={e.d} className="dag-edge" />
+            <path key={e.key} d={e.d} className={e.live ? "dag-edge dag-edge-live" : "dag-edge"} />
           ))}
         </svg>
         <div className="stages">
@@ -559,9 +588,46 @@ export default function PipelineDetail() {
               })}
             </div>
           ))}
+          {deployJobs.length > 0 && (
+            <div className="stage-col lv-live-col">
+              <div className="stage-title">Live</div>
+              {deployJobs.map((job) => (
+                <LiveNode
+                  key={job.id}
+                  env={job.environment!}
+                  repo={pipeline.repo}
+                  summary={live?.[job.environment!]}
+                  nodeRef={(el) => {
+                    if (el) liveRefs.current.set(job.id, el);
+                    else liveRefs.current.delete(job.id);
+                  }}
+                />
+              ))}
+            </div>
+          )}
         </div>
       </div>
       )}
     </div>
+  );
+}
+
+/** The node after a deploy job: what runs in its environment now. */
+function LiveNode({ env, repo, summary, nodeRef }: {
+  env: string;
+  repo: string;
+  summary?: LiveSummary;
+  nodeRef: (el: HTMLAnchorElement | null) => void;
+}) {
+  const bad = summary ? summary.apps - (summary.counts.Healthy ?? 0) : 0;
+  return (
+    <Link ref={nodeRef} to={liveLink(env, repo)} className={`job-pill lv-live-node${summary ? "" : " lv-live-none"}`}
+      title={summary ? `Live in ${env}: ${Object.entries(summary.counts).map(([h, n]) => `${n} ${h}`).join(", ")}` : `Nothing reported in ${env} yet`}>
+      {summary ? <HealthIcon health={summary.health} size={14} /> : <span className="lv-ic lv-tone-neutral">◌</span>}
+      <span className="job-pill-name">{env}</span>
+      <span className="job-pill-time">
+        {summary ? (bad ? `${bad} of ${summary.apps} ${summary.health.toLowerCase()}` : `${summary.apps} healthy`) : "no live apps"}
+      </span>
+    </Link>
   );
 }

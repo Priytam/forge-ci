@@ -30,6 +30,7 @@ export const NAV: NavSection[] = [
       { to: "/pipelines", label: "Pipelines", icon: "pipelines", keywords: "runs builds" },
       { to: "/jobs", label: "Jobs", icon: "jobs", keywords: "running queued failed" },
       { to: "/environments", label: "Environments", icon: "environments", keywords: "deployments dev staging prod board" },
+      { to: "/applications", label: "Applications", icon: "apps", keywords: "live kubernetes cloud run health pods tree argo gitops cd" },
       { to: "/runners", label: "Runners", icon: "runners", keywords: "agents executors capacity queue" },
     ],
   },
@@ -58,6 +59,7 @@ export const SETTINGS_NAV: NavSection[] = [
       { to: "/admin/merge-rules", label: "Merge rules", icon: "changes", keywords: "merge gate pull request approvals branch protection code review freeze" },
       { to: "/admin/approver-groups", label: "Approver groups", icon: "shield", keywords: "release managers approval group" },
       { to: "/admin/notifications", label: "Notifications", icon: "bell", keywords: "slack email approval alert smtp" },
+      { to: "/admin/live", label: "Live agents", icon: "apps", keywords: "forge-agent cluster kubernetes cloud run token applications live" },
     ],
   },
   {
@@ -116,6 +118,7 @@ const ADMIN_TITLES: Record<string, string> = {
   "service-accounts": "Service accounts",
   about: "About & maintenance",
   "api-tokens": "API tokens",
+  live: "Live agents",
 };
 
 export interface Crumb {
@@ -137,6 +140,7 @@ export function crumbsFor(pathname: string, search: string): Crumb[] {
       const sub: Record<string, string> = {
         settings: "Settings",
         environments: "Environments",
+        applications: "Applications",
         tests: "Tests",
         changes: "Changes",
         queue: "Merge queue",
@@ -150,6 +154,8 @@ export function crumbsFor(pathname: string, search: string): Crumb[] {
       return b ? [{ label: "Pipelines", to: "/pipelines" }, { label: `#${b}` }] : [{ label: "Pipelines" }];
     case "changes":
       return b ? [{ label: "Changes", to: "/changes" }, { label: `Change ${b}` }] : [{ label: "Changes" }];
+    case "applications":
+      return b ? [{ label: "Applications", to: "/applications" }, { label: "Application" }] : [{ label: "Applications" }];
     case "jobs": {
       if (!b) return [{ label: "Jobs" }];
       const p = q.get("pipeline");

@@ -46,6 +46,7 @@ const PATHS: Record<string, string> = {
   file: "M4 2h5.5L12 4.5V14H4zM9.5 2v2.5H12",
   edit: "M10.5 2.5l3 3L6 13H3v-3z",
   external: "M9 2.5h4.5V7M13.5 2.5 7.5 8.5M11.5 9.5v4h-9v-9h4",
+  apps: "M2.5 2.5h4.5v4.5H2.5zM9 2.5h4.5v4.5H9zM2.5 9h4.5v4.5H2.5zM9 9h4.5v4.5H9z",
 };
 
 export type IconName = keyof typeof PATHS;

@@ -36,6 +36,10 @@ import RepoMergeRules from "./pages/RepoMergeRules";
 import ChangeDetail from "./pages/ChangeDetail";
 import AdminMergeRules from "./pages/AdminMergeRules";
 import Account from "./pages/Account";
+import Applications from "./pages/Applications";
+import RepoApplications from "./pages/RepoApplications";
+import ApplicationDetail from "./pages/ApplicationDetail";
+import AdminLive from "./pages/AdminLive";
 import Shell from "./components/Shell";
 import { ToastProvider } from "./components/ui/Toast";
 
@@ -60,6 +64,7 @@ export default function App() {
           <Route path="/repos/:repo" element={<PipelineList />} />
           <Route path="/repos/:repo/settings" element={<RepoSettings />} />
           <Route path="/repos/:repo/environments" element={<Environments />} />
+          <Route path="/repos/:repo/applications" element={<RepoApplications />} />
           <Route path="/repos/:repo/tests" element={<TestHistory />} />
           <Route path="/repos/:repo/changes" element={<RepoChanges />} />
           <Route path="/repos/:repo/queue" element={<RepoQueue />} />
@@ -83,12 +88,15 @@ export default function App() {
             <Route path="about" element={<AdminAbout />} />
             <Route path="runner-tokens" element={<AdminRunnerTokens />} />
             <Route path="api-tokens" element={<AdminApiTokens />} />
+            <Route path="live" element={<AdminLive />} />
           </Route>
           <Route path="/changes" element={<Changes />} />
           <Route path="/changes/:id" element={<ChangeDetail />} />
           <Route path="/pipelines" element={<AllPipelines />} />
           <Route path="/jobs" element={<Jobs />} />
           <Route path="/environments" element={<EnvironmentBoard />} />
+          <Route path="/applications" element={<Applications />} />
+          <Route path="/applications/:id" element={<ApplicationDetail />} />
           <Route path="/tokens" element={<ApiTokens />} />
           <Route path="/account" element={<Account />} />
           <Route path="/pipelines/:id" element={<PipelineDetail />} />

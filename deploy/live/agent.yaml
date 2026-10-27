@@ -1,0 +1,80 @@
+# forge-agent for Kubernetes (Forge Live). Reads the cluster — never writes —
+# and reports to Forge over an outbound connection. Before applying:
+#
+#   kubectl create namespace forge-live
+#   kubectl -n forge-live create secret generic forge-agent \
+#     --from-literal=FORGE_URL=https://forge.example.com \
+#     --from-literal=FORGE_AGENT_TOKEN=<token from Settings → Live agents>
+#
+# Budget: 150 MB and 0.2 vCPU for 100,000 watched objects (docs/live.md).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: forge-agent
+  namespace: forge-live
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: forge-agent-read
+rules:
+  - apiGroups: [""]
+    resources: [pods, services, configmaps, persistentvolumeclaims, events]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [deployments, replicasets, statefulsets, daemonsets]
+    verbs: [get, list, watch]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list, watch]
+  - apiGroups: [networking.k8s.io]
+    resources: [ingresses]
+    verbs: [get, list, watch]
+  - apiGroups: [autoscaling]
+    resources: [horizontalpodautoscalers]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: forge-agent-read
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: forge-agent-read
+subjects:
+  - kind: ServiceAccount
+    name: forge-agent
+    namespace: forge-live
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: forge-agent
+  namespace: forge-live
+  labels: { app.kubernetes.io/name: forge-agent }
+spec:
+  replicas: 1
+  # One agent per cluster: a new one replaces the old (it starts a fresh report).
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app.kubernetes.io/name: forge-agent }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: forge-agent }
+    spec:
+      serviceAccountName: forge-agent
+      securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: agent
+          image: forge-agent:dev # docker build -f deploy/Dockerfile.agent -t <registry>/forge-agent:<version> .
+          args:
+            - --provider=kubernetes
+            - --exclude-namespaces=kube-system,kube-public,kube-node-lease,forge-live
+          envFrom: [{ secretRef: { name: forge-agent } }]
+          env:
+            - { name: GOMEMLIMIT, value: 120MiB }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 200m, memory: 150Mi }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }

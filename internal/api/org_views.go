@@ -120,6 +120,23 @@ func (s *Server) environmentBoard(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "failed to load the environment board")
 		return
 	}
+	repos := make([]string, len(rows))
+	for i, row := range rows {
+		repos[i] = row.Repo
+	}
+	for repo, byEnv := range s.liveSummaries(r, repos) {
+		for i := range rows {
+			if rows[i].Repo != repo {
+				continue
+			}
+			for env, sum := range byEnv {
+				if rows[i].Cells[env] == nil {
+					rows[i].Cells[env] = &store.EnvCell{}
+				}
+				rows[i].Cells[env].Live = sum
+			}
+		}
+	}
 	w.Header().Set("X-Total-Count", strconv.Itoa(total))
 	w.Header().Set("X-Has-More", strconv.FormatBool(offset+len(rows) < total))
 	writeJSON(w, http.StatusOK, map[string]any{"environments": envs, "rows": rows})

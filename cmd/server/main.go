@@ -64,6 +64,7 @@ func main() {
 	handler := api.New(st, blobs, logs)
 	// Code review: refreshes, reconcile, gates, writes, merge queues, diff retention.
 	go review.Loop(ctx, st, blobs, handler.StartQueuePipeline)
+	go handler.RunLive(ctx)
 
 	srv := &http.Server{Addr: addr, Handler: handler}
 	go func() {

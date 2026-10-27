@@ -765,6 +765,8 @@ export interface Environment {
   drift: "in_sync" | "drifted" | "unknown";
   ref_tip_sha?: string;
   frozen?: boolean;
+  /** what Forge Live sees running there */
+  live?: LiveSummary;
 }
 
 export interface Freeze {
@@ -1714,6 +1716,8 @@ export interface EnvCell {
   } | null;
   latest: EnvAttempt | null;
   frozen: boolean;
+  /** what Forge Live sees running there */
+  live?: LiveSummary;
 }
 
 export interface EnvBoardRow {
@@ -2733,4 +2737,211 @@ export async function getDiffChunk(manifestUrl: string, chunk: string): Promise<
   const res = await fetch(url);
   if (!res.ok) throw await parseError(res);
   return res.text();
+}
+
+// ---- Forge Live (batch 9) ----
+// Pages read Forge's copy of what runs (kept current by forge-agent); they
+// never reach a cluster or a cloud API.
+
+export type Health = "Healthy" | "Progressing" | "Degraded" | "Suspended" | "Missing" | "Unknown";
+
+export interface LiveSummary {
+  apps: number;
+  /** the worst of the apps' health */
+  health: Health;
+  counts: Partial<Record<Health, number>>;
+}
+
+export interface LiveDeploy {
+  sha: string;
+  by: string;
+  at: string;
+  job_id: number;
+  pipeline_id: number;
+  message?: string;
+}
+
+export interface LiveApp {
+  id: number;
+  target_id: number;
+  key: string;
+  name: string;
+  namespace: string;
+  group: string;
+  health: Health;
+  health_message: string;
+  health_since: string;
+  sync: "Synced" | "OutOfSync" | "Unknown";
+  resources: number;
+  pods: number;
+  pods_ready: number;
+  images: string[];
+  version: number;
+  updated_at: string;
+  target: string;
+  environment: string;
+  repo: string;
+  provider: string;
+  deployed: LiveDeploy | null;
+}
+
+export interface LiveResource {
+  group?: string;
+  version?: string;
+  kind: string;
+  namespace?: string;
+  name: string;
+  uid: string;
+  parents?: string[];
+  health?: { status: Health; message?: string };
+  summary: {
+    ready?: string;
+    status?: string;
+    restarts?: number;
+    images?: string[];
+    info?: { name: string; value: string }[];
+  };
+  created_at: string;
+}
+
+export interface LiveCapabilities {
+  events: boolean;
+  manifests: boolean;
+  watch: boolean;
+  reconcile_seconds?: number;
+}
+
+export interface LiveAppView {
+  app: LiveApp;
+  tree: { version: number; resources: LiveResource[] };
+  target: {
+    name: string;
+    provider: string;
+    capabilities: LiveCapabilities;
+    agent_version: string;
+    last_seen_at: string | null;
+    synced: boolean;
+  };
+}
+
+export interface LiveEvent {
+  uid: string;
+  resource_uid: string;
+  kind: string;
+  name: string;
+  type: string;
+  reason: string;
+  message: string;
+  count: number;
+  first_seen: string;
+  last_seen: string;
+}
+
+export type LiveFacet = "health" | "sync" | "environment" | "repo" | "target" | "namespace" | "group";
+
+export interface LiveAppsPage {
+  apps: LiveApp[];
+  total: number;
+  facets: Record<LiveFacet, Record<string, number>>;
+}
+
+/** The Applications page: one page of apps, the total and the facet counts. */
+export function listLiveApps(filter: Partial<Record<LiveFacet, string[]>> & { q?: string }): Promise<LiveAppsPage> {
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(filter)) {
+    if (Array.isArray(v)) v.forEach((x) => qs.append(k, x));
+    else if (v) qs.set(k, v);
+  }
+  const q = qs.toString();
+  return fetchJSON(`/live/apps${q ? `?${q}` : ""}`);
+}
+
+export function getLiveApp(id: number): Promise<LiveAppView> {
+  return fetchJSON(`/live/apps/${id}`);
+}
+
+export function getLiveEvents(id: number, uid?: string): Promise<LiveEvent[]> {
+  return fetchJSON(`/live/apps/${id}/events${uid ? `?uid=${encodeURIComponent(uid)}` : ""}`);
+}
+
+export function getLiveManifest(id: number, uid: string): Promise<unknown> {
+  return fetchJSON(`/live/apps/${id}/manifests/${encodeURIComponent(uid)}`);
+}
+
+/** environment → what runs there, for one repo (the pipeline graph's Live nodes). */
+export function getLiveSummary(repo: string): Promise<Record<string, LiveSummary>> {
+  return getJSON(`/live/summary?repo=${encodeURIComponent(repo)}`);
+}
+
+export interface LivePatch {
+  app: number;
+  base: number;
+  version: number;
+  row: LiveApp;
+  upserts: LiveResource[];
+  deletes: string[];
+}
+
+/**
+ * Follows Forge Live: app summaries as they change (and removals), plus one
+ * app's tree patches when app is given. onReady runs on every (re)connect —
+ * the page refetches then, so nothing missed while away stays missed.
+ */
+export function subscribeLive(
+  app: number | undefined,
+  on: { ready?: () => void; app?: (row: LiveApp) => void; gone?: (id: number) => void; patch?: (p: LivePatch) => void }
+): () => void {
+  if (typeof EventSource === "undefined") return () => undefined;
+  const es = new EventSource(`${BASE}/live/stream${app ? `?app=${app}` : ""}`);
+  const handle = <T,>(name: string, fn?: (v: T) => void) =>
+    es.addEventListener(name, (e) => {
+      try {
+        fn?.(JSON.parse((e as MessageEvent).data) as T);
+      } catch {
+        // a malformed frame is skipped; the next one, or a reconnect, catches up
+      }
+    });
+  es.addEventListener("ready", () => on.ready?.());
+  handle<LiveApp>("app", on.app);
+  handle<{ id: number }>("gone", on.gone && ((g) => on.gone!(g.id)));
+  handle<LivePatch>("patch", on.patch);
+  return () => es.close();
+}
+
+export interface LiveTarget {
+  id: number;
+  name: string;
+  environment: string;
+  repo: string;
+  provider: string;
+  capabilities: LiveCapabilities;
+  agent_version: string;
+  synced: boolean;
+  stats: {
+    objects: number;
+    apps: number;
+    heap_bytes: number;
+    cpu_seconds: number;
+    bytes_sent: number;
+    provider_calls: number;
+    uptime_seconds: number;
+  };
+  bytes_in: number;
+  last_seen_at: string | null;
+  created_by: string;
+  created_at: string;
+  token_suffix: string;
+  apps: number;
+}
+
+export function listLiveTargets(): Promise<LiveTarget[]> {
+  return fetchJSON("/live/targets");
+}
+
+export function createLiveTarget(t: { name: string; environment: string; repo: string }): Promise<{ target: LiveTarget; token: string }> {
+  return postJSON("/live/targets", t);
+}
+
+export function deleteLiveTarget(id: number): Promise<void> {
+  return requestVoid("DELETE", `/live/targets/${id}`);
 }

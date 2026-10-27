@@ -18,6 +18,7 @@ import {
   type Environment,
   type Freeze,
 } from "../api";
+import { LiveBadge } from "../components/live/ui";
 import { usePoll } from "../hooks/usePoll";
 import RepoHeader from "../components/RepoHeader";
 
@@ -371,6 +372,7 @@ function EnvCard({
       <div className="env-card-top">
         <span className="env-name">{env.environment}</span>
         <DriftBadge env={env} />
+        {env.live && <LiveBadge summary={env.live} env={env.environment} repo={repo} />}
       </div>
       {env.current ? (
         <div className="env-current">

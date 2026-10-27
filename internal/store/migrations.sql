@@ -1448,3 +1448,81 @@ CREATE UNIQUE INDEX IF NOT EXISTS merge_queue_active_change_idx ON merge_queue (
     WHERE state IN ('queued','testing','merging');
 CREATE INDEX IF NOT EXISTS merge_queue_active_idx ON merge_queue (repo, target_branch, id)
     WHERE state IN ('queued','testing','merging');
+
+-- Forge Live (batch 9). A target is where applications run — a Kubernetes
+-- cluster, a Cloud Run project — reported by one forge-agent whose token is
+-- scoped to it. Forge never calls a target: it stores what the agent sends.
+-- Per application the indexable status lives here; the resource tree
+-- (content-addressed, one blob per version) and each resource's live
+-- manifest live in the blob store.
+CREATE TABLE IF NOT EXISTS live_targets (
+    id            BIGSERIAL   PRIMARY KEY,
+    name          TEXT        NOT NULL UNIQUE,
+    environment   TEXT        NOT NULL DEFAULT '',
+    repo          TEXT        NOT NULL DEFAULT '',
+    token_hash    TEXT        NOT NULL UNIQUE,
+    token_suffix  TEXT        NOT NULL,
+    provider      TEXT        NOT NULL DEFAULT '',
+    capabilities  JSONB       NOT NULL DEFAULT '{}',
+    agent_version TEXT        NOT NULL DEFAULT '',
+    -- The agent's resume token: its current epoch (one full report) and the
+    -- last batch applied in it. synced: the epoch's initial report is in.
+    epoch         TEXT        NOT NULL DEFAULT '',
+    seq           BIGINT      NOT NULL DEFAULT 0,
+    synced        BOOLEAN     NOT NULL DEFAULT FALSE,
+    stats         JSONB       NOT NULL DEFAULT '{}',
+    bytes_in      BIGINT      NOT NULL DEFAULT 0,
+    last_seen_at  TIMESTAMPTZ,
+    created_by    TEXT        NOT NULL DEFAULT '',
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS live_apps (
+    id             BIGSERIAL   PRIMARY KEY,
+    target_id      BIGINT      NOT NULL REFERENCES live_targets(id) ON DELETE CASCADE,
+    key            TEXT        NOT NULL,
+    name           TEXT        NOT NULL,
+    namespace      TEXT        NOT NULL DEFAULT '',
+    app_group      TEXT        NOT NULL DEFAULT '',
+    health         TEXT        NOT NULL DEFAULT 'Unknown',
+    health_message TEXT        NOT NULL DEFAULT '',
+    health_since   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- Compared with Git from phase B on; until then Unknown.
+    sync           TEXT        NOT NULL DEFAULT 'Unknown',
+    resources      INT         NOT NULL DEFAULT 0,
+    pods           INT         NOT NULL DEFAULT 0,
+    pods_ready     INT         NOT NULL DEFAULT 0,
+    images         TEXT[]      NOT NULL DEFAULT '{}',
+    tree           TEXT        NOT NULL DEFAULT '', -- blob key of the current tree
+    version        BIGINT      NOT NULL DEFAULT 0,
+    epoch          TEXT        NOT NULL DEFAULT '',
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (target_id, key)
+);
+CREATE INDEX IF NOT EXISTS live_apps_name_idx ON live_apps (name, id);
+
+-- What the platform said about an app's resources (Kubernetes events);
+-- the newest 200 per app are kept.
+CREATE TABLE IF NOT EXISTS live_app_events (
+    app_id       BIGINT      NOT NULL REFERENCES live_apps(id) ON DELETE CASCADE,
+    uid          TEXT        NOT NULL,
+    resource_uid TEXT        NOT NULL,
+    kind         TEXT        NOT NULL DEFAULT '',
+    name         TEXT        NOT NULL DEFAULT '',
+    type         TEXT        NOT NULL DEFAULT '',
+    reason       TEXT        NOT NULL DEFAULT '',
+    message      TEXT        NOT NULL DEFAULT '',
+    count        INT         NOT NULL DEFAULT 1,
+    first_seen   TIMESTAMPTZ NOT NULL,
+    last_seen    TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (app_id, uid)
+);
+CREATE INDEX IF NOT EXISTS live_app_events_recent_idx ON live_app_events (app_id, last_seen DESC);
+
+-- Blobs nothing references any more (an older tree, a deleted resource's
+-- manifest), deleted after a grace period so a page mid-read still finds them.
+CREATE TABLE IF NOT EXISTS live_blob_gc (
+    key    TEXT        PRIMARY KEY,
+    due_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS live_blob_gc_due_idx ON live_blob_gc (due_at);

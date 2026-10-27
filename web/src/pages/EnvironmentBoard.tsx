@@ -8,6 +8,7 @@ import {
   type EnvCell,
 } from "../api";
 import { usePoll } from "../hooks/usePoll";
+import { LiveBadge } from "../components/live/ui";
 import EnvTabs, { branchesLabel, envKind, findEnv, useEnvRegistry } from "../components/EnvTabs";
 
 const PAGE = 50;
@@ -15,7 +16,7 @@ const PAGE = 50;
 /** What a cell needs to say first: the latest attempt when it differs from
  *  what is deployed (in flight, waiting, failed), otherwise the deployment. */
 function Cell({ repo, env, cell }: { repo: string; env: string; cell?: EnvCell }) {
-  if (!cell || (!cell.current && !cell.latest)) {
+  if (!cell || (!cell.current && !cell.latest && !cell.live)) {
     return <span className="muted">—</span>;
   }
   const cur = cell.current;
@@ -37,7 +38,7 @@ function Cell({ repo, env, cell }: { repo: string; env: string; cell?: EnvCell }
           <div className="muted env-cell-when">{relativeTime(cur.deployed_at)}</div>
         </Link>
       ) : (
-        <span className="muted">never deployed</span>
+        !cell.live && <span className="muted">never deployed</span>
       )}
       {pending && (
         <Link
@@ -53,6 +54,7 @@ function Cell({ repo, env, cell }: { repo: string; env: string; cell?: EnvCell }
           frozen
         </span>
       )}
+      {cell.live && <LiveBadge summary={cell.live} env={env} repo={repo} />}
     </div>
   );
 }
