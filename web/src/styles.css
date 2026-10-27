@@ -7300,16 +7300,16 @@ textarea {
   color: var(--text);
   box-shadow: inset 2px 0 0 var(--accent);
 }
-.settings-body {
+.settings-main {
   min-width: 0;
 }
 /* Settings pages keep forms readable but let tables use the full column. */
-.settings-body .card.settings-form,
-.settings-body .page-lede {
+.settings-main .card.settings-form,
+.settings-main .page-lede {
   max-width: 820px;
 }
-.settings-body .table-card,
-.settings-body .card {
+.settings-main .table-card,
+.settings-main .card {
   overflow-x: auto;
 }
 @media (max-width: 860px) {
@@ -7471,4 +7471,81 @@ textarea {
 }
 @media (max-width: 640px) and (prefers-reduced-motion: reduce) {
   .sidebar { transition: none; }
+}
+/* Repo settings: sections are pages in the sub-nav, so headers don't toggle. */
+.settings-head-static {
+  cursor: default;
+}
+/* Settings → Environments: one card per environment instead of an 8-column input table. */
+.env-reg-list {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 820px;
+}
+.env-reg-card {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.env-reg-head {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+}
+.env-reg-order {
+  flex: none;
+  width: 22px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+}
+.env-reg-name {
+  flex: 1 1 200px;
+}
+.env-reg-tier {
+  flex: 0 0 130px;
+}
+.env-reg-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+}
+.env-reg-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 12px;
+  padding-left: 32px;
+}
+.env-reg-check {
+  align-self: end;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: var(--fs);
+}
+@media (max-width: 640px) {
+  .env-reg-head {
+    flex-wrap: wrap;
+  }
+  .env-reg-grid {
+    grid-template-columns: minmax(0, 1fr);
+    padding-left: 0;
+  }
+}
+/* Very wide screens: centre the page column instead of leaving a band on the right. */
+.content {
+  margin-inline: auto;
 }

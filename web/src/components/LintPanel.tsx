@@ -10,10 +10,13 @@ export default function LintPanel({
   config,
   repo,
   defaultRef = "main",
+  fixedRef = false,
 }: {
   config: string;
   repo?: string;
   defaultRef?: string;
+  /** The branch is chosen elsewhere on the page (Run pipeline): don't ask again. */
+  fixedRef?: boolean;
 }) {
   const [ref, setRef] = useState(defaultRef);
   const [result, setResult] = useState<LintResult | null>(null);
@@ -39,10 +42,12 @@ export default function LintPanel({
         <button type="button" className="btn" disabled={busy || !config.trim()} onClick={() => void run()}>
           {busy ? "Validating…" : "Validate"}
         </button>
-        <label className="lint-ref">
-          <span className="muted">as branch</span>
-          <input value={ref} onChange={(e) => setRef(e.target.value)} aria-label="Branch to validate against" />
-        </label>
+        {!fixedRef && (
+          <label className="lint-ref">
+            <span className="muted">as branch</span>
+            <input value={ref} onChange={(e) => setRef(e.target.value)} aria-label="Branch to validate against" />
+          </label>
+        )}
         {result?.valid && (
           <span className="badge badge-success">
             valid · {result.jobs.length} job{result.jobs.length === 1 ? "" : "s"}

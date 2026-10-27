@@ -33,7 +33,7 @@ export default function SettingsLayout() {
           </div>
         ))}
       </nav>
-      <div className="settings-body">
+      <div className="settings-main">
         <Outlet />
       </div>
     </div>

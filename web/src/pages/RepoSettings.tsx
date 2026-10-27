@@ -1,6 +1,6 @@
 import Skeleton from "../components/ui/Skeleton";
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import {
   addMember,
   artifactDownloadUrl,
@@ -44,7 +44,6 @@ import {
 import LintPanel from "../components/LintPanel";
 import { usePoll } from "../hooks/usePoll";
 import RepoHeader from "../components/RepoHeader";
-import Icon from "../components/Icon";
 
 const MASKED_PLACEHOLDER = "********************";
 const ROLES = ["admin", "owner", "developer"];
@@ -58,30 +57,15 @@ function Section({
   description: ReactNode;
   children: ReactNode;
 }) {
-  const [open, setOpen] = useState(false);
   return (
-    <section className={open ? "card settings-section settings-open" : "card settings-section"}>
-      <div
-        className="settings-head"
-        onClick={(e) => {
-          // Links in the description open their page, not the section.
-          if (!(e.target as HTMLElement).closest("a")) setOpen((o) => !o);
-        }}
-      >
+    <section className="card settings-section settings-open">
+      <div className="settings-head settings-head-static">
         <div className="settings-head-text">
           <h2>{title}</h2>
           <div className="muted settings-desc">{description}</div>
         </div>
-        <button
-          type="button"
-          className="icon-btn settings-toggle"
-          aria-expanded={open}
-          aria-label={open ? `Collapse ${title}` : `Expand ${title}`}
-        >
-          <Icon name="chevron" size={16} />
-        </button>
       </div>
-      {open && <div className="settings-body">{children}</div>}
+      <div className="settings-body">{children}</div>
     </section>
   );
 }
@@ -1487,130 +1471,179 @@ function SchedulesSection({ repo }: { repo: string }) {
 
 /* ---------------- Page ---------------- */
 
+const REPO_SECTIONS: { id: string; label: string }[] = [
+  { id: "variables", label: "Variables" },
+  { id: "runner-tags", label: "Runner tags" },
+  { id: "artifacts", label: "Artifacts" },
+  { id: "webhooks", label: "Webhooks" },
+  { id: "members", label: "Members & approval rules" },
+  { id: "pipeline-config", label: "Pipeline config" },
+  { id: "config-templates", label: "Config templates" },
+  { id: "schedules", label: "Schedules" },
+];
+
 export default function RepoSettings() {
   const params = useParams<{ repo: string }>();
   const repo = decodeRepoParam(params.repo ?? "");
 
+  const [sp] = useSearchParams();
+  const want = sp.get("section");
+  const active = REPO_SECTIONS.some((x) => x.id === want) ? (want as string) : REPO_SECTIONS[0].id;
+
   return (
     <div>
       <RepoHeader repo={repo} tab="settings" />
+      <div className="settings-shell">
+        <nav className="settings-nav" aria-label="Repository settings">
+          <div className="settings-nav-group">
+            {REPO_SECTIONS.map((x) => (
+              <Link
+                key={x.id}
+                to={`?section=${x.id}`}
+                replace
+                className={x.id === active ? "settings-nav-item active" : "settings-nav-item"}
+                aria-current={x.id === active ? "page" : undefined}
+              >
+                {x.label}
+              </Link>
+            ))}
+          </div>
+        </nav>
+        <div className="settings-main">
+        {active === "variables" && (
+        <Section
+          title="Variables"
+          description={
+            <>
+              Key/value pairs injected into job environments. Protected
+              variables are only exposed to protected refs; masked values are
+              hidden in job logs.{" "}
+              <Link to="/docs/variables-secrets" className="guide-link">
+                Guide →
+              </Link>
+            </>
+          }
+        >
+          <VariablesSection repo={repo} />
+        </Section>
+        )}
 
-      <Section
-        title="Variables"
-        description={
-          <>
-            Key/value pairs injected into job environments. Protected
-            variables are only exposed to protected refs; masked values are
-            hidden in job logs.{" "}
-            <Link to="/docs/variables-secrets" className="guide-link">
-              Guide →
-            </Link>
-          </>
-        }
-      >
-        <VariablesSection repo={repo} />
-      </Section>
+        {active === "runner-tags" && (
+        <Section
+          title="Runner tags"
+          description={
+            <>
+              Jobs in this repo run only on runners advertising ALL of these
+              tags, unless a job sets its own <code>tags:</code> in YAML. Leave
+              empty to run on any runner.{" "}
+              <Link to="/docs/runner-groups" className="guide-link">
+                Guide →
+              </Link>
+            </>
+          }
+        >
+          <RunnerTagsSection repo={repo} />
+        </Section>
+        )}
 
-      <Section
-        title="Runner tags"
-        description={
-          <>
-            Jobs in this repo run only on runners advertising ALL of these
-            tags, unless a job sets its own <code>tags:</code> in YAML. Leave
-            empty to run on any runner.{" "}
-            <Link to="/docs/runner-groups" className="guide-link">
-              Guide →
-            </Link>
-          </>
-        }
-      >
-        <RunnerTagsSection repo={repo} />
-      </Section>
+        {active === "artifacts" && (
+        <Section
+          title="Artifacts"
+          description={
+            <>
+              Files uploaded by finished jobs for this repo. Downloads stream a
+              .tar.gz.{" "}
+              <Link to="/docs/artifacts" className="guide-link">
+                Guide →
+              </Link>
+            </>
+          }
+        >
+          <ArtifactsSection repo={repo} />
+        </Section>
+        )}
 
-      <Section
-        title="Artifacts"
-        description={
-          <>
-            Files uploaded by finished jobs for this repo. Downloads stream a
-            .tar.gz.{" "}
-            <Link to="/docs/artifacts" className="guide-link">
-              Guide →
-            </Link>
-          </>
-        }
-      >
-        <ArtifactsSection repo={repo} />
-      </Section>
+        {active === "webhooks" && (
+        <Section
+          title="Webhooks"
+          description={
+            <>
+              Every delivery the git host sent for this repo, accepted or not — so a
+              hook with a stale secret shows up here, not only in server logs.
+            </>
+          }
+        >
+          <WebhooksSection repo={repo} />
+        </Section>
+        )}
 
-      <Section
-        title="Webhooks"
-        description={
-          <>
-            Every delivery the git host sent for this repo, accepted or not — so a
-            hook with a stale secret shows up here, not only in server logs.
-          </>
-        }
-      >
-        <WebhooksSection repo={repo} />
-      </Section>
+        {active === "members" && (
+        <Section
+          title="Members & approval rules"
+          description={
+            <>
+              Who belongs to this repo and which roles can approve blocked
+              deployments to protected environments.{" "}
+              <Link to="/docs/approvals" className="guide-link">
+                Guide →
+              </Link>
+            </>
+          }
+        >
+          <MembersSection repo={repo} />
+        </Section>
+        )}
 
-      <Section
-        title="Members & approval rules"
-        description={
-          <>
-            Who belongs to this repo and which roles can approve blocked
-            deployments to protected environments.{" "}
-            <Link to="/docs/approvals" className="guide-link">
-              Guide →
-            </Link>
-          </>
-        }
-      >
-        <MembersSection repo={repo} />
-      </Section>
+        {active === "pipeline-config" && (
+        <Section
+          title="Pipeline config (CI YAML)"
+          description={
+            <>
+              This YAML runs when GitHub/Bitbucket push webhooks arrive (Forge
+              does not host the repo). Webhook URLs:{" "}
+              <code>/api/v1/webhooks/github</code> and{" "}
+              <code>/api/v1/webhooks/bitbucket</code>.{" "}
+              <Link to="/docs/add-a-repo" className="guide-link">
+                Guide →
+              </Link>
+            </>
+          }
+        >
+          <ConfigSection repo={repo} />
+        </Section>
+        )}
 
-      <Section
-        title="Pipeline config (CI YAML)"
-        description={
-          <>
-            This YAML runs when GitHub/Bitbucket push webhooks arrive (Forge
-            does not host the repo). Webhook URLs:{" "}
-            <code>/api/v1/webhooks/github</code> and{" "}
-            <code>/api/v1/webhooks/bitbucket</code>.{" "}
-            <Link to="/docs/add-a-repo" className="guide-link">
-              Guide →
-            </Link>
-          </>
-        }
-      >
-        <ConfigSection repo={repo} />
-      </Section>
+        {active === "config-templates" && (
+        <Section
+          title="Config templates"
+          description={
+            <>
+              Reusable YAML fragments that a pipeline config pulls in with{" "}
+              <code>include:</code>.
+            </>
+          }
+        >
+          <TemplatesSection repo={repo} />
+        </Section>
+        )}
 
-      <Section
-        title="Config templates"
-        description={
-          <>
-            Reusable YAML fragments that a pipeline config pulls in with{" "}
-            <code>include:</code>.
-          </>
-        }
-      >
-        <TemplatesSection repo={repo} />
-      </Section>
-
-      <Section
-        title="Schedules"
-        description={
-          <>
-            Cron-triggered pipeline runs for this repo. Each run uses the repo's
-            registered pipeline config and sets{" "}
-            <code>CI_PIPELINE_SOURCE=schedule</code>. Cron is 5-field, evaluated
-            in UTC.
-          </>
-        }
-      >
-        <SchedulesSection repo={repo} />
-      </Section>
+        {active === "schedules" && (
+        <Section
+          title="Schedules"
+          description={
+            <>
+              Cron-triggered pipeline runs for this repo. Each run uses the repo's
+              registered pipeline config and sets{" "}
+              <code>CI_PIPELINE_SOURCE=schedule</code>. Cron is 5-field, evaluated
+              in UTC.
+            </>
+          }
+        >
+          <SchedulesSection repo={repo} />
+        </Section>
+        )}
+        </div>
+      </div>
     </div>
   );
 }

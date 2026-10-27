@@ -18,7 +18,6 @@ import {
   type JUnitReport,
 } from "../api";
 import { usePoll } from "../hooks/usePoll";
-import StatusBadge from "../components/StatusBadge";
 import ApprovalGate from "../components/ApprovalGate";
 import PlayButton from "../components/PlayButton";
 import CancelJobButton from "../components/CancelJobButton";
@@ -315,7 +314,6 @@ export default function JobLog() {
             </div>
           </div>
           <div className="pipeline-head-side">
-            <StatusBadge status={job.status} />
             {!isTerminalStatus(job.status) && (
               <CancelJobButton jobId={job.id} repo={repo ?? ""} onDone={refreshPipeline} />
             )}

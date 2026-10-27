@@ -1,4 +1,4 @@
-import { useCallback, useId, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { getStats } from "../api";
 import RangePicker, { useRange } from "./RangePicker";
 import { usePoll } from "../hooks/usePoll";
@@ -106,6 +106,15 @@ function MiniChart({
   const uid = useId().replace(/[^a-zA-Z0-9]/g, "");
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const [hover, setHover] = useState<number | null>(null);
+  // Real plot height, so end labels can be spaced in pixels (re-measured on resize).
+  const [plotPx, setPlotPx] = useState(140);
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => setPlotPx(el.clientHeight || 140));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [hours.length > 0]);
 
   const n = hours.length;
   if (n === 0) return null;
@@ -141,7 +150,6 @@ function MiniChart({
     .sort((a, b) => endLabelYs[a] - endLabelYs[b]);
   // The plot is stretched to its box, so a readable gap (~14px) is a different
   // number of viewBox units on a short chart than on a tall one.
-  const plotPx = bodyRef.current?.clientHeight ?? 140;
   const labelGap = Math.max(10, (14 / plotPx) * 100);
   for (let k = 1; k < labelOrder.length; k++) {
     const prev = labelOrder[k - 1];
@@ -414,7 +422,6 @@ export default function Dashboard() {
         title={`Activity (${rangeLabel})`}
         hours={hours}
         legend
-        endLabels
         series={[
           {
             name: "Passed",

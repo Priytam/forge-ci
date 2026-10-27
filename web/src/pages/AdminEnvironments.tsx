@@ -136,80 +136,72 @@ export default function AdminEnvironments() {
       )}
 
       {rows.length > 0 && (
-        <div className="card table-card">
-          <table>
-            <thead>
-              <tr>
-                <th>Order</th>
-                <th>Name</th>
-                <th>Tier</th>
-                <th>Aliases</th>
-                <th>Branches allowed to deploy</th>
-                <th>Description</th>
-                <th title="Cancel a deploy that is still waiting once a newer pipeline has deployed here">Cancel superseded</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r, i) => (
-                <tr key={i}>
-                  <td>
-                    <button type="button" className="btn btn-icon" disabled={i === 0} onClick={() => move(i, -1)} aria-label="Move up">
-                      ↑
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-icon"
-                      disabled={i === rows.length - 1}
-                      onClick={() => move(i, 1)}
-                      aria-label="Move down"
-                    >
-                      ↓
-                    </button>
-                  </td>
-                  <td>
-                    <input value={r.name} onChange={(e) => update(i, { name: e.target.value })} placeholder="production" />
-                  </td>
-                  <td>
-                    <select value={r.tier} onChange={(e) => update(i, { tier: e.target.value as EnvTier })}>
-                      <option value="dev">dev</option>
-                      <option value="staging">staging</option>
-                      <option value="prod">prod</option>
-                      <option value="other">other</option>
-                    </select>
-                  </td>
-                  <td>
-                    <input value={r.aliases} onChange={(e) => update(i, { aliases: e.target.value })} placeholder="prod, prd" />
-                  </td>
-                  <td>
-                    <input
-                      value={r.allowed_refs}
-                      onChange={(e) => update(i, { allowed_refs: e.target.value })}
-                      placeholder="any branch (e.g. main, release/*)"
-                    />
-                  </td>
-                  <td>
-                    <input value={r.description} onChange={(e) => update(i, { description: e.target.value })} />
-                  </td>
-                  <td style={{ textAlign: "center" }}>
-                    <input
-                      type="checkbox"
-                      checked={r.cancel_superseded}
-                      onChange={(e) => update(i, { cancel_superseded: e.target.checked })}
-                      aria-label={`Cancel superseded deploys to ${r.name || "this environment"}`}
-                      title="Cancel a deploy that is still waiting once a newer pipeline has deployed here"
-                    />
-                  </td>
-                  <td>
-                    <button type="button" className="btn btn-icon" onClick={() => setRows(rows.filter((_, j) => j !== i))}>
-                      Remove
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <ol className="env-reg-list">
+          {rows.map((r, i) => (
+            <li key={i} className="card env-reg-card">
+              <div className="env-reg-head">
+                <span className="env-reg-order">{i + 1}</span>
+                <label className="field env-reg-name">
+                  <span>Name</span>
+                  <input value={r.name} onChange={(e) => update(i, { name: e.target.value })} placeholder="production" />
+                </label>
+                <label className="field env-reg-tier">
+                  <span>Tier</span>
+                  <select value={r.tier} onChange={(e) => update(i, { tier: e.target.value as EnvTier })}>
+                    <option value="dev">dev</option>
+                    <option value="staging">staging</option>
+                    <option value="prod">prod</option>
+                    <option value="other">other</option>
+                  </select>
+                </label>
+                <div className="env-reg-actions">
+                  <button type="button" className="btn btn-icon" disabled={i === 0} onClick={() => move(i, -1)} aria-label="Move up" title="Move up">
+                    ↑
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-icon"
+                    disabled={i === rows.length - 1}
+                    onClick={() => move(i, 1)}
+                    aria-label="Move down"
+                    title="Move down"
+                  >
+                    ↓
+                  </button>
+                  <button type="button" className="btn btn-ghost" onClick={() => setRows(rows.filter((_, j) => j !== i))}>
+                    Remove
+                  </button>
+                </div>
+              </div>
+              <div className="env-reg-grid">
+                <label className="field">
+                  <span>Aliases</span>
+                  <input value={r.aliases} onChange={(e) => update(i, { aliases: e.target.value })} placeholder="prod, prd" />
+                </label>
+                <label className="field">
+                  <span>Branches allowed to deploy</span>
+                  <input
+                    value={r.allowed_refs}
+                    onChange={(e) => update(i, { allowed_refs: e.target.value })}
+                    placeholder="any branch (e.g. main, release/*)"
+                  />
+                </label>
+                <label className="field env-reg-desc">
+                  <span>Description</span>
+                  <input value={r.description} onChange={(e) => update(i, { description: e.target.value })} />
+                </label>
+                <label className="env-reg-check" title="Cancel a deploy that is still waiting once a newer pipeline has deployed here">
+                  <input
+                    type="checkbox"
+                    checked={r.cancel_superseded}
+                    onChange={(e) => update(i, { cancel_superseded: e.target.checked })}
+                  />
+                  Cancel superseded deploys
+                </label>
+              </div>
+            </li>
+          ))}
+        </ol>
       )}
 
       <div className="filter-bar" style={{ marginTop: 12 }}>
