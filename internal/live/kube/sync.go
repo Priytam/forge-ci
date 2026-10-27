@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"slices"
 	"strconv"
 	"strings"
@@ -153,8 +154,51 @@ func (p *Provider) Operate(ctx context.Context, op live.Op, out func([]byte)) li
 		return w.syncApp(ctx, op, out)
 	case live.OpLogs:
 		return p.logs(ctx, op, out)
+	case live.OpPromote, live.OpAbort:
+		return w.control(ctx, op)
 	}
 	return live.OpResult{Message: "unknown operation " + op.Kind}
+}
+
+// control hands a promote or abort to the app's running rollout. With none
+// running here (the agent restarted mid-rollout), abort still removes the
+// app's canaries; promote says to sync.
+func (w *watcher) control(ctx context.Context, op live.Op) live.OpResult {
+	if w.p.signal(op) {
+		verb := "Promote"
+		switch {
+		case op.Kind == live.OpAbort:
+			verb = "Abort"
+		case !op.Full:
+			verb = "Resume"
+		}
+		return live.OpResult{OK: true, Message: verb + " sent to the running rollout"}
+	}
+	if op.Kind == live.OpPromote {
+		return live.OpResult{Message: "no rollout is running for this application; sync to start one"}
+	}
+	w.mu.Lock()
+	var canaries []string
+	for key := range w.rootsByApp[op.App.Key] {
+		if rt := w.roots[key]; rt != nil && rt.canary {
+			canaries = append(canaries, key)
+		}
+	}
+	w.mu.Unlock()
+	if len(canaries) == 0 || w.p.applier == nil {
+		return live.OpResult{OK: true, Message: "no rollout is running for this application"}
+	}
+	res := live.OpResult{OK: true, Aborted: true}
+	for _, key := range canaries {
+		f := strings.SplitN(key, "/", 4)
+		rr := live.ResourceResult{Key: key, Kind: f[1], Name: f[3], Action: "pruned"}
+		if err := w.p.applier.Delete(ctx, f[0], versionOf(f[0], f[1]), f[1], f[2], f[3], false); err != nil {
+			rr.Action, rr.Message, res.OK = "failed", err.Error(), false
+		}
+		res.Resources = append(res.Resources, rr)
+	}
+	res.Message = fmt.Sprintf("Removed %d canar%s left by an interrupted rollout", len(canaries), map[bool]string{true: "y", false: "ies"}[len(canaries) == 1])
+	return res
 }
 
 func (w *watcher) refreshNow(ctx context.Context, hard bool) live.OpResult {
@@ -210,16 +254,32 @@ func (w *watcher) syncApp(ctx context.Context, op live.Op, out func([]byte)) liv
 	if err != nil {
 		return live.OpResult{Message: "render: " + err.Error(), Revision: rev}
 	}
-	s := &syncRun{w: w, op: op, app: a, applier: applier, out: out}
+	s := &syncRun{w: w, op: op, app: a, applier: applier, out: out, pods: w.p.listPods}
 	return s.execute(ctx, r.objects, rev)
+}
+
+func (p *Provider) listPods(ctx context.Context, namespace, selector string) ([]corev1.Pod, error) {
+	l, err := p.client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if err != nil {
+		return nil, err
+	}
+	return l.Items, nil
 }
 
 // execute runs a sync of objs (the app rendered at rev).
 func (s *syncRun) execute(ctx context.Context, objs []*unstructured.Unstructured, rev string) live.OpResult {
 	op := s.op
-	s.only, s.res = map[string]bool{}, live.OpResult{OK: true, Revision: rev}
+	s.only, s.res, s.rev = map[string]bool{}, live.OpResult{OK: true, Revision: rev}, rev
 	for _, k := range op.Resources {
 		s.only[k] = true
+	}
+	objs, specs, err := rollouts(objs)
+	if err != nil {
+		return live.OpResult{Message: err.Error(), Revision: rev}
+	}
+	// Rollbacks go straight back: an emergency is not the time to go slowly.
+	if op.Kind != live.OpRollback && !op.DryRun {
+		s.rollouts = specs
 	}
 	desired := map[string]bool{}
 	for _, o := range objs {
@@ -309,6 +369,19 @@ type syncRun struct {
 	only    map[string]bool // selected resource keys; none = all (a selective sync runs no hooks)
 	res     live.OpResult
 	fail    string // why the sync stopped, when a wave did
+	// Rollouts by Deployment name (from the rendered app); pods and client
+	// serve their analysis.
+	rollouts map[string]*RolloutSpec
+	rev      string
+	pods     podLister
+	client   *http.Client
+}
+
+func (s *syncRun) httpClient() *http.Client {
+	if s.client != nil {
+		return s.client
+	}
+	return &http.Client{Timeout: 2 * time.Second}
 }
 
 func (s *syncRun) say(format string, a ...any) {
@@ -339,6 +412,14 @@ func (s *syncRun) run(ctx context.Context, st *step, wait bool) bool {
 			rr.Action = "would-run"
 		case isHook && h.delete[BeforeHookCreation] && !s.gone(ctx, o):
 			rr.Action, rr.Message = "failed", "the previous run of this hook is still being deleted"
+		case !isHook && o.GetKind() == "Deployment" && s.rollouts[o.GetName()] != nil:
+			// Progressive delivery: this blocks until promoted or aborted.
+			res, ok := s.rollout(ctx, o, s.rollouts[o.GetName()], s.rev)
+			res.Wave = rr.Wave
+			rr = res
+			if ok {
+				applied = append(applied, o)
+			}
 		default:
 			action, err := s.applier.Apply(ctx, o, s.op.DryRun, s.op.Force)
 			if err != nil {
@@ -348,7 +429,7 @@ func (s *syncRun) run(ctx context.Context, st *step, wait bool) bool {
 				applied = append(applied, o)
 			}
 		}
-		if rr.Action == "failed" {
+		if rr.Action == "failed" || rr.Action == "aborted" {
 			s.res.OK = false
 		}
 		idx[o] = len(s.res.Resources)
@@ -491,7 +572,7 @@ func (s *syncRun) prune(ctx context.Context, desired map[string]bool) bool {
 	var keys []string
 	for key := range w.rootsByApp[s.app.Key] {
 		rt := w.roots[key]
-		if rt != nil && rt.forge && !rt.hook && !desired[key] && (len(s.only) == 0 || s.only[key]) {
+		if rt != nil && rt.forge && !rt.hook && !rt.canary && !desired[key] && (len(s.only) == 0 || s.only[key]) {
 			keys = append(keys, key)
 		}
 	}

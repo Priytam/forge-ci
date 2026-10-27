@@ -465,6 +465,8 @@ func (s *Server) createLiveOp(w http.ResponseWriter, r *http.Request) {
 		ok = true
 	case live.OpLogs:
 		ok = caps.Logs && op.Pod != ""
+	case live.OpPromote, live.OpAbort:
+		ok = caps.Sync
 	default:
 		ok = false
 	}

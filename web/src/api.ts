@@ -2832,6 +2832,8 @@ export interface LiveResource {
   requires_pruning?: boolean;
   /** a sync hook's phase: run by syncs, never compared */
   hook?: string;
+  /** "canary": a rollout's canary workload */
+  track?: string;
   summary: {
     ready?: string;
     status?: string;
@@ -2991,7 +2993,7 @@ export interface LiveTarget {
   apps: number;
 }
 
-export type LiveOpKind = "sync" | "rollback" | "refresh" | "logs";
+export type LiveOpKind = "sync" | "rollback" | "refresh" | "logs" | "promote" | "abort";
 
 export interface LiveOpParams {
   kind: LiveOpKind;
@@ -3008,6 +3010,8 @@ export interface LiveOpParams {
   follow?: boolean;
   /** set when Forge started it itself */
   trigger?: "auto-sync" | "self-heal";
+  /** promote: all the way now, skipping the remaining steps */
+  full?: boolean;
 }
 
 export interface LiveOp {
@@ -3019,6 +3023,8 @@ export interface LiveOp {
   result: {
     ok: boolean;
     message: string;
+    /** a canary rollout was stopped; the stable version still runs */
+    aborted?: boolean;
     revision?: string;
     resources?: { key: string; kind: string; name: string; action: string; message?: string; wave?: number; phase?: string }[];
   } | null;

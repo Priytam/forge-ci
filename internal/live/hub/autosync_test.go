@@ -77,3 +77,14 @@ func TestDecideAuto(t *testing.T) {
 		})
 	}
 }
+
+func TestDecideAutoAfterAbortedRollout(t *testing.T) {
+	o := op("failed", "b", live.TriggerAutoSync, time.Hour)
+	o.Result = &live.OpResult{Aborted: true}
+	o.Message = "Rollout of web aborted: analysis failed at 25%. web still runs the stable version."
+	d := decideAuto(autoInput{Policy: store.LivePolicy{AutoSync: true, SelfHeal: true}, Want: "b", Drifted: 1, Now: t0,
+		Ops: []store.LiveOp{o}})
+	if d.Trigger != "" || d.Status != "Rollout of web aborted: analysis failed at 25%. web still runs the stable version. Auto-sync waits for the next revision after b." {
+		t.Errorf("decideAuto = %+v", d)
+	}
+}

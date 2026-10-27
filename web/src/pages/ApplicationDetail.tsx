@@ -7,6 +7,7 @@ import Avatar, { displayName } from "../components/Avatar";
 import ResourceList from "../components/live/ResourceList";
 import ResourcePanel from "../components/live/ResourcePanel";
 import ResourceTree from "../components/live/ResourceTree";
+import RolloutPanel from "../components/live/Rollout";
 import { HEALTH_ORDER, HEALTH_TONE, HealthIcon, KindIcon, requester, shortImage, SyncPill } from "../components/live/ui";
 import { Skeleton } from "../components/ui/Pill";
 
@@ -242,13 +243,13 @@ export default function ApplicationDetail() {
             {!policy?.auto_sync && policy?.status && <div className="lv-auto-line">{policy.status}</div>}
           </div>
         </section>
-        <section className={`card lv-panel${lastOp?.state === "failed" ? " lv-panel-danger" : ""}`}>
+        <section className={`card lv-panel${lastOp?.state === "failed" ? (lastOp.result?.aborted ? " lv-panel-warning" : " lv-panel-danger") : ""}`}>
           <h2>Last sync</h2>
           {lastOp ? (
             <>
               <div className="lv-panel-value">
-                <HealthIcon health={lastOp.state === "succeeded" ? "Healthy" : lastOp.state === "failed" ? "Degraded" : "Progressing"} size={18} />
-                {lastOp.state === "succeeded" ? "Succeeded" : lastOp.state === "failed" ? "Failed" : lastOp.state === "approval" ? "Waiting for approval" : "In progress"}
+                <HealthIcon health={lastOp.state === "succeeded" ? "Healthy" : lastOp.result?.aborted ? "Suspended" : lastOp.state === "failed" ? "Degraded" : "Progressing"} size={18} />
+                {lastOp.state === "succeeded" ? "Succeeded" : lastOp.result?.aborted ? "Rollout aborted" : lastOp.state === "failed" ? "Failed" : lastOp.state === "approval" ? "Waiting for approval" : "In progress"}
               </div>
               <div className="lv-panel-detail">
                 {lastOp.kind === "rollback" ? "Rollback" : lastOp.params.trigger === "self-heal" ? "Self-heal" : lastOp.params.trigger === "auto-sync" ? "Auto-sync" : "Sync"}
@@ -279,6 +280,8 @@ export default function ApplicationDetail() {
           )}
         </section>
       </div>
+
+      <RolloutPanel appId={app.id} resources={view.tree.resources} op={lastOp} canOperate={caps.sync} />
 
       <div className="table-toolbar lv-toolbar">
         <div className="segmented" role="group" aria-label="View">

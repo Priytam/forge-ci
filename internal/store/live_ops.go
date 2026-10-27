@@ -288,10 +288,11 @@ func (s *Store) AppendLiveOpOutput(ctx context.Context, targetID, id int64, chun
 	tag, err := s.pool.Exec(ctx, `INSERT INTO live_op_output (op_id, chunk)
 		SELECT id, $3 FROM live_ops WHERE id=$1 AND target_id=$2 AND state='running'
 		AND (SELECT coalesce(sum(length(chunk)), 0) FROM live_op_output WHERE op_id=$1) < $4`, id, targetID, chunk, maxOpOutput)
-	if err != nil {
+	if err != nil || tag.RowsAffected() != 1 {
 		return false, err
 	}
-	return tag.RowsAffected() == 1, nil
+	_, err = s.pool.Exec(ctx, `UPDATE live_ops SET heartbeat_at = now() WHERE id = $1`, id)
+	return err == nil, err
 }
 
 // LiveOpOutput returns the chunks after seq.
@@ -329,11 +330,11 @@ func (s *Store) FinishLiveOp(ctx context.Context, targetID, id int64, res live.O
 	return o, s.notifyOp(ctx, o)
 }
 
-// ExpireLiveOps fails operations an agent claimed and never finished (it
-// restarted), and drops log output older than an hour.
+// ExpireLiveOps fails operations an agent claimed and stopped reporting on
+// for 20 minutes (it restarted), and drops log output older than an hour.
 func (s *Store) ExpireLiveOps(ctx context.Context) error {
 	if _, err := s.pool.Exec(ctx, `UPDATE live_ops SET state='failed', message='The agent stopped before finishing', finished_at=now()
-		WHERE state='running' AND started_at < now() - interval '20 minutes'`); err != nil {
+		WHERE state='running' AND coalesce(heartbeat_at, started_at) < now() - interval '20 minutes'`); err != nil {
 		return err
 	}
 	_, err := s.pool.Exec(ctx, `DELETE FROM live_op_output WHERE created_at < now() - interval '1 hour'`)

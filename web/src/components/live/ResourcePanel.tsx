@@ -71,6 +71,7 @@ export default function ResourcePanel({
           {orphan && <div className="lv-health-note lv-tone-warning">Orphaned: no application claims this {r.kind}. Label it to adopt it into one, or delete it.</div>}
           {r.requires_pruning && <div className="lv-health-note lv-tone-warning">Forge applied this and Git no longer has it: a sync with Prune deletes it.</div>}
           {r.hook && <div className="lv-health-note lv-tone-neutral">A {r.hook} hook: syncs run it; it is never compared with Git or pruned.</div>}
+          {r.track === "canary" && <div className="lv-health-note lv-tone-neutral">The canary of a rollout in progress: it runs the new version beside the stable one until the rollout is promoted or aborted.</div>}
           <Summary r={r} byUid={byUid} onSelect={onSelect} />
         </>
       )}

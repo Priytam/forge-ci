@@ -156,6 +156,10 @@ func decideAuto(in autoInput) autoDecision {
 	}
 	last := changes[0]
 	since := in.Now.Sub(finishedAt(last))
+	switch {
+	case last.Result != nil && last.Result.Aborted:
+		return autoDecision{Status: fmt.Sprintf("%s Auto-sync waits for the next revision after %s.", firstLine(last.Message), want)}
+	}
 	switch last.State {
 	case "canceled":
 		return autoDecision{Status: fmt.Sprintf("The sync to %s was canceled; auto-sync waits for the next revision", want)}

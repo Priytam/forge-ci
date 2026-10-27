@@ -8235,3 +8235,19 @@ textarea {
   background: color-mix(in srgb, var(--warning) 8%, var(--surface));
 }
 .lv-panel-foot .lv-auto-line { flex-basis: 100%; width: 100%; }
+
+/* Forge Live phase D: canary rollouts */
+.lv-rollout { margin-bottom: 16px; padding: 14px 16px; border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.lv-rollout-row + .lv-rollout-row { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
+.lv-rollout-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.lv-rollout-head h2 { margin: 0; font-size: var(--fs-xs); letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted); }
+.lv-rollout-name { display: inline-flex; align-items: center; gap: 5px; font-weight: 600; }
+.lv-rollout-actions { display: inline-flex; gap: 6px; margin-left: auto; }
+.lv-rollout-bar { height: 10px; margin: 12px 0 6px; border-radius: 999px; background: color-mix(in srgb, var(--success) 30%, var(--surface-2)); overflow: hidden; }
+.lv-rollout-canary { display: block; height: 100%; background: var(--accent); transition: width 0.4s ease; }
+.lv-rollout-legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: var(--fs-sm); }
+.lv-rollout-legend > span { display: inline-flex; align-items: center; gap: 5px; }
+.lv-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
+.lv-dot-canary { background: var(--accent); }
+.lv-dot-stable { background: color-mix(in srgb, var(--success) 60%, var(--surface-2)); }
+.lv-rollout-status { margin-top: 8px; font-size: var(--fs-sm); overflow-wrap: anywhere; }

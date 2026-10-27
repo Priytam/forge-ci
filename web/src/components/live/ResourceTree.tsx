@@ -166,7 +166,7 @@ export default function ResourceTree({
           if (!r) return null;
           const dim = filtering && !matches(r, filter);
           const orphan = orphans?.has(r.uid);
-          const tag = orphan && !(r.parents ?? []).length ? "orphaned" : r.requires_pruning ? "prune" : r.hook ? `${r.hook} hook` : "";
+          const tag = orphan && !(r.parents ?? []).length ? "orphaned" : r.requires_pruning ? "prune" : r.hook ? `${r.hook} hook` : r.track ? r.track : "";
           return (
             <button key={n.id} type="button" style={style}
               className={`lv-node${selected === r.uid ? " lv-node-on" : ""}${dim ? " lv-node-dim" : ""}${r.health ? ` lv-node-${r.health.status.toLowerCase()}` : ""}${r.sync === "OutOfSync" ? " lv-node-drift" : ""}${r.uid.startsWith("desired:") ? " lv-node-missing" : ""}${orphan ? " lv-node-orphan" : ""}${r.requires_pruning ? " lv-node-prune" : ""}`}

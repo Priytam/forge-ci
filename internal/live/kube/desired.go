@@ -19,11 +19,12 @@ import (
 
 // root is a top-level object of an application, as last seen live.
 type root struct {
-	uid   string
-	app   *live.App
-	live  []byte // trimmed manifest JSON
-	forge bool   // Forge applied it
-	hook  bool   // a sync hook: run by syncs, never compared or pruned
+	uid    string
+	app    *live.App
+	live   []byte // trimmed manifest JSON
+	forge  bool   // Forge applied it
+	hook   bool   // a sync hook: run by syncs, never compared or pruned
+	canary bool   // a rollout's canary: likewise
 }
 
 // appDesired is an application's desired state at one revision.
@@ -57,7 +58,7 @@ func keyOf(u *unstructured.Unstructured) string {
 // not put it there (someone else manages it). Not in Git but applied by
 // Forge, it is OutOfSync and requires pruning.
 func (d *appDesired) syncOf(key string, rt *root) (sync string, prune bool) {
-	if d == nil || rt.hook {
+	if d == nil || rt.hook || rt.canary {
 		return "", false
 	}
 	obj := d.objs[key]
@@ -84,7 +85,7 @@ func (w *watcher) noteRoot(n *node, res *live.Resource) {
 	}
 	key := res.Key()
 	n.key = key
-	rt := &root{uid: res.UID, app: n.app, live: res.Manifest, forge: n.forge, hook: res.Hook != ""}
+	rt := &root{uid: res.UID, app: n.app, live: res.Manifest, forge: n.forge, hook: res.Hook != "", canary: res.Track != ""}
 	w.roots[key] = rt
 	if w.rootsByApp[n.app.Key] == nil {
 		w.rootsByApp[n.app.Key] = map[string]bool{}
@@ -141,8 +142,8 @@ func (w *watcher) setDesired(app live.App, rev live.Revision, path string, r *re
 		out.Tool = r.tool
 		d := &appDesired{rev: rev, objs: map[string]*unstructured.Unstructured{}, missing: map[string]bool{}}
 		for _, u := range r.objects {
-			if hookOf(u.GetAnnotations()).phase != "" {
-				continue // hooks run during a sync; they are not desired state
+			if hookOf(u.GetAnnotations()).phase != "" || u.GetAPIVersion() == rolloutAPIVersion {
+				continue // hooks run during a sync and Rollouts guide one: neither is desired state
 			}
 			key := keyOf(u)
 			out.Manifests[key] = manifestJSON(u)

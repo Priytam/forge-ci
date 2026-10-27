@@ -13,7 +13,7 @@ const STATE: Record<LiveOp["state"], [Tone, string]> = {
 };
 
 const ACTION_TONE: Record<string, Tone> = {
-  created: "success", configured: "accent", unchanged: "neutral", pruned: "warning", failed: "danger", succeeded: "success", run: "accent",
+  created: "success", configured: "accent", unchanged: "neutral", pruned: "warning", failed: "danger", succeeded: "success", run: "accent", promoted: "success", aborted: "warning",
 };
 
 /** Where a resource ran in the sync: its hook phase, or its wave. */

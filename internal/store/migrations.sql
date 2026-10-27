@@ -1604,3 +1604,12 @@ CREATE TABLE IF NOT EXISTS live_app_policies (
     PRIMARY KEY (target_id, app_key)
 );
 CREATE INDEX IF NOT EXISTS live_app_policies_auto_idx ON live_app_policies (target_id, app_key) WHERE auto_sync;
+
+-- Forge Live (batch 9, phase D): canary rollouts. Promote and abort reach a
+-- running rollout as operations of their own; a rollout can outlast the
+-- 20-minute expiry, so an operation is alive while its agent still reports
+-- (heartbeat_at moves with each output chunk).
+ALTER TABLE live_ops DROP CONSTRAINT IF EXISTS live_ops_kind_check;
+ALTER TABLE live_ops ADD CONSTRAINT live_ops_kind_check
+    CHECK (kind IN ('sync','rollback','refresh','logs','promote','abort'));
+ALTER TABLE live_ops ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ;

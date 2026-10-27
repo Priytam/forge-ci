@@ -140,6 +140,9 @@ type Provider struct {
 
 	mu      sync.Mutex
 	current *watcher // the running Watch's, for operations
+
+	rmu     sync.Mutex
+	running map[string]*rolloutCtl // app key → its rollout in progress
 }
 
 // New returns a provider for the cluster client talks to.
@@ -414,6 +417,9 @@ func (w *watcher) apply(k *kind, obj any) {
 		return
 	}
 	res.Hook = hookOf(meta.GetAnnotations()).phase
+	if meta.GetAnnotations()[annCanaryOf] != "" {
+		res.Track = "canary"
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	owner := w.str(ownerOf(meta))

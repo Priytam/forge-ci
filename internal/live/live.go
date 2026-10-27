@@ -76,7 +76,10 @@ type Resource struct {
 	RequiresPruning bool `json:"requires_pruning,omitempty"`
 	// Hook is the sync phase of a hook resource (PreSync, Sync, PostSync,
 	// SyncFail): it runs during a sync and is never compared or pruned.
-	Hook      string    `json:"hook,omitempty"`
+	Hook string `json:"hook,omitempty"`
+	// Track is "canary" for a rollout's canary workload (and its pods'
+	// owner): never compared with Git or pruned.
+	Track     string    `json:"track,omitempty"`
 	Summary   Summary   `json:"summary"`
 	CreatedAt time.Time `json:"created_at"`
 	// Manifest is the live object, trimmed (no managed fields, no
@@ -314,6 +317,8 @@ const (
 	OpRefresh  = "refresh"  // re-read the source (Hard: and report everything afresh)
 	OpRollback = "rollback" // back to an earlier revision
 	OpLogs     = "logs"     // stream a pod's logs
+	OpPromote  = "promote"  // a canary rollout: go on past a pause, or (Full) to 100% now
+	OpAbort    = "abort"    // a canary rollout: stop, remove the canary, keep the stable version
 )
 
 // Op is one operation an agent runs for Forge.
@@ -328,6 +333,7 @@ type Op struct {
 	Force     bool     `json:"force,omitempty"`
 	Resources []string `json:"resources,omitempty"` // Keys; none = all
 	Hard      bool     `json:"hard,omitempty"`      // refresh
+	Full      bool     `json:"full,omitempty"`      // promote: all the way, skipping the remaining steps
 	// Trigger says why Forge itself started the operation: auto-sync (a new
 	// revision) or self-heal (live drifted); "" when a person did.
 	Trigger string `json:"trigger,omitempty"`
@@ -343,8 +349,11 @@ type Op struct {
 
 // OpResult is how an operation ended.
 type OpResult struct {
-	OK        bool             `json:"ok"`
-	Message   string           `json:"message"`
+	OK      bool   `json:"ok"`
+	Message string `json:"message"`
+	// Aborted: a canary rollout was stopped (by its analysis or a person);
+	// the stable version still runs. Auto-sync waits for the next revision.
+	Aborted   bool             `json:"aborted,omitempty"`
 	Revision  string           `json:"revision,omitempty"`
 	Resources []ResourceResult `json:"resources,omitempty"`
 }
