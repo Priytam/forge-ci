@@ -391,7 +391,25 @@ async function parseError(res: Response): Promise<ApiError> {
   return new ApiError(res.status, message);
 }
 
-async function getJSON<T>(path: string): Promise<T> {
+// Stale-while-revalidate for GETs: a page you have seen in the last minute
+// renders instantly from memory while a fresh copy loads; usePoll swaps it in
+// as soon as it lands (see revalidation()). Any write clears the cache, so an
+// action is never followed by stale data.
+const SWR_MAX_AGE_MS = 60_000;
+const SWR_FRESH_MS = 1_000;
+const swr = new Map<string, { at: number; data: unknown; inflight?: Promise<unknown> }>();
+const revalidating = new WeakMap<object, Promise<unknown>>();
+
+/** The pending refresh of a result that was served from the cache, if any. */
+export function revalidation(result: unknown): Promise<unknown> | undefined {
+  return typeof result === "object" && result !== null ? revalidating.get(result) : undefined;
+}
+
+function mutated(): void {
+  swr.clear();
+}
+
+async function fetchJSON<T>(path: string): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     headers: { Accept: "application/json" },
   });
@@ -401,7 +419,30 @@ async function getJSON<T>(path: string): Promise<T> {
   return (await res.json()) as T;
 }
 
+function getJSON<T>(path: string): Promise<T> {
+  const load = () =>
+    fetchJSON<T>(path).then(
+      (data) => {
+        swr.set(path, { at: Date.now(), data });
+        return data;
+      },
+      (err) => {
+        swr.delete(path);
+        throw err;
+      }
+    );
+  const hit = swr.get(path);
+  const age = hit ? Date.now() - hit.at : Infinity;
+  if (!hit || age >= SWR_MAX_AGE_MS) return load();
+  if (age >= SWR_FRESH_MS) {
+    hit.inflight ??= load().catch(() => undefined);
+    if (typeof hit.data === "object" && hit.data !== null) revalidating.set(hit.data, hit.inflight);
+  }
+  return Promise.resolve(hit.data as T);
+}
+
 async function postJSON<T>(path: string, body: unknown): Promise<T> {
+  mutated();
   const res = await fetch(`${BASE}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
@@ -419,6 +460,7 @@ async function requestVoid(
   path: string,
   body?: unknown
 ): Promise<void> {
+  mutated();
   const res = await fetch(`${BASE}${path}`, {
     method,
     headers:
@@ -433,6 +475,7 @@ async function requestVoid(
 }
 
 async function putJSON<T>(path: string, body: unknown): Promise<T> {
+  mutated();
   const res = await fetch(`${BASE}${path}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
@@ -1131,6 +1174,7 @@ export interface AuthProviders {
 
 /** Signs in with a directory (LDAP / Active Directory) account. */
 export async function ldapLogin(username: string, password: string): Promise<void> {
+  mutated();
   const res = await fetch(`${BASE}/auth/ldap/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
@@ -1204,6 +1248,7 @@ export function refreshSession(): Promise<{ expires_at: string }> {
 }
 
 export async function logout(): Promise<void> {
+  mutated();
   await fetch(`${BASE}/auth/logout`, { method: "POST" });
   meCache = null;
 }
@@ -1921,6 +1966,7 @@ export async function updateServiceAccount(
   id: number,
   b: { description?: string; is_admin?: boolean; disabled?: boolean }
 ): Promise<ServiceAccount> {
+  mutated();
   const res = await fetch(`${BASE}/service-accounts/${id}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json", Accept: "application/json" },

@@ -150,11 +150,6 @@ export default function AdminRunnerTokens() {
 
   return (
     <div>
-      <div className="breadcrumbs">
-        <Link to="/">Repos</Link> <span className="crumb-sep">/</span>{" "}
-        <span>admin</span> <span className="crumb-sep">/</span> <span>runner tokens</span>
-      </div>
-
       <div className="page-head">
         <h1>Runner tokens</h1>
       </div>

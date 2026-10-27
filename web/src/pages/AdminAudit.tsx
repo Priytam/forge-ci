@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useState } from "react";
-import { Link } from "react-router-dom";
 import { ApiError, listAuditLog, relativeTime, type AuditEntry } from "../api";
 
 const PAGE = 50;
@@ -118,11 +117,6 @@ export default function AdminAudit() {
 
   return (
     <div>
-      <div className="breadcrumbs">
-        <Link to="/">Repos</Link> <span className="crumb-sep">/</span>{" "}
-        <span>admin</span> <span className="crumb-sep">/</span> <span>audit</span>
-      </div>
-
       <div className="page-head">
         <h1>Audit log</h1>
       </div>

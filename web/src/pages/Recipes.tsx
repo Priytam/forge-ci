@@ -1,3 +1,4 @@
+import DocsTabs from "../components/DocsTabs";
 import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { CodeBlock } from "../components/DocBlocks";
@@ -119,6 +120,7 @@ export default function Recipes() {
   const { slug } = useParams<{ slug: string }>();
   return (
     <div className="recipes-page">
+      <DocsTabs />
       {slug ? <RecipeDetail slug={slug} /> : <RecipesIndex />}
     </div>
   );

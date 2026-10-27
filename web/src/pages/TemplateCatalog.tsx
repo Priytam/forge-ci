@@ -1,3 +1,4 @@
+import DocsTabs from "../components/DocsTabs";
 import { Fragment, useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { CodeBlock } from "../components/DocBlocks";
 import {
@@ -90,6 +91,7 @@ export default function TemplateCatalog() {
 
   return (
     <div>
+      <DocsTabs />
       <div className="page-head">
         <h1>Template catalog</h1>
       </div>

@@ -105,10 +105,6 @@ export default function EnvironmentBoard() {
 
   return (
     <div>
-      <div className="breadcrumbs">
-        <Link to="/">Repos</Link> <span className="crumb-sep">/</span>{" "}
-        <span>environments</span>
-      </div>
       <div className="page-head">
         <h1>Environments</h1>
       </div>

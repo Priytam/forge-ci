@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
 import {
   getEnvRegistry,
   getIsAdmin,
@@ -108,10 +107,6 @@ export default function AdminEnvironments() {
 
   return (
     <div>
-      <div className="breadcrumbs">
-        <Link to="/">Repos</Link> <span className="crumb-sep">/</span> <span>admin</span>{" "}
-        <span className="crumb-sep">/</span> <span>environments</span>
-      </div>
       <div className="page-head">
         <h1>Environments &amp; branches</h1>
       </div>

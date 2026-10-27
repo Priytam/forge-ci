@@ -472,11 +472,6 @@ export default function AdminSso() {
 
   return (
     <div>
-      <div className="breadcrumbs">
-        <Link to="/">Repos</Link> <span className="crumb-sep">/</span>{" "}
-        <span>admin</span> <span className="crumb-sep">/</span> <span>sso</span>
-      </div>
-
       <div className="page-head">
         <h1>Sign-in &amp; identity</h1>
       </div>

@@ -98,10 +98,6 @@ export default function AddRepo() {
   if (connected) {
     return (
       <div>
-        <div className="breadcrumbs">
-          <Link to="/">Repos</Link> <span className="crumb-sep">/</span>{" "}
-          <span>add repository</span>
-        </div>
         <div className="card connect-success">
           <div className="connect-success-title">
             ✓ Repository connected and verified
@@ -135,11 +131,6 @@ export default function AddRepo() {
 
   return (
     <div>
-      <div className="breadcrumbs">
-        <Link to="/">Repos</Link> <span className="crumb-sep">/</span>{" "}
-        <span>add repository</span>
-      </div>
-
       <div className="page-head">
         <h1>Add repository</h1>
       </div>

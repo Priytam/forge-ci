@@ -156,11 +156,6 @@ export default function NewPipeline() {
 
   return (
     <div>
-      <div className="breadcrumbs">
-        <Link to="/">Repos</Link> <span className="crumb-sep">/</span>{" "}
-        <span>run</span>
-      </div>
-
       <div className="page-head">
         <h1>Run pipeline</h1>
       </div>

@@ -1,12 +1,12 @@
 import { useEffect, useState, type ReactNode } from "react";
 import SessionWatch from "./SessionWatch";
 import MaintenanceBanner from "./MaintenanceBanner";
-import { Link, NavLink, useLocation } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { getIsAdmin } from "../api";
 import AuthMenu from "./AuthMenu";
 import CommandPalette from "./CommandPalette";
 import Icon from "./Icon";
-import { crumbsFor, NAV } from "./nav";
+import { crumbsFor, NAV, navActive } from "./nav";
 import { useTheme, type ThemePref } from "./theme";
 
 const COLLAPSE_KEY = "forge-sidebar-collapsed";
@@ -72,16 +72,16 @@ export default function Shell({ children }: { children: ReactNode }) {
             <div key={s.title} className="nav-section">
               <div className="nav-section-title">{s.title}</div>
               {s.items.map((it) => (
-                <NavLink
+                <Link
                   key={it.to}
                   to={it.to}
-                  end={it.to === "/"}
                   title={collapsed ? it.label : undefined}
-                  className={({ isActive }) => (isActive ? "nav-item active" : "nav-item")}
+                  aria-current={navActive(it, location.pathname) ? "page" : undefined}
+                  className={navActive(it, location.pathname) ? "nav-item active" : "nav-item"}
                 >
                   <Icon name={it.icon} />
                   <span className="nav-label">{it.label}</span>
-                </NavLink>
+                </Link>
               ))}
             </div>
           ))}

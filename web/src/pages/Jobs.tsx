@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   filterToParams,
   getPipelineFacets,
@@ -93,9 +93,6 @@ export default function Jobs() {
 
   return (
     <div>
-      <div className="breadcrumbs">
-        <Link to="/">Repos</Link> <span className="crumb-sep">/</span> <span>jobs</span>
-      </div>
       <div className="page-head">
         <h1>Jobs</h1>
       </div>

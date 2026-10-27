@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { getIsAdmin, listReposPage } from "../api";
 import Icon, { type IconName } from "./Icon";
-import { EXTRA_PAGES, NAV } from "./nav";
+import { DOCS_TABS, EXTRA_PAGES, NAV, SETTINGS_NAV } from "./nav";
 
 interface Entry {
   group: string;
@@ -60,8 +60,9 @@ export default function CommandPalette({ open, onClose }: { open: boolean; onClo
     for (const r of repos) {
       out.push({ group: "Repos", label: r, icon: "repos", to: `/repos/${encodeURIComponent(r)}` });
     }
-    for (const s of NAV) {
-      if (s.adminOnly && !isAdmin) continue;
+    const sections = [...NAV, { title: "Docs", items: DOCS_TABS.slice(1) }, ...SETTINGS_NAV.map((x) => ({ ...x, title: `Settings · ${x.title}` }))];
+    for (const s of sections) {
+      if ("adminOnly" in s && s.adminOnly && !isAdmin) continue;
       for (const it of s.items) {
         if (match(`${it.label} ${it.keywords ?? ""} ${s.title}`)) {
           out.push({ group: "Pages", label: it.label, hint: s.title, icon: it.icon, to: it.to });

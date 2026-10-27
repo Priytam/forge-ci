@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
-import { Link } from "react-router-dom";
 import {
   createApiToken,
   getIsAdmin,
@@ -275,10 +274,6 @@ export default function ApiTokens() {
 
   return (
     <div>
-      <div className="breadcrumbs">
-        <Link to="/">Repos</Link> <span className="crumb-sep">/</span>{" "}
-        <span>API tokens</span>
-      </div>
       <div className="page-head">
         <h1>API tokens</h1>
       </div>

@@ -6,6 +6,8 @@ export interface NavItem {
   icon: IconName;
   /** extra words the command palette matches on */
   keywords?: string;
+  /** other path prefixes that also light this item up (e.g. Docs ← /recipes) */
+  match?: string[];
 }
 
 export interface NavSection {
@@ -15,49 +17,85 @@ export interface NavSection {
 }
 
 /**
- * The app's navigation, grouped. The sidebar renders it and the command
- * palette searches it, so a new page is added in one place.
+ * The sidebar: the everyday pages, then help and (for admins) one Settings
+ * entry. Every admin page lives under Settings with its own sub-navigation
+ * (SETTINGS_NAV), so the sidebar stays short as settings grow.
  */
 export const NAV: NavSection[] = [
   {
     title: "Work",
     items: [
-      { to: "/", label: "Repos", icon: "repos", keywords: "home repositories" },
+      { to: "/", label: "Overview", icon: "repos", keywords: "home repos repositories dashboard activity" },
       { to: "/changes", label: "Changes", icon: "changes", keywords: "pull requests merge requests pr mr review inbox" },
       { to: "/pipelines", label: "Pipelines", icon: "pipelines", keywords: "runs builds" },
       { to: "/jobs", label: "Jobs", icon: "jobs", keywords: "running queued failed" },
       { to: "/environments", label: "Environments", icon: "environments", keywords: "deployments dev staging prod board" },
+      { to: "/runners", label: "Runners", icon: "runners", keywords: "agents executors capacity queue" },
     ],
   },
   {
-    title: "Infrastructure",
-    items: [{ to: "/runners", label: "Runners", icon: "runners", keywords: "agents executors" }],
-  },
-  {
-    title: "Learn",
+    title: "Help",
     items: [
-      { to: "/templates", label: "Template catalog", icon: "recipes", keywords: "include reuse shared versioned inputs" },
-      { to: "/recipes", label: "Recipes", icon: "recipes", keywords: "examples templates" },
-      { to: "/docs", label: "Docs", icon: "docs", keywords: "help guide" },
+      { to: "/docs", label: "Docs", icon: "docs", keywords: "help guide templates recipes examples", match: ["/templates", "/recipes"] },
     ],
   },
   {
     title: "Admin",
     adminOnly: true,
     items: [
-      { to: "/admin/environments", label: "Environments & branches", icon: "sliders", keywords: "registry aliases branch rules" },
-      { to: "/admin/notifications", label: "Notifications", icon: "bell", keywords: "slack email approval alert" },
-      { to: "/admin/approver-groups", label: "Approver groups", icon: "shield", keywords: "release managers approval group" },
-      { to: "/admin/merge-rules", label: "Merge rules", icon: "changes", keywords: "merge gate pull request approvals branch protection code review freeze" },
-      { to: "/admin/service-accounts", label: "Service accounts", icon: "key", keywords: "robot bot automation token" },
-      { to: "/admin/runner-tokens", label: "Runner tokens", icon: "key", keywords: "register runner" },
-      { to: "/admin/sso", label: "Sign-in & identity", icon: "lock", keywords: "sso login oidc okta keycloak ldap active directory groups roles session google microsoft github" },
-      { to: "/admin/audit", label: "Audit log", icon: "audit", keywords: "history who" },
-      { to: "/admin/about", label: "About & maintenance", icon: "sliders", keywords: "version upgrade maintenance mode migrations" },
-      { to: "/tokens#policy", label: "API token policy", icon: "shield", keywords: "expiry" },
+      { to: "/admin", label: "Settings", icon: "sliders", keywords: "admin configuration" },
     ],
   },
 ];
+
+/** Settings sub-navigation, grouped. Each entry is also a command-palette target. */
+export const SETTINGS_NAV: NavSection[] = [
+  {
+    title: "Delivery",
+    adminOnly: true,
+    items: [
+      { to: "/admin/environments", label: "Environments & branches", icon: "environments", keywords: "registry aliases branch rules" },
+      { to: "/admin/merge-rules", label: "Merge rules", icon: "changes", keywords: "merge gate pull request approvals branch protection code review freeze" },
+      { to: "/admin/approver-groups", label: "Approver groups", icon: "shield", keywords: "release managers approval group" },
+      { to: "/admin/notifications", label: "Notifications", icon: "bell", keywords: "slack email approval alert smtp" },
+    ],
+  },
+  {
+    title: "Access",
+    adminOnly: true,
+    items: [
+      { to: "/admin/sso", label: "Sign-in & identity", icon: "lock", keywords: "sso login oidc okta keycloak ldap active directory groups roles session google microsoft github" },
+      { to: "/admin/service-accounts", label: "Service accounts", icon: "key", keywords: "robot bot automation token" },
+      { to: "/admin/runner-tokens", label: "Runner tokens", icon: "key", keywords: "register runner" },
+      { to: "/tokens#policy", label: "API token policy", icon: "shield", keywords: "expiry personal access token" },
+    ],
+  },
+  {
+    title: "System",
+    adminOnly: true,
+    items: [
+      { to: "/admin/about", label: "About & maintenance", icon: "sliders", keywords: "version upgrade maintenance mode migrations webhook health" },
+      { to: "/admin/audit", label: "Audit log", icon: "audit", keywords: "history who" },
+    ],
+  },
+];
+
+/** The first settings page, where /admin lands. */
+export const SETTINGS_HOME = "/admin/environments";
+
+/** Docs, template catalog and recipes share one tab strip. */
+export const DOCS_TABS: NavItem[] = [
+  { to: "/docs", label: "Guides", icon: "docs" },
+  { to: "/templates", label: "Template catalog", icon: "recipes", keywords: "include reuse shared versioned inputs" },
+  { to: "/recipes", label: "Recipes", icon: "recipes", keywords: "examples templates" },
+];
+
+/** Whether a nav item is the current page (its own path or one of its match prefixes). */
+export function navActive(item: NavItem, pathname: string): boolean {
+  const path = item.to.split("#")[0];
+  const under = (p: string) => (p === "/" ? pathname === "/" : pathname === p || pathname.startsWith(p + "/"));
+  return under(path) || (item.match ?? []).some(under);
+}
 
 /** Pages reachable from the user menu / palette but not the sidebar. */
 export const EXTRA_PAGES: NavItem[] = [
@@ -91,9 +129,9 @@ export function crumbsFor(pathname: string, search: string): Crumb[] {
   const [a, b, c] = parts;
   switch (a) {
     case undefined:
-      return [{ label: "Repos" }];
+      return [{ label: "Overview" }];
     case "repos": {
-      if (b === "new") return [{ label: "Repos", to: "/" }, { label: "Add repository" }];
+      if (b === "new") return [{ label: "Overview", to: "/" }, { label: "Add repository" }];
       const repoTo = `/repos/${encodeURIComponent(b ?? "")}`;
       const sub: Record<string, string> = {
         settings: "Settings",
@@ -104,8 +142,8 @@ export function crumbsFor(pathname: string, search: string): Crumb[] {
         "merge-rules": "Merge rules",
       };
       return c
-        ? [{ label: "Repos", to: "/" }, { label: b, to: repoTo }, { label: sub[c] ?? c }]
-        : [{ label: "Repos", to: "/" }, { label: b }];
+        ? [{ label: b, to: repoTo }, { label: sub[c] ?? c }]
+        : [{ label: b }];
     }
     case "pipelines":
       return b ? [{ label: "Pipelines", to: "/pipelines" }, { label: `#${b}` }] : [{ label: "Pipelines" }];
@@ -119,19 +157,21 @@ export function crumbsFor(pathname: string, search: string): Crumb[] {
         : [{ label: "Jobs", to: "/jobs" }, { label: `Job ${b}` }];
     }
     case "admin":
-      return [{ label: "Admin" }, { label: ADMIN_TITLES[b ?? ""] ?? b ?? "" }];
+      return b ? [{ label: "Settings", to: "/admin" }, { label: ADMIN_TITLES[b] ?? b }] : [{ label: "Settings" }];
     case "tokens":
       return [{ label: "API tokens" }];
     case "account":
       return [{ label: "Linked accounts" }];
     case "templates":
-      return [{ label: "Template catalog" }];
+      return [{ label: "Docs", to: "/docs" }, { label: "Template catalog" }];
     case "new":
       return [{ label: "Run pipeline" }];
     case "docs":
     case "recipes": {
-      const title = a === "docs" ? "Docs" : "Recipes";
-      return b ? [{ label: title, to: `/${a}` }, { label: b }] : [{ label: title }];
+      if (a === "docs") return b ? [{ label: "Docs", to: "/docs" }, { label: b }] : [{ label: "Docs" }];
+      return b
+        ? [{ label: "Docs", to: "/docs" }, { label: "Recipes", to: "/recipes" }, { label: b }]
+        : [{ label: "Docs", to: "/docs" }, { label: "Recipes" }];
     }
     default:
       return [{ label: a.charAt(0).toUpperCase() + a.slice(1) }];

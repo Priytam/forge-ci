@@ -1,5 +1,7 @@
 import type { ReactNode } from "react";
-import { BrowserRouter, Route, Routes, useLocation } from "react-router-dom";
+import SettingsLayout from "./components/SettingsLayout";
+import { SETTINGS_HOME } from "./components/nav";
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import Repos from "./pages/Repos";
 import PipelineList from "./pages/PipelineList";
 import PipelineDetail from "./pages/PipelineDetail";
@@ -68,15 +70,18 @@ export default function App() {
           <Route path="/recipes" element={<Recipes />} />
           <Route path="/recipes/:slug" element={<Recipes />} />
           <Route path="/login" element={<Login />} />
-          <Route path="/admin/sso" element={<AdminSso />} />
-          <Route path="/admin/environments" element={<AdminEnvironments />} />
-          <Route path="/admin/notifications" element={<AdminNotifications />} />
-          <Route path="/admin/approver-groups" element={<AdminApproverGroups />} />
-          <Route path="/admin/merge-rules" element={<AdminMergeRules />} />
-          <Route path="/admin/service-accounts" element={<AdminServiceAccounts />} />
-          <Route path="/admin/audit" element={<AdminAudit />} />
-          <Route path="/admin/about" element={<AdminAbout />} />
-          <Route path="/admin/runner-tokens" element={<AdminRunnerTokens />} />
+          <Route path="/admin" element={<SettingsLayout />}>
+            <Route index element={<Navigate to={SETTINGS_HOME} replace />} />
+            <Route path="sso" element={<AdminSso />} />
+            <Route path="environments" element={<AdminEnvironments />} />
+            <Route path="notifications" element={<AdminNotifications />} />
+            <Route path="approver-groups" element={<AdminApproverGroups />} />
+            <Route path="merge-rules" element={<AdminMergeRules />} />
+            <Route path="service-accounts" element={<AdminServiceAccounts />} />
+            <Route path="audit" element={<AdminAudit />} />
+            <Route path="about" element={<AdminAbout />} />
+            <Route path="runner-tokens" element={<AdminRunnerTokens />} />
+          </Route>
           <Route path="/changes" element={<Changes />} />
           <Route path="/changes/:id" element={<ChangeDetail />} />
           <Route path="/pipelines" element={<AllPipelines />} />

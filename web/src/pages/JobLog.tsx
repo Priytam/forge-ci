@@ -273,13 +273,7 @@ export default function JobLog() {
 
   return (
     <div>
-      {repo ? (
-        <RepoHeader repo={repo} tab="pipelines" />
-      ) : (
-        <div className="breadcrumbs">
-          <Link to="/">Repos</Link>
-        </div>
-      )}
+      {repo && <RepoHeader repo={repo} tab="pipelines" />}
       {pipelineId && (
         <Link to={`/pipelines/${pipelineId}`} className="back-link">
           ← Pipeline #{pipelineId}
