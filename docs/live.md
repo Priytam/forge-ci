@@ -260,7 +260,14 @@ Healthy 3/3 on the page at 1.5 s. `payments/fraud-scorer` shows Degraded
 repo with Kustomize): every app *Synced* at the branch tip; `kubectl scale
 deploy/cart-api --replicas=3` shows *Out of sync* on the page **643 ms**
 later, and the Diff shows exactly `replicas: 3` against `replicas: 2`; a pod's
-logs stream to the Logs tab through the agent.
+logs stream to the Logs tab through the agent. With write access
+(`agent-sync.yaml`, `--allow-sync`): a Sync without Force is refused for
+the Deployment — `conflict with "kubectl" with subresource "scale":
+.spec.replicas` — while the ConfigMap, Service and Ingress come back
+unchanged; with Force the Deployment is configured and the app is *Synced*.
+A sync to the repo's first commit rolls cart-api back to image `v1` (the
+Diff then shows `echo-service:v1` against `:6c5b7c18` at the tip), and a
+sync to the tip brings it forward again.
 
 **Cloud Run:** an unchanged fleet costs one list call per region per
 reconcile (720/day per region at the default period, shared by every

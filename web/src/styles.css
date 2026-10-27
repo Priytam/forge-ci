@@ -8117,8 +8117,11 @@ textarea {
 .lv-op-votes { margin: 8px 0 0; padding-left: 18px; font-size: var(--fs-sm); }
 .lv-op-msg { margin-top: 10px; font-size: var(--fs-sm); overflow-wrap: anywhere; }
 .lv-op-msg-bad { color: var(--danger-fg); }
-.lv-op-table { width: 100%; margin-top: 8px; border-collapse: collapse; font-size: var(--fs-sm); }
-.lv-op-table td { padding: 4px 6px; border-top: 1px solid var(--border); vertical-align: top; }
+.lv-op-table { width: 100%; margin-top: 8px; border-collapse: collapse; table-layout: fixed; font-size: var(--fs-sm); }
+.lv-op-table td:nth-child(1) { width: 110px; }
+.lv-op-table td:nth-child(3) { width: 120px; }
+.lv-op-table td:nth-child(4) { width: 45%; }
+.lv-op-table td { padding: 4px 6px; border-top: 1px solid var(--border); vertical-align: top; white-space: normal; overflow-wrap: anywhere; }
 .lv-op-err { color: var(--danger-fg); overflow-wrap: anywhere; }
 
 .lv-history { list-style: none; margin: 0; padding: 0; }
