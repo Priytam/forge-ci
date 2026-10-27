@@ -1,3 +1,4 @@
+import Skeleton from "../components/ui/Skeleton";
 import { useEffect, useState, type FormEvent } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { getAuthProviders, ldapLogin, loginUrl, type AuthProviderInfo, type AuthProviders } from "../api";
@@ -78,7 +79,7 @@ export default function Login() {
         <p className="muted login-sub">Sign in to continue</p>
 
         {error && <div className="error-banner">{error}</div>}
-        {!data && !error && <div className="muted">Loading…</div>}
+        {!data && !error && <Skeleton rows={1} />}
 
         {buttons.length > 0 && (
           <div className="login-buttons">

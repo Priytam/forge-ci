@@ -1,3 +1,4 @@
+import Skeleton from "../components/ui/Skeleton";
 import {
   useCallback,
   useEffect,
@@ -19,7 +20,6 @@ import {
   type Pipeline,
 } from "../api";
 import { usePoll } from "../hooks/usePoll";
-import StatusBadge from "../components/StatusBadge";
 import { StatusIcon } from "../components/StageDots";
 import ConfigChip from "../components/ConfigChip";
 import Avatar, { displayName } from "../components/Avatar";
@@ -41,6 +41,14 @@ interface Stage {
 interface Edge {
   key: string;
   d: string;
+}
+
+/** A job's run time for its pill: "42s", "3m 05s", or "1h 02m"; live while running. */
+function jobTook(start: string, end: string | null): string {
+  const s = Math.max(0, Math.round(((end ? new Date(end).getTime() : Date.now()) - new Date(start).getTime()) / 1000));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
+  return `${Math.floor(s / 3600)}h ${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}m`;
 }
 
 function groupStages(jobs: Job[]): Stage[] {
@@ -280,7 +288,7 @@ export default function PipelineDetail() {
     return <div className="error-banner">Failed to load pipeline: {error}</div>;
   }
   if (loading && !data) {
-    return <div className="muted">Loading pipeline…</div>;
+    return <Skeleton />;
   }
   if (!data) return null;
 
@@ -347,7 +355,6 @@ export default function PipelineDetail() {
           </div>
         </div>
         <div className="pipeline-head-side">
-          <StatusBadge status={pipeline.status} />
           <PipelineActions
             pipelineId={pipeline.id}
             repo={pipeline.repo}
@@ -456,6 +463,9 @@ export default function PipelineDetail() {
                         status={allowedFail ? "warning" : job.status}
                       />
                       <span className="job-pill-name">{job.name}</span>
+                      {job.started_at && (
+                        <span className="job-pill-time">{jobTook(job.started_at, job.finished_at)}</span>
+                      )}
                       {job.allow_failure && (
                         <span className="allowfail-tag" title="allowed to fail">
                           AF

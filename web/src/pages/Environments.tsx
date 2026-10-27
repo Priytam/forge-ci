@@ -1,3 +1,4 @@
+import Skeleton from "../components/ui/Skeleton";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
@@ -284,7 +285,7 @@ function EnvHistory({
     }
   };
 
-  if (loading) return <div className="muted">Loading history…</div>;
+  if (loading) return <Skeleton />;
 
   return (
     <div>
@@ -432,7 +433,7 @@ export default function Environments() {
       <RepoHeader repo={repo} tab="environments" />
 
       {error && <div className="error-banner">Failed to load environments: {error}</div>}
-      {loading && !envs && <div className="muted">Loading…</div>}
+      {loading && !envs && <Skeleton />}
       {envs && envs.length === 0 && (
         <div className="empty card">
           No environments yet — a job with an <code>environment:</code> deploys

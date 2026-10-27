@@ -1,3 +1,4 @@
+import Skeleton from "../components/ui/Skeleton";
 import { useCallback, useEffect, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { editChange, getChange, relativeTime, shortSha, type ChangePage } from "../api";
@@ -46,7 +47,7 @@ export default function ChangeDetail() {
   useChangeStream(load, id ? Number(id) : undefined);
 
   if (error) return <div className="error-banner">{error}</div>;
-  if (!page) return <div className="muted">Loading…</div>;
+  if (!page) return <Skeleton />;
   const { change, capabilities: caps, gate, actions, queue } = page;
 
   const save = async (patch: Parameters<typeof editChange>[1], done: string) => {

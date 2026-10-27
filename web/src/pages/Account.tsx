@@ -1,3 +1,4 @@
+import Skeleton from "../components/ui/Skeleton";
 import { useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { linkGitHubURL, listHostLinks, relativeTime, unlinkHost, type HostLink } from "../api";
@@ -37,7 +38,7 @@ export default function Account() {
       <div className="card settings-form">
         <h2>GitHub</h2>
         {links === null ? (
-          <p className="muted">Loading…</p>
+          <Skeleton />
         ) : github ? (
           <p>
             Linked as <b className="mono">{github.login}</b> <span className="muted">since {relativeTime(github.created_at)}</span>{" "}

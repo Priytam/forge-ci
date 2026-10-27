@@ -1,3 +1,4 @@
+import Skeleton from "../components/ui/Skeleton";
 import { useCallback, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 import {
@@ -112,7 +113,7 @@ export default function TestHistory() {
       {error && (
         <div className="error-banner">Failed to load test history: {error}</div>
       )}
-      {loading && !cases && <div className="muted">Loading…</div>}
+      {loading && !cases && <Skeleton />}
 
       {cases && cases.length === 0 && (
         <div className="empty card">

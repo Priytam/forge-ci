@@ -1,3 +1,4 @@
+import Skeleton from "./ui/Skeleton";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   getChangeDiff,
@@ -387,7 +388,7 @@ export default function DiffView({ page, onChanged }: { page: ChangePage; onChan
       </div>
       {error && <div className="error-banner">{error}</div>}
       {!status ? (
-        <p className="muted">Loading…</p>
+        <Skeleton rows={4} />
       ) : status.status === "unsupported" ? (
         <div className="cr-empty">Diffs are not available for this host yet.</div>
       ) : status.status === "pending" ? (
@@ -404,7 +405,7 @@ export default function DiffView({ page, onChanged }: { page: ChangePage; onChan
           </button>
         </div>
       ) : !manifest ? (
-        <p className="muted">Loading…</p>
+        <Skeleton rows={4} />
       ) : (
         <div className="cr-files">
           <nav className="cr-filelist" aria-label="Files">

@@ -1,3 +1,4 @@
+import Skeleton from "../components/ui/Skeleton";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import {
@@ -485,7 +486,7 @@ export default function AdminSso() {
       </div>
 
       {error && <div className="error-banner">{error}</div>}
-      {loading && !data && <div className="muted">Loading…</div>}
+      {loading && !data && <Skeleton />}
 
       {data &&
         PROVIDERS.map((meta) => (

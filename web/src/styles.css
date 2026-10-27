@@ -7343,3 +7343,132 @@ textarea {
 .docs-tabs {
   margin-bottom: 16px;
 }
+/* Saved views live at the end of the filter bar instead of their own row. */
+.filter-views-inline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex-wrap: wrap;
+}
+.filter-views-inline select {
+  max-width: 220px;
+}
+/* Quiet button for secondary actions (Clear filters, Cancel). */
+.btn.btn-ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-muted);
+}
+.btn.btn-ghost:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.btn.btn-danger {
+  color: var(--danger-fg);
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+}
+.btn.btn-danger:hover {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+/* Loading placeholders: shimmer bars instead of "Loading…" text. */
+.skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 4px 0;
+}
+.skeleton-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  height: 40px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--border);
+}
+.skeleton-row:last-child {
+  border-bottom: none;
+}
+.skeleton-bar {
+  display: block;
+  height: 10px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--surface-2) 25%, color-mix(in srgb, var(--text) 9%, var(--surface-2)) 37%, var(--surface-2) 63%);
+  background-size: 400% 100%;
+  animation: skeleton-shimmer 1.4s ease infinite;
+}
+.skeleton-bar-sm {
+  width: 64px;
+  flex: none;
+}
+.skeleton-bar-xs {
+  width: 48px;
+  flex: none;
+  margin-left: auto;
+}
+@keyframes skeleton-shimmer {
+  0% { background-position: 100% 50%; }
+  100% { background-position: 0 50%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-bar { animation: none; }
+}
+/* Run time on each job in the pipeline graph. */
+.job-pill-time {
+  margin-left: auto;
+  padding-left: 8px;
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-subtle);
+}
+/* Phones: the sidebar becomes a slide-in menu instead of an icon strip. */
+.menu-trigger,
+.sidebar-backdrop {
+  display: none;
+}
+@media (max-width: 640px) {
+  .shell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    width: 248px;
+    height: 100dvh;
+    z-index: 60;
+    transform: translateX(-100%);
+    transition: transform 180ms ease;
+  }
+  .shell-menu-open .sidebar {
+    transform: none;
+    box-shadow: 0 0 40px rgb(0 0 0 / 0.35);
+  }
+  .shell .nav-label,
+  .shell .nav-section-title,
+  .shell .sidebar-brand-name {
+    display: revert;
+  }
+  .shell .nav-item {
+    justify-content: flex-start;
+    padding: 0 8px;
+  }
+  .sidebar-foot .nav-button:last-child {
+    display: none;
+  }
+  .menu-trigger {
+    display: inline-flex;
+  }
+  .sidebar-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 55;
+    background: rgb(0 0 0 / 0.4);
+  }
+  .topbar {
+    padding: 0 12px;
+  }
+}
+@media (max-width: 640px) and (prefers-reduced-motion: reduce) {
+  .sidebar { transition: none; }
+}

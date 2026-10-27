@@ -1,3 +1,4 @@
+import Skeleton from "./ui/Skeleton";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
@@ -295,28 +296,28 @@ export default function PipelineBrowser({ fixedRepo }: { fixedRepo?: string }) {
           ))}
         </div>
         {anyFilter && (
-          <button type="button" className="btn" onClick={() => setFilter({})}>
+          <button type="button" className="btn btn-ghost" onClick={() => setFilter({})}>
             Clear filters
           </button>
         )}
-      </div>
       {!fixedRepo && (
-        <div className="filter-bar filter-views">
-          <label className="field">
-            <span>Saved view</span>
-            <select value={viewId || ""} onChange={(e) => openView(Number(e.target.value))}>
-              <option value="">— none —</option>
-              {views.map((v) => (
-                <option key={v.id} value={v.id}>
-                  {v.name}
-                  {v.shared ? " (shared)" : ""}
-                  {!mine(v) ? ` — ${v.owner || "anonymous"}` : ""}
-                </option>
-              ))}
-            </select>
-          </label>
+        <div className="filter-views-inline">
+          <select
+            aria-label="Saved view"
+            value={viewId || ""}
+            onChange={(e) => openView(Number(e.target.value))}
+          >
+            <option value="">{views.length ? "Saved views…" : "No saved views"}</option>
+            {views.map((v) => (
+              <option key={v.id} value={v.id}>
+                {v.name}
+                {v.shared ? " (shared)" : ""}
+                {!mine(v) ? ` — ${v.owner || "anonymous"}` : ""}
+              </option>
+            ))}
+          </select>
           <button type="button" className="btn" onClick={() => void saveAsNew()}>
-            Save as view…
+            Save view
           </button>
           {current && mine(current) && (
             <>
@@ -337,9 +338,10 @@ export default function PipelineBrowser({ fixedRepo }: { fixedRepo?: string }) {
         </div>
       )}
       </div>
+      </div>
 
       {error && <div className="error-banner">Failed to load pipelines: {error}</div>}
-      {loading && !data && <div className="muted">Loading pipelines…</div>}
+      {loading && !data && <Skeleton />}
       {data && data.items.length === 0 && (
         <div className="empty card">
           {anyFilter ? "No pipelines match these filters." : "No pipelines yet."}

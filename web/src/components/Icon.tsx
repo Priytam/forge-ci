@@ -24,6 +24,7 @@ const PATHS: Record<string, string> = {
   bell: "M4 11V7a4 4 0 0 1 8 0v4l1.5 1.5h-11L4 11ZM6.5 13.5a1.5 1.5 0 0 0 3 0",
   more: "M8 3.5v.01M8 8v.01M8 12.5v.01",
   close: "M4 4l8 8M12 4l-8 8",
+  menu: "M2.5 4.5h11M2.5 8h11M2.5 11.5h11",
   copy: "M5.5 5.5h7v7h-7zM3.5 10.5v-7h7",
   check: "M3.5 8.5 6.5 11.5 12.5 4.5",
   chevron: "M4 6l4 4 4-4",

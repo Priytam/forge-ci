@@ -1,3 +1,4 @@
+import Skeleton from "../components/ui/Skeleton";
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
@@ -539,7 +540,7 @@ function WebhooksSection({ repo }: { repo: string }) {
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
   }, [repo]);
   if (error) return <div className="error-banner">{error}</div>;
-  if (!health) return <div className="muted">Loading…</div>;
+  if (!health) return <Skeleton />;
   const failing = health.rejected + health.errors;
   return (
     <div>

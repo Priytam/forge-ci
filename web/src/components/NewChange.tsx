@@ -1,3 +1,4 @@
+import Skeleton from "./ui/Skeleton";
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { createChange, getProviderCapabilities, listRegistry, type RegisteredRepo } from "../api";
@@ -54,7 +55,7 @@ export default function NewChange({ repo, onClose }: { repo?: string; onClose: (
       subtitle="Propose merging a branch, on a repo whose host has no pull requests"
       onClose={onClose}
     >
-      {repos === null && !error && <p className="muted">Loading…</p>}
+      {repos === null && !error && <Skeleton rows={2} />}
       {repos !== null && repos.length === 0 && (
         <p className="muted">
           {repo ? `${repo}'s host has its own pull requests: open the change there and it appears here by itself.` : ""}

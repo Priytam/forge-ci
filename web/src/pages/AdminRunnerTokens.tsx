@@ -1,3 +1,4 @@
+import Skeleton from "../components/ui/Skeleton";
 import { useCallback, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import {
@@ -181,7 +182,7 @@ export default function AdminRunnerTokens() {
 
       {createError && <div className="error-banner">{createError}</div>}
       {error && <div className="error-banner">Failed to load tokens: {error}</div>}
-      {loading && !tokens && <div className="muted">Loading…</div>}
+      {loading && !tokens && <Skeleton />}
 
       {tokens && tokens.length === 0 && (
         <div className="empty card">No runner tokens yet.</div>

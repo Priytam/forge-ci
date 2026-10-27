@@ -139,11 +139,15 @@ function MiniChart({
   const labelOrder = endLabelYs
     .map((_, i) => i)
     .sort((a, b) => endLabelYs[a] - endLabelYs[b]);
+  // The plot is stretched to its box, so a readable gap (~14px) is a different
+  // number of viewBox units on a short chart than on a tall one.
+  const plotPx = bodyRef.current?.clientHeight ?? 140;
+  const labelGap = Math.max(10, (14 / plotPx) * 100);
   for (let k = 1; k < labelOrder.length; k++) {
     const prev = labelOrder[k - 1];
     const cur = labelOrder[k];
-    if (endLabelYs[cur] - endLabelYs[prev] < 14) {
-      endLabelYs[cur] = endLabelYs[prev] + 14;
+    if (endLabelYs[cur] - endLabelYs[prev] < labelGap) {
+      endLabelYs[cur] = endLabelYs[prev] + labelGap;
     }
   }
   const labelOverflow = Math.max(0, Math.max(...endLabelYs) - 98);
@@ -332,13 +336,16 @@ export default function Dashboard() {
 
   return (
     <div className="dash">
-      <div className="dash-range">
-        <RangePicker value={range} onChange={setRange} />
-        {runsDelta && (
-          <span className="muted">
-            {data.totals.pipelines} pipeline{data.totals.pipelines === 1 ? "" : "s"} in the last {rangeLabel} · {runsDelta.text}
-          </span>
-        )}
+      <div className="page-head dash-head">
+        <h1>Overview</h1>
+        <div className="page-head-actions">
+          {runsDelta && (
+            <span className="muted">
+              {data.totals.pipelines} pipeline{data.totals.pipelines === 1 ? "" : "s"} in the last {rangeLabel} · {runsDelta.text}
+            </span>
+          )}
+          <RangePicker value={range} onChange={setRange} />
+        </div>
       </div>
       <div className="stat-grid">
         <StatTile

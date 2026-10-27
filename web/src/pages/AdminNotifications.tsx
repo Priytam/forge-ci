@@ -1,3 +1,4 @@
+import Skeleton from "../components/ui/Skeleton";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import {
   createNotificationRoute,
@@ -238,7 +239,7 @@ export default function AdminNotifications() {
   }, []);
 
   if (isAdmin === false) return <div className="error-banner">Notifications are managed by admins.</div>;
-  if (!cfg) return msg ? <div className="error-banner">{msg.text}</div> : <div className="muted">Loading…</div>;
+  if (!cfg) return msg ? <div className="error-banner">{msg.text}</div> : <Skeleton />;
 
   const set = (p: Partial<NotifySettings>) => setCfg({ ...cfg, ...p });
 

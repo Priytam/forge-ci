@@ -1,3 +1,4 @@
+import Skeleton from "../components/ui/Skeleton";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import {
   createApiToken,
@@ -353,7 +354,7 @@ export default function ApiTokens() {
 
       {actionError && <div className="error-banner">{actionError}</div>}
       {error && <div className="error-banner">Failed to load tokens: {error}</div>}
-      {loading && !tokens && <div className="muted">Loading…</div>}
+      {loading && !tokens && <Skeleton />}
       {tokens && tokens.length === 0 && signedIn && (
         <div className="empty card">No tokens yet.</div>
       )}

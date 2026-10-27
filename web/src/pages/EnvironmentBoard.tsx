@@ -1,3 +1,4 @@
+import Skeleton from "../components/ui/Skeleton";
 import { useCallback, useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import {
@@ -136,7 +137,7 @@ export default function EnvironmentBoard() {
       </div>
 
       {error && <div className="error-banner">Failed to load: {error}</div>}
-      {loading && !data && <div className="muted">Loading…</div>}
+      {loading && !data && <Skeleton />}
       {data && data.rows.length === 0 && (
         <div className="empty card">
           {q || env || attention

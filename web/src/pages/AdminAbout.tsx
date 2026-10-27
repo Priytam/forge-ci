@@ -1,3 +1,4 @@
+import Skeleton from "../components/ui/Skeleton";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import { getAbout, getCodeReviewStats, getFailingWebhooks, getIsAdmin, relativeTime, setMaintenance, type AboutInfo, type CodeReviewStats, type WebhookHealth } from "../api";
@@ -25,7 +26,7 @@ export default function AdminAbout() {
     reload();
   }, [reload]);
   if (isAdmin === false) return <div className="error-banner">This page is for admins.</div>;
-  if (!info) return msg ? <div className="error-banner">{msg.text}</div> : <div className="muted">Loading…</div>;
+  if (!info) return msg ? <div className="error-banner">{msg.text}</div> : <Skeleton />;
 
   const toggle = async (e: FormEvent, on: boolean) => {
     e.preventDefault();

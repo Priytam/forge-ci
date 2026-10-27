@@ -1,3 +1,4 @@
+import Skeleton from "../components/ui/Skeleton";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import {
@@ -244,7 +245,7 @@ export default function Repos() {
       )}
 
       {error && <div className="error-banner">Failed to load repos: {error}</div>}
-      {loading && !data && <div className="muted">Loading repositories…</div>}
+      {loading && !data && <Skeleton />}
 
       {repos && repos.length === 0 && !searching && page === 0 && (
         <div className="empty card">

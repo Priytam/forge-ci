@@ -1,3 +1,4 @@
+import Skeleton from "../components/ui/Skeleton";
 import { useEffect, useState } from "react";
 import {
   getEnvRegistry,
@@ -70,7 +71,7 @@ export default function AdminEnvironments() {
   if (isAdmin === false) {
     return <div className="error-banner">Environments are managed by admins.</div>;
   }
-  if (!rows) return <div className="muted">Loading…</div>;
+  if (!rows) return <Skeleton />;
 
   const update = (i: number, patch: Partial<Row>) =>
     setRows(rows.map((r, j) => (j === i ? { ...r, ...patch } : r)));

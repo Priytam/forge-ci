@@ -1,3 +1,4 @@
+import Skeleton from "../components/ui/Skeleton";
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, listAuditLog, relativeTime, type AuditEntry } from "../api";
 
@@ -140,7 +141,7 @@ export default function AdminAudit() {
       </div>
 
       {error && <div className="error-banner">{error}</div>}
-      {loading && <div className="muted">Loading…</div>}
+      {loading && <Skeleton />}
 
       {!loading && (
         <div className="card table-card">

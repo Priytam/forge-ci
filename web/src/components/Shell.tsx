@@ -32,6 +32,7 @@ export default function Shell({ children }: { children: ReactNode }) {
   const [isAdmin, setIsAdmin] = useState(false);
   const [collapsed, setCollapsed] = useState(readCollapsed);
   const [palette, setPalette] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   const [theme, setTheme] = useTheme();
 
   useEffect(() => {
@@ -57,11 +58,15 @@ export default function Shell({ children }: { children: ReactNode }) {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // The phone menu closes itself once you pick a page.
+  useEffect(() => setMenuOpen(false), [location.pathname]);
+
   const crumbs = crumbsFor(location.pathname, location.search);
   const isMac = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
 
   return (
-    <div className={collapsed ? "shell shell-collapsed" : "shell"}>
+    <div className={["shell", collapsed && "shell-collapsed", menuOpen && "shell-menu-open"].filter(Boolean).join(" ")}>
+      {menuOpen && <div className="sidebar-backdrop" onClick={() => setMenuOpen(false)} aria-hidden="true" />}
       <aside className="sidebar" aria-label="Main navigation">
         <Link to="/" className="sidebar-brand">
           <span className="brand-logo">F</span>
@@ -110,6 +115,15 @@ export default function Shell({ children }: { children: ReactNode }) {
 
       <div className="main-col">
         <header className="topbar">
+          <button
+            type="button"
+            className="btn btn-icon menu-trigger"
+            onClick={() => setMenuOpen((o) => !o)}
+            aria-label="Open menu"
+            aria-expanded={menuOpen}
+          >
+            <Icon name="menu" />
+          </button>
           <nav className="topbar-crumbs" aria-label="Breadcrumb">
             {crumbs.map((c, i) => (
               <span key={i} style={{ display: "contents" }}>

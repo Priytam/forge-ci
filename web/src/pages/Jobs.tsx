@@ -1,3 +1,4 @@
+import Skeleton from "../components/ui/Skeleton";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
@@ -17,13 +18,6 @@ import EnvTabs from "../components/EnvTabs";
 import { STATUS_LABEL } from "../components/StatusBadge";
 
 const PAGE = 50;
-
-/** Quick presets for the questions people ask most. */
-const PRESETS: { label: string; statuses: string[] }[] = [
-  { label: "Active", statuses: ["running", "pending"] },
-  { label: "Waiting", statuses: ["blocked"] },
-  { label: "Failed", statuses: ["failed"] },
-];
 
 function duration(start: string | null, end: string | null): string {
   if (!start) return "";
@@ -154,21 +148,8 @@ export default function Jobs() {
               </button>
             ))}
           </div>
-        </div>
-        <div className="filter-bar filter-views">
-          <span className="muted">Quick:</span>
-          {PRESETS.map((p) => (
-            <button
-              key={p.label}
-              type="button"
-              className="btn"
-              onClick={() => patch({ statuses: p.statuses })}
-            >
-              {p.label}
-            </button>
-          ))}
           {anyFilter && (
-            <button type="button" className="btn" onClick={() => setFilter({})}>
+            <button type="button" className="btn btn-ghost" onClick={() => setFilter({})}>
               Clear filters
             </button>
           )}
@@ -176,7 +157,7 @@ export default function Jobs() {
       </div>
 
       {error && <div className="error-banner">Failed to load jobs: {error}</div>}
-      {loading && !data && <div className="muted">Loading jobs…</div>}
+      {loading && !data && <Skeleton />}
       {data && data.items.length === 0 && (
         <div className="empty card">
           {anyFilter ? "No jobs match these filters." : "No jobs yet."}
@@ -187,12 +168,12 @@ export default function Jobs() {
           <table>
             <thead>
               <tr>
+                <th>Status</th>
                 <th>Job</th>
                 <th>Repo</th>
                 <th>Ref</th>
                 <th>Environment</th>
                 <th>Runner</th>
-                <th>Status</th>
                 <th>Duration</th>
                 <th>Created</th>
               </tr>
@@ -205,6 +186,10 @@ export default function Jobs() {
                   onClick={() => navigate(`/jobs/${j.id}?pipeline=${j.pipeline_id}`)}
                 >
                   <td>
+                    <StatusBadge status={j.manual && j.status === "blocked" ? "manual" : j.status} />
+                    {j.status_reason && <div className="status-reason">{j.status_reason}</div>}
+                  </td>
+                  <td>
                     <div>{j.name}</div>
                     <div className="muted mono">
                       #{j.pipeline_id} · {j.stage}
@@ -216,10 +201,6 @@ export default function Jobs() {
                   </td>
                   <td>{j.environment && <span className="env-tag">{j.environment}</span>}</td>
                   <td className="mono muted">{j.runner_id ?? ""}</td>
-                  <td>
-                    <StatusBadge status={j.manual && j.status === "blocked" ? "manual" : j.status} />
-                    {j.status_reason && <div className="status-reason">{j.status_reason}</div>}
-                  </td>
                   <td className="muted">{duration(j.started_at, j.finished_at)}</td>
                   <td className="muted">{relativeTime(j.created_at)}</td>
                 </tr>
