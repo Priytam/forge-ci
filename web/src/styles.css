@@ -8251,3 +8251,46 @@ textarea {
 .lv-dot-canary { background: var(--accent); }
 .lv-dot-stable { background: color-mix(in srgb, var(--success) 60%, var(--surface-2)); }
 .lv-rollout-status { margin-top: 8px; font-size: var(--fs-sm); overflow-wrap: anywhere; }
+
+/* Forge Live phase D: fleet and templates */
+.lv-fleet-wrap { padding: 0; overflow: auto; max-height: calc(100vh - 220px); }
+.lv-fleet { border-collapse: separate; border-spacing: 0; font-size: var(--fs-sm); min-width: 100%; }
+.lv-fleet th, .lv-fleet td { padding: 6px 10px; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
+.lv-fleet thead th { position: sticky; top: 0; z-index: 2; background: var(--surface); vertical-align: bottom; }
+.lv-fleet .lv-fleet-app { position: sticky; left: 0; z-index: 1; background: var(--surface); min-width: 200px; border-right: 1px solid var(--border); }
+.lv-fleet thead .lv-fleet-app { z-index: 3; }
+.lv-fleet-target { display: flex; align-items: center; gap: 6px; font-weight: 600; }
+.lv-fleet-env { font-weight: 400; font-size: var(--fs-xs); }
+.lv-fleet-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); }
+.lv-fleet-dot-stale { background: var(--text-subtle); }
+.lv-fleet-name { display: block; font-weight: 600; }
+.lv-fleet-sub { display: flex; gap: 8px; font-size: var(--fs-xs); }
+.lv-fleet-tmpl { color: var(--accent-fg, var(--accent)); }
+.lv-fleet-cell {
+  display: inline-flex; align-items: center; gap: 5px; padding: 3px 7px; border-radius: var(--radius);
+  border: 1px solid transparent; color: var(--text); text-decoration: none;
+}
+.lv-fleet-cell:hover { border-color: var(--border-strong); background: var(--surface-2); }
+.lv-fleet-degraded, .lv-fleet-missing { background: color-mix(in srgb, var(--danger) 7%, transparent); }
+.lv-fleet-skew { border-color: color-mix(in srgb, var(--warning) 60%, transparent); border-style: dashed; }
+.lv-fleet-img { font-size: var(--fs-xs); color: var(--text-muted); }
+.lv-fleet-pods { font-size: var(--fs-xs); }
+.lv-fleet-none { color: var(--text-subtle); padding-left: 10px; }
+.lv-templates-intro { max-width: 760px; margin: -6px 0 14px; font-size: var(--fs-sm); }
+.lv-template { margin-bottom: 12px; padding: 14px 16px; }
+.lv-template-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.lv-template-head h2 { margin: 0; font-size: var(--fs-md, 15px); }
+.lv-template-head .btn { margin-left: auto; }
+.lv-template-chips { display: inline-flex; gap: 6px; }
+.lv-template-sel { margin-top: 4px; font-size: var(--fs-sm); }
+.lv-template-targets { list-style: none; margin: 10px 0 0; padding: 0; }
+.lv-template-targets li { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 6px 0; border-top: 1px solid var(--border); font-size: var(--fs-sm); }
+.lv-template-target { font-weight: 600; min-width: 140px; }
+.lv-template-status { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; color: var(--text); }
+.lv-template-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.lv-field-wide { grid-column: 1 / -1; }
+.lv-template-help { margin: -4px 0 8px; font-size: var(--fs-sm); }
+.lv-template-pick { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; font-size: var(--fs-sm); }
+.lv-template-pick .check-row { display: flex; align-items: center; gap: 6px; padding: 2px 0; }
+.lv-template-on { margin-top: 10px; font-size: var(--fs-sm); }
+.lv-left { margin-right: auto; }

@@ -225,6 +225,71 @@ cluster / cloud                         Forge server                         bro
   namespace's orphans, dashed and tagged, followed live; their panels have
   Summary, Events and Live manifest. They are never listed as applications.
 
+## Canary rollouts, templates and the fleet (phase D)
+
+- **Canary rollouts, no controller in the cluster.** A `Rollout` in Git next
+  to the app (never applied) turns a sync that changes a Deployment's pod
+  template into a canary:
+
+  ```yaml
+  apiVersion: forge.dev/v1
+  kind: Rollout
+  metadata: {name: storefront}       # the Deployment it rolls out
+  spec:
+    steps: [{weight: 25}, {pause: {duration: 30s}}, {weight: 50}, {pause: {duration: 30s}}]
+    analysis:                         # in the background, every interval
+      interval: 5s
+      failureLimit: 2                 # failed rounds in a row that abort
+      health: {maxRestarts: 0}        # always on: a Degraded or restarted canary pod fails
+      http: {path: /healthz, port: 8080, successRate: 0.95}
+      prometheus: {address: http://prometheus:9090, query: 'rate(errors{deployment="{{canary}}"}[1m])', max: 0.05}
+  ```
+
+  The agent runs the new template as `<name>-canary` beside the stable
+  Deployment. Its pods carry `forge.dev/track: canary` and still match the
+  stable selector, so the app's Services send them traffic in proportion to
+  their pods. A weight of *w*% puts round(*n*·*w*/(100−*w*)) canary pods
+  beside *n* stable ones: at 25% of 4 that is one pod, about 20%, and the
+  page shows the real share. The agent walks the steps while the analysis
+  runs. HTTP checks go straight to the canary pods' IPs, which is why the
+  agent runs in the cluster. When every step passes, it **promotes**: the
+  stable Deployment rolls out the new template, then the canary goes. A
+  failed analysis **aborts**: the canary goes, the stable version keeps
+  serving untouched, and auto-sync waits for the next change. *Resume* (end
+  a `pause: {}`), *Promote to 100%* and *Abort* are operations of their own,
+  each in the history and the audit log. Abort also cleans up a canary left
+  behind when an agent restarts mid-rollout. A rollout keeps its operation
+  alive by heartbeat, so it can run longer than the 20-minute expiry. First
+  deploys, replica-only changes and **rollbacks** apply directly: an
+  emergency is not the time to go slowly. Canary objects are never compared
+  with Git or pruned. Blue-green and traffic routing through an ingress or
+  mesh are not built yet.
+- **Auto-sync follows what an app renders to, not the commit.** Each render
+  has a digest; auto-sync syncs when that changes and compares the syncs it
+  ran by it. A commit to another app in the same repo moves the revision,
+  changes nothing here, and does not retry a release that was aborted or
+  undo drift that self-heal is not set to undo.
+- **Renders see the whole tree** at the revision (extracted once and
+  cached): a Kustomize overlay per cluster over a shared `../../base` works.
+- **App templates** (*Applications → Templates*, admins) declare one
+  application on every target they match, by name or environment.
+  `{target}`, `{environment}` and `{name}` are filled in per target in the
+  path and namespace, usually as a Kustomize overlay per cluster. Agents ask
+  for their declared apps every 30 s and render them before anything of
+  them exists: every object shows as Missing, and the template's auto-sync
+  brings the app up, creating the namespace if asked. Each app gets the
+  template's sync policy once. A change made to one app by hand stands, and
+  a template edit only reaches apps nobody changed. A declared app joins
+  its objects by labels even when the agent's root selector would leave
+  them out. Deleting a template stops declaring the app: its resources stay
+  in the cluster.
+- **The fleet** (*Applications → Fleet*) lists every application by name,
+  one column per cluster or project, with health, sync, the image it runs
+  and ready pods. It filters by environment, template and name. A cell
+  whose image differs from what most of the fleet runs is outlined
+  (version skew), and each column says how many of its apps need
+  attention. Pages read it from Postgres, like every live view.
+
 ## Providers
 
 A provider implements `live.Provider` (`internal/live`): `Watch(ctx, sink)`
@@ -288,13 +353,13 @@ agent does (JSON + gzip). Apple M-series, Go 1.27.
 
 | | Budget | Measured |
 |---|---|---|
-| Heap at steady state | 150 MB | **81.3 MB** (852 B/object) |
-| Heap peak during start-up | 150 MB | **105 MB** (paged lists, 120 MiB soft limit) |
-| CPU at 200 pod updates/s | 0.2 vCPU | **0.08 vCPU** (including generating the updates) |
+| Heap at steady state | 150 MB | **82.2 MB** (862 B/object) |
+| Heap peak during start-up | 150 MB | **109 MB** (paged lists, 120 MiB soft limit) |
+| CPU at 200 pod updates/s | 0.2 vCPU | **0.09 vCPU** (including generating the updates) |
 | Bytes sent at that rate | — | **309 B/s per 1k resources** |
 | Initial report | — | 6.0 MB gzip, 3.9 s |
 
-(Phase C, with orphans on as the agent runs by default; phase B measured
+(Phase D, with orphans on as the agent runs by default; phase B measured
 74 MB steady, 103 MB peak.)
 
 The default `go test` runs 20,000 objects and fails if the per-object cost
@@ -347,6 +412,30 @@ synced the new revision (re-running the migration) and deleted it. A
 ConfigMap made by hand in that namespace appeared under *Orphaned*, with
 its live manifest. The lab was restored afterwards.
 
+**Phase D, on the lab.** The canary demo ran a second in-cluster agent
+scoped to a `lab/rollout-demo` repo in the lab's Gitea, so the shared lab
+GitOps repo stayed untouched. *storefront* runs 4 replicas. A commit moving
+it from echo-service `v1` to `6c5b7c18`, with auto-sync on, rolled out as a
+canary: 1 canary pod beside 4 (20%), 30 s, then 4 beside 4 (50%), 30 s, then
+promotion. The analysis passed every 5 s (health, plus HTTP `/healthz` to
+the canary pods: 5/5, then 20/20). The stable Deployment rolled out the new
+image and the canary was removed, in about 60 s. A commit making the
+release crash on start rolled out the same way: the canary pod went
+`CrashLoopBackOff`, two analysis rounds failed in about 10 s, the rollout
+aborted, and the 4 stable pods never changed. Reverting the commit in Git
+left *storefront* Synced with no rollout, because the stable version had
+never changed.
+
+Before the digest change, two later commits elsewhere in that repo
+re-triggered the aborted release twice. That is what the digest now
+prevents.
+
+A second kind cluster (`forge-lab-2`, its agent on the Mac) plus the
+template `edge` (path `apps/edge/overlays/{target}`, auto-sync, self-heal,
+create namespace) brought `edge` up on both clusters in about 2 s once the
+agents had it: 2 replicas of `6c5b7c18` on one cluster, 1 of `v1` on the
+other, from their overlays. The fleet view marks the `v1` cell as skew.
+
 **Cloud Run:** an unchanged fleet costs one list call per region per
 reconcile (720/day per region at the default period, shared by every
 service in it) plus one call per service per change; the bucket is never
@@ -354,8 +443,9 @@ exceeded (`TestCallBudget`, `TestReconcileIsConditional`).
 
 ## Not yet
 
-Progressive delivery and fleet views (phase D). The Cloud Run reconcile
-becomes event-driven (audit logs → Pub/Sub). Applications link to their
+Blue-green and ingress/mesh traffic routing for canaries; canaries on
+Cloud Run (its traffic split is native, not yet used). The Cloud Run
+reconcile becomes event-driven (audit logs → Pub/Sub). Applications link to their
 target's repo; linking each app to its own source repo is next. Deleting an
 application (and its resources) from Forge, and per-app sync options set in
 Git (Argo-style annotations), are not built.

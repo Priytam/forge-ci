@@ -69,6 +69,9 @@ func Run(ctx context.Context, cfg Config) error {
 	if op, ok := cfg.Provider.(live.Operator); ok {
 		go a.operations(ctx, op)
 	}
+	if d, ok := cfg.Provider.(live.Declarer); ok {
+		go a.declared(ctx, d)
+	}
 	for failures := 0; ctx.Err() == nil; {
 		err := a.epoch(ctx)
 		switch {
@@ -169,6 +172,32 @@ func (a *agent) epoch(ctx context.Context) error {
 		if done {
 			objects, apps := tr.Counts()
 			slog.Info("live: initial report sent", "epoch", epoch, "apps", apps, "objects", objects, "batches", seq)
+		}
+	}
+}
+
+// ---- declared applications (templates) ----
+
+// declarePoll is how often the agent asks which applications Forge's
+// templates put on its target.
+var declarePoll = 30 * time.Second
+
+// declared polls Forge for the target's declared applications and hands the
+// provider each new list.
+func (a *agent) declared(ctx context.Context, d live.Declarer) {
+	var last []byte
+	for ctx.Err() == nil {
+		var apps []live.DeclaredApp
+		if err := a.call(ctx, http.MethodGet, "/api/v1/live/agent/apps", nil, &apps); err != nil {
+			slog.Warn("live: declared applications", "err", err)
+		} else if b, _ := json.Marshal(apps); !bytes.Equal(b, last) {
+			last = b
+			slog.Info("live: declared applications", "apps", len(apps))
+			d.Declare(apps)
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(declarePoll):
 		}
 	}
 }

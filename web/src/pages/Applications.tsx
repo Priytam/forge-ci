@@ -114,7 +114,11 @@ export function ApplicationList({ fixedRepo }: { fixedRepo?: string }) {
       ) : (
         <div className="page-head">
           <h1>Applications</h1>
-          <div className="page-head-actions">{views}</div>
+          <div className="page-head-actions">
+            <Link className="btn" to="/applications/fleet">Fleet</Link>
+            <Link className="btn" to="/applications/templates">Templates</Link>
+            {views}
+          </div>
         </div>
       )}
       <div className="lv-apps-layout">

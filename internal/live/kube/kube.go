@@ -13,6 +13,7 @@ package kube
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strings"
 	"sync"
 
@@ -143,6 +144,8 @@ type Provider struct {
 
 	rmu     sync.Mutex
 	running map[string]*rolloutCtl // app key → its rollout in progress
+
+	declared map[string]live.DeclaredApp // by app key (p.mu)
 }
 
 // New returns a provider for the cluster client talks to.
@@ -198,7 +201,16 @@ func (p *Provider) Watch(ctx context.Context, sink live.Sink) error {
 		parked: map[string]map[string]parkedChild{}, parkedBy: map[string]string{},
 		listedKinds: map[*kind]bool{}, listed: make(chan struct{}), restart: make(chan struct{}),
 		roots: map[string]*root{}, rootsByApp: map[string]map[string]bool{}, desired: map[string]*appDesired{},
-		refresh: make(chan refreshReq),
+		refresh: make(chan refreshReq), kick: make(chan struct{}, 1),
+	}
+	p.mu.Lock()
+	w.declared = maps.Clone(p.declared)
+	p.mu.Unlock()
+	if w.declared == nil {
+		w.declared = map[string]live.DeclaredApp{}
+	}
+	for key, d := range w.declared {
+		w.apps[key] = &live.App{Key: key, Name: d.App.Name, Namespace: d.App.Namespace, Group: d.App.Group, Template: d.App.Template}
 	}
 	var wg sync.WaitGroup
 	run := func(k *kind) {
@@ -224,7 +236,9 @@ func (p *Provider) Watch(ctx context.Context, sink live.Sink) error {
 	sink.Synced()
 	p.mu.Lock()
 	p.current = w
+	declared := p.declared
 	p.mu.Unlock()
+	w.declare(declared) // any that arrived while the cluster was being read
 	if p.repo != nil {
 		wg.Add(1)
 		go func() {
@@ -365,6 +379,8 @@ type watcher struct {
 	desired    map[string]*appDesired     // app key → desired (nil: failed to render)
 	head       string                     // the source revision last read
 	refresh    chan refreshReq
+	kick       chan struct{}               // declared apps changed: render now
+	declared   map[string]live.DeclaredApp // apps Forge's templates put here, by key
 
 	listedKinds map[*kind]bool // kinds whose first list is in
 	listed      chan struct{}
@@ -512,7 +528,8 @@ func (w *watcher) appFor(m metav1.Object) (app *live.App, named bool) {
 	if name == "" {
 		return nil, false
 	}
-	if w.p.selector != nil && !w.p.selector.Matches(labels.Set(l)) {
+	_, declared := w.declared[m.GetNamespace()+"/"+name]
+	if w.p.selector != nil && !declared && !w.p.selector.Matches(labels.Set(l)) {
 		return nil, true
 	}
 	key := m.GetNamespace() + "/" + name

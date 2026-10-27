@@ -125,6 +125,25 @@ type App struct {
 	// Orphans marks a namespace's orphaned resources: top-level objects no
 	// application owns. Not an application — pages show them on request.
 	Orphans bool `json:"orphans,omitempty"`
+	// Template names the Forge template that declared the app ("" when
+	// the agent found it by its labels).
+	Template string `json:"template,omitempty"`
+}
+
+// DeclaredApp is an application a Forge template puts on a target: the
+// agent renders it from Path even before anything of it exists, so it
+// shows (all Missing) and can be synced into being.
+type DeclaredApp struct {
+	App  App    `json:"app"`
+	Path string `json:"path"`
+	// CreateNamespace: a sync creates the app's namespace when missing.
+	CreateNamespace bool `json:"create_namespace"`
+}
+
+// Declarer is a provider that can create applications Forge declares
+// (templates). The agent hands it the target's list whenever it changes.
+type Declarer interface {
+	Declare(apps []DeclaredApp)
 }
 
 // OrphansKey is the app key of namespace's orphaned resources.
@@ -253,6 +272,10 @@ type Desired struct {
 	Tool      string                     `json:"tool,omitempty"`   // kustomize | helm | plain | image
 	Manifests map[string]json.RawMessage `json:"manifests"`
 	Error     string                     `json:"error,omitempty"` // rendering failed: the app's sync is Unknown
+	// Digest identifies what the app renders to (every object, hooks and
+	// Rollouts included): a commit elsewhere in the repo leaves it alone, so
+	// auto-sync does not act on it.
+	Digest string `json:"digest,omitempty"`
 }
 
 // Capabilities says what a provider can show; the UI branches on these,
@@ -334,6 +357,7 @@ type Op struct {
 	Resources []string `json:"resources,omitempty"` // Keys; none = all
 	Hard      bool     `json:"hard,omitempty"`      // refresh
 	Full      bool     `json:"full,omitempty"`      // promote: all the way, skipping the remaining steps
+	Digest    string   `json:"digest,omitempty"`    // sync: the rendered state auto-sync asked for (Desired.Digest)
 	// Trigger says why Forge itself started the operation: auto-sync (a new
 	// revision) or self-heal (live drifted); "" when a person did.
 	Trigger string `json:"trigger,omitempty"`
@@ -353,7 +377,9 @@ type OpResult struct {
 	Message string `json:"message"`
 	// Aborted: a canary rollout was stopped (by its analysis or a person);
 	// the stable version still runs. Auto-sync waits for the next revision.
-	Aborted   bool             `json:"aborted,omitempty"`
+	Aborted bool `json:"aborted,omitempty"`
+	// Digest is what the sync applied (Desired.Digest of its render).
+	Digest    string           `json:"digest,omitempty"`
 	Revision  string           `json:"revision,omitempty"`
 	Resources []ResourceResult `json:"resources,omitempty"`
 }

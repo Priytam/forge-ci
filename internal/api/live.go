@@ -40,6 +40,8 @@ func (s *Server) liveReadRoutes() map[string]http.HandlerFunc {
 		"GET /api/v1/live/ops/{id}":                  s.getLiveOp,
 		"GET /api/v1/live/ops/{id}/output":           s.streamLiveOpOutput,
 		"GET /api/v1/live/apps/{id}/orphans":         s.liveOrphans,
+		"GET /api/v1/live/fleet":                     s.liveFleet,
+		"GET /api/v1/live/templates":                 s.listLiveTemplates,
 	}
 }
 
@@ -52,6 +54,10 @@ func (s *Server) registerLiveRoutes() {
 	s.mux.HandleFunc("POST /api/v1/live/agent/batches", s.liveAgentBatch)
 	s.mux.HandleFunc("POST /api/v1/live/apps/{id}/ops", s.createLiveOp)
 	s.mux.HandleFunc("PUT /api/v1/live/apps/{id}/policy", s.setLivePolicy)
+	s.mux.HandleFunc("POST /api/v1/live/templates", s.saveLiveTemplate)
+	s.mux.HandleFunc("PUT /api/v1/live/templates/{id}", s.saveLiveTemplate)
+	s.mux.HandleFunc("DELETE /api/v1/live/templates/{id}", s.deleteLiveTemplate)
+	s.mux.HandleFunc("GET /api/v1/live/agent/apps", s.liveAgentApps)
 	s.mux.HandleFunc("POST /api/v1/live/ops/{id}/approve", s.approveLiveOp)
 	s.mux.HandleFunc("POST /api/v1/live/ops/{id}/cancel", s.cancelLiveOp)
 	s.mux.HandleFunc("POST /api/v1/live/agent/ops/next", s.liveAgentNextOp)
@@ -158,7 +164,9 @@ func (s *Server) listLiveApps(w http.ResponseWriter, r *http.Request) {
 
 // liveAppTarget is what an app page needs to know about where it runs.
 type liveAppTarget struct {
+	ID           int64             `json:"id,omitempty"`
 	Name         string            `json:"name"`
+	Environment  string            `json:"environment,omitempty"`
 	Provider     string            `json:"provider"`
 	Capabilities live.Capabilities `json:"capabilities"`
 	AgentVersion string            `json:"agent_version"`

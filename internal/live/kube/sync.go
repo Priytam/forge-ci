@@ -250,12 +250,30 @@ func (w *watcher) syncApp(ctx context.Context, op live.Op, out func([]byte)) liv
 	if _, err := repo.fetch(ctx); err != nil {
 		return live.OpResult{Message: err.Error()}
 	}
-	r, err := repo.render(ctx, rev, repo.appPath(*a), a.Namespace, a.Name)
+	w.mu.Lock()
+	path, decl := w.pathOf(*a), w.declared[a.Key]
+	w.mu.Unlock()
+	r, err := repo.render(ctx, rev, path, a.Namespace, a.Name)
 	if err != nil {
 		return live.OpResult{Message: "render: " + err.Error(), Revision: rev}
 	}
 	s := &syncRun{w: w, op: op, app: a, applier: applier, out: out, pods: w.p.listPods}
-	return s.execute(ctx, r.objects, rev)
+	var ns *live.ResourceResult
+	if decl.CreateNamespace && !op.DryRun && a.Namespace != "" {
+		if rr, did := s.ensureNamespace(ctx, a.Namespace); did {
+			ns = &rr
+		}
+	}
+	digest := digestOf(r.objects) // before the sync names generated hooks
+	res := s.execute(ctx, r.objects, rev)
+	res.Digest = digest
+	if ns != nil {
+		res.Resources = append([]live.ResourceResult{*ns}, res.Resources...)
+		if ns.Action == "failed" {
+			res.OK = false
+		}
+	}
+	return res
 }
 
 func (p *Provider) listPods(ctx context.Context, namespace, selector string) ([]corev1.Pod, error) {

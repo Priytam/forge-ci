@@ -88,3 +88,26 @@ func TestDecideAutoAfterAbortedRollout(t *testing.T) {
 		t.Errorf("decideAuto = %+v", d)
 	}
 }
+
+// Auto-sync follows what the app renders to: a commit to another app in
+// the same repo moves the revision but not the digest, and changes nothing.
+func TestDecideAutoByDigest(t *testing.T) {
+	synced := op("succeeded", "aaaaaaa1", live.TriggerAutoSync, time.Hour)
+	synced.Result = &live.OpResult{OK: true, Digest: "sha256:d1"}
+	in := autoInput{Policy: store.LivePolicy{AutoSync: true}, Want: "sha256:d1", Rev: "bbbbbbb2", Drifted: 1, Now: t0, Ops: []store.LiveOp{synced}}
+	if d := decideAuto(in); d.Trigger != "" || !strings.Contains(d.Status, "Live differs from bbbbbbb") {
+		t.Errorf("unrelated commit: %+v", d)
+	}
+	in.Want = "sha256:d2"
+	if d := decideAuto(in); d.Trigger != live.TriggerAutoSync || d.Status != "Syncing to bbbbbbb" {
+		t.Errorf("the app changed: %+v", d)
+	}
+	// A sync whose render failed has no result digest: it counts against the
+	// digest it was asked for, so it backs off instead of looping.
+	failed := op("failed", "bbbbbbb2", live.TriggerAutoSync, time.Second)
+	failed.Params.Digest = "sha256:d2"
+	in.Ops = []store.LiveOp{failed, synced}
+	if d := decideAuto(in); d.Trigger != "" || !strings.Contains(d.Status, "Retrying in") {
+		t.Errorf("after a failed render: %+v", d)
+	}
+}

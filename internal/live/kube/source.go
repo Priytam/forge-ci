@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -43,7 +44,16 @@ type Source struct {
 type repo struct {
 	src Source
 	dir string
+
+	// Source trees by revision (the last few), for rendering: an app's
+	// directory may use files outside it (a Kustomize overlay's base).
+	tmu   sync.Mutex
+	trees map[string]string
+	order []string
 }
+
+// keptTrees is how many extracted revisions a repo keeps.
+const keptTrees = 3
 
 func newRepo(src Source) (*repo, error) {
 	if src.Branch == "" {
@@ -135,23 +145,51 @@ type rendered struct {
 	objects []*unstructured.Unstructured
 }
 
+// tree extracts the whole source at sha, once (r.tmu held).
+func (r *repo) tree(ctx context.Context, sha string) (string, error) {
+	if d, ok := r.trees[sha]; ok {
+		return d, nil
+	}
+	archive, err := r.git(ctx, nil, "archive", "--format=tar", sha)
+	if err != nil {
+		return "", err
+	}
+	d, err := os.MkdirTemp(filepath.Dir(r.dir), "tree-")
+	if err != nil {
+		return "", err
+	}
+	if err := untar(bytes.NewReader(archive), d); err != nil {
+		os.RemoveAll(d)
+		return "", err
+	}
+	if r.trees == nil {
+		r.trees = map[string]string{}
+	}
+	r.trees[sha], r.order = d, append(r.order, sha)
+	for len(r.order) > keptTrees {
+		os.RemoveAll(r.trees[r.order[0]])
+		delete(r.trees, r.order[0])
+		r.order = r.order[1:]
+	}
+	return d, nil
+}
+
 // render produces path's manifests at sha: `kustomize build` when there is
 // a kustomization, `helm template` for a chart, otherwise the YAML files as
 // they are. Objects without a namespace get the app's.
 func (r *repo) render(ctx context.Context, sha, path, namespace, release string) (*rendered, error) {
-	tmp, err := os.MkdirTemp("", "forge-live-render-")
+	// Renders share the extracted trees: one at a time, so a tree is never
+	// dropped under a render.
+	r.tmu.Lock()
+	defer r.tmu.Unlock()
+	tree, err := r.tree(ctx, sha)
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(tmp)
-	archive, err := r.git(ctx, nil, "archive", "--format=tar", sha, "--", path)
-	if err != nil {
-		return nil, err
+	dir := filepath.Join(tree, filepath.FromSlash(path))
+	if _, err := os.Stat(dir); err != nil {
+		return nil, fmt.Errorf("%s is not in the source at %s", path, shortSHA(sha))
 	}
-	if err := untar(bytes.NewReader(archive), tmp); err != nil {
-		return nil, err
-	}
-	dir := filepath.Join(tmp, filepath.FromSlash(path))
 	var out []byte
 	tool := "plain"
 	switch {

@@ -1613,3 +1613,30 @@ ALTER TABLE live_ops DROP CONSTRAINT IF EXISTS live_ops_kind_check;
 ALTER TABLE live_ops ADD CONSTRAINT live_ops_kind_check
     CHECK (kind IN ('sync','rollback','refresh','logs','promote','abort'));
 ALTER TABLE live_ops ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ;
+
+-- Forge Live (batch 9, phase D): app templates across clusters. A template
+-- declares one application on every target it matches (by name or
+-- environment); {target}, {environment} and {name} in its path and
+-- namespace are filled in per target. Agents fetch their declared apps and
+-- render them before anything exists; the template's sync policy seeds each
+-- app's (a policy someone changed by hand is left alone).
+CREATE TABLE IF NOT EXISTS live_templates (
+    id               BIGSERIAL   PRIMARY KEY,
+    name             TEXT        NOT NULL UNIQUE,
+    app_name         TEXT        NOT NULL,
+    namespace        TEXT        NOT NULL,
+    app_group        TEXT        NOT NULL DEFAULT '',
+    path             TEXT        NOT NULL,
+    targets          TEXT[]      NOT NULL DEFAULT '{}',
+    environments     TEXT[]      NOT NULL DEFAULT '{}',
+    create_namespace BOOLEAN     NOT NULL DEFAULT TRUE,
+    auto_sync        BOOLEAN     NOT NULL DEFAULT FALSE,
+    prune            BOOLEAN     NOT NULL DEFAULT FALSE,
+    self_heal        BOOLEAN     NOT NULL DEFAULT FALSE,
+    created_by       TEXT        NOT NULL DEFAULT '',
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+ALTER TABLE live_apps ADD COLUMN IF NOT EXISTS template TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS live_apps_template_idx ON live_apps (template) WHERE template <> '';
+ALTER TABLE live_apps ADD COLUMN IF NOT EXISTS desired_digest TEXT NOT NULL DEFAULT '';

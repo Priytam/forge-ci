@@ -302,6 +302,10 @@ func (t *Tracker) Take(maxBytes int) (deltas []Delta, done bool) {
 		a.desired = nil
 		if t.synced {
 			st := StatusOf(a.all())
+			if len(a.resources) == 0 && a.app.Template != "" {
+				// Declared by a template, nothing of it rendered or running yet.
+				st.Health = Health{Status: Missing, Message: "Declared by template " + a.app.Template + "; nothing of it exists yet"}
+			}
 			d.Status = &st
 		}
 		uids := make([]string, 0, len(a.upserts))
@@ -340,7 +344,7 @@ func (t *Tracker) Take(maxBytes int) (deltas []Delta, done bool) {
 			sort.Strings(d.Keep)
 			budget -= 40 * len(d.Keep)
 		}
-		if len(a.resources) == 0 {
+		if len(a.resources) == 0 && a.app.Template == "" { // a declared app stays, even empty
 			d.Gone = true
 			delete(t.apps, k)
 		}

@@ -260,7 +260,7 @@ func (h *Hub) apply(ctx context.Context, tx *store.LiveTx, d live.Delta) (*Tree,
 			}
 		}
 	}
-	a.Name, a.Namespace, a.Group, a.Epoch = d.App.Name, d.App.Namespace, d.App.Group, tx.Target.Epoch
+	a.Name, a.Namespace, a.Group, a.Epoch, a.Template = d.App.Name, d.App.Namespace, d.App.Group, tx.Target.Epoch, d.App.Template
 	if err := tx.UpsertEvents(ctx, a.ID, d.Events); err != nil {
 		return nil, 0, err
 	}
@@ -304,7 +304,7 @@ func (h *Hub) setDesired(ctx context.Context, a *store.LiveApp, d *live.Desired)
 	if !r.Time.IsZero() {
 		a.RevisionAt = &r.Time
 	}
-	a.SourcePath, a.SourceTool, a.SourceError = d.Source, d.Tool, d.Error
+	a.SourcePath, a.SourceTool, a.SourceError, a.DesiredDigest = d.Source, d.Tool, d.Error, d.Digest
 	return garbage, nil
 }
 
@@ -313,7 +313,7 @@ func summaryChanged(a, b *store.LiveApp) bool {
 	return a.Name != b.Name || a.Namespace != b.Namespace || a.Group != b.Group || a.Health != b.Health ||
 		a.HealthMessage != b.HealthMessage || a.Resources != b.Resources || a.Pods != b.Pods ||
 		a.PodsReady != b.PodsReady || !slices.Equal(a.Images, b.Images) || a.Sync != b.Sync || a.Revision != b.Revision ||
-		a.SourceError != b.SourceError || a.Drifted != b.Drifted || a.Prunable != b.Prunable
+		a.SourceError != b.SourceError || a.Drifted != b.Drifted || a.Prunable != b.Prunable || a.Template != b.Template
 }
 
 // remove deletes an app and queues its blobs.

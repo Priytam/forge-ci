@@ -240,3 +240,67 @@ func revisionOf(t *testing.T, r *gitRepo, ref string) string {
 	}
 	return strings.TrimSpace(string(out))
 }
+
+// A template's app exists in Forge before anything of it is in the cluster:
+// every object Missing, the template named, its own path rendered; a sync
+// creates the namespace first. Dropping it from the templates forgets it.
+func TestDeclaredApps(t *testing.T) {
+	repo := newGitRepo(t)
+	files := cart("2")
+	// A Kustomize overlay per cluster over a shared base: the render needs
+	// files outside the app's own directory.
+	if _, err := exec.LookPath("kubectl"); err != nil {
+		if _, err := exec.LookPath("kustomize"); err != nil {
+			t.Skip("neither kustomize nor kubectl installed")
+		}
+	}
+	files["apps/edge/base/kustomization.yaml"] = "resources: [configmap.yaml]\n"
+	files["apps/edge/base/configmap.yaml"] = "apiVersion: v1\nkind: ConfigMap\nmetadata: {name: edge, labels: {app.kubernetes.io/name: edge}}\ndata: {REGION: any}\n"
+	files["apps/edge/overlays/lab-east/kustomization.yaml"] = "resources: [../../base]\npatches:\n  - patch: '{\"apiVersion\": \"v1\", \"kind\": \"ConfigMap\", \"metadata\": {\"name\": \"edge\"}, \"data\": {\"REGION\": \"east\"}}'\n"
+	repo.commit("edge for lab-east", files)
+	cluster := livetest.NewFakeKube(t)
+	applier := &fakeApplier{}
+	p, err := kube.New(cluster.Client, kube.Config{Applier: applier, RootSelector: "app.kubernetes.io/part-of=team",
+		Source: &kube.Source{URL: repo.dir, Poll: time.Hour, Dir: t.TempDir()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	edge := live.App{Key: "edge-ns/edge", Name: "edge", Namespace: "edge-ns", Template: "edge"}
+	p.Declare([]live.DeclaredApp{{App: edge, Path: "apps/edge/overlays/lab-east", CreateNamespace: true}})
+	tr := live.NewTracker(live.DefaultWindow)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = p.Watch(ctx, tr) }()
+
+	var got *live.Delta
+	deadline := time.Now().Add(10 * time.Second)
+	for got == nil || got.Desired == nil {
+		if time.Now().After(deadline) {
+			t.Fatalf("no desired state for the declared app: %+v", got)
+		}
+		ds, _ := tr.Take(1 << 30)
+		for i := range ds {
+			if ds[i].App.Key == edge.Key {
+				d := ds[i]
+				if got != nil && d.Desired == nil {
+					d.Desired = got.Desired
+				}
+				got = &d
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got.App.Template != "edge" || got.Desired.Source != "apps/edge/overlays/lab-east" || len(got.Desired.Manifests) != 1 {
+		t.Fatalf("declared app delta = %+v", got)
+	}
+	if m := string(got.Desired.Manifests["/ConfigMap/edge-ns/edge"]); !strings.Contains(m, `"REGION":"east"`) {
+		t.Errorf("overlay not applied: %s", m)
+	}
+	res := p.Operate(ctx, live.Op{Kind: live.OpSync, App: edge}, nil)
+	if !res.OK || len(res.Resources) != 2 || res.Resources[0].Kind != "Namespace" || res.Resources[0].Action != "created" {
+		t.Fatalf("sync = %+v", res)
+	}
+	if strings.Join(applier.applied, ",") != "Namespace/edge-ns,ConfigMap/edge" {
+		t.Errorf("applied %v", applier.applied)
+	}
+}

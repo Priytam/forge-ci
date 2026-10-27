@@ -67,14 +67,19 @@ func (h *Hub) autoPass(ctx context.Context) {
 }
 
 func (h *Hub) autoSyncApp(ctx context.Context, a *store.LiveApp) error {
-	in := autoInput{Policy: *a.Policy, Want: a.Revision, Drifted: a.Drifted, Prunable: a.Prunable, Env: a.Environment, Now: time.Now()}
+	in := autoInput{Policy: *a.Policy, Want: a.Revision, Rev: a.Revision, Drifted: a.Drifted, Prunable: a.Prunable, Env: a.Environment, Now: time.Now()}
 	op := live.Op{Kind: live.OpSync, Revision: a.Revision, Prune: a.Policy.Prune, Force: true}
+	if a.DesiredDigest != "" {
+		// What the app renders to, not the commit: a commit to another app
+		// in the same repo changes the revision but not this.
+		in.Want, op.Digest = a.DesiredDigest, a.DesiredDigest
+	}
 	if a.Revision == "" {
 		// No Git (Cloud Run): the desired state is what Forge last deployed.
 		if op.Image = a.DeployedImage(); op.Image == "" {
 			return h.st.SetLivePolicyStatus(ctx, a.ID, "Waiting for a Forge deploy that reports an image digest")
 		}
-		in.Want = a.Deployed.Digest
+		in.Want, in.Rev = a.Deployed.Digest, a.Deployed.Digest
 	}
 	ops, err := h.st.LiveAppOps(ctx, a.ID, 30)
 	if err != nil {
@@ -109,7 +114,8 @@ func (h *Hub) autoSyncApp(ctx context.Context, a *store.LiveApp) error {
 // autoInput is everything auto-sync decides on.
 type autoInput struct {
 	Policy            store.LivePolicy
-	Want              string // the revision (or image digest) the app should run
+	Want              string // what the app should run: its desired digest, else revision (or image digest)
+	Rev               string // the revision, for people ("" = Want)
 	Drifted, Prunable int
 	Ops               []store.LiveOp // the app's operations, newest first
 	Frozen            bool
@@ -151,6 +157,9 @@ func decideAuto(in autoInput) autoDecision {
 		return autoDecision{Status: frozenStatus(in.Env)}
 	}
 	want := shortRev(in.Want)
+	if in.Rev != "" {
+		want = shortRev(in.Rev)
+	}
 	if len(changes) == 0 || changes[0].Kind == live.OpRollback || opTarget(changes[0]) != in.Want {
 		return autoDecision{Trigger: live.TriggerAutoSync, Status: "Syncing to " + want}
 	}
@@ -213,11 +222,18 @@ func inFlight(state string) bool {
 	return state == "approval" || state == "pending" || state == "running"
 }
 
-// opTarget is what a sync or rollback put in place: the source revision it
-// applied, or for a deploy-record provider the image digest.
+// opTarget is what a sync or rollback put in place: the rendered state it
+// applied (or was asked for), else its source revision, or for a
+// deploy-record provider the image digest.
 func opTarget(o store.LiveOp) string {
 	if _, digest, ok := strings.Cut(o.Params.Image, "@"); ok {
 		return digest
+	}
+	if o.Result != nil && o.Result.Digest != "" {
+		return o.Result.Digest
+	}
+	if o.Params.Digest != "" {
+		return o.Params.Digest
 	}
 	if o.Revision != "" {
 		return o.Revision

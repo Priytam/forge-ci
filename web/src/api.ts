@@ -3092,3 +3092,80 @@ export function createLiveTarget(t: { name: string; environment: string; repo: s
 export function deleteLiveTarget(id: number): Promise<void> {
   return requestVoid("DELETE", `/live/targets/${id}`);
 }
+
+// ---- Forge Live phase D: the fleet and app templates ----
+
+export interface FleetCell {
+  app_id: number;
+  health: Health;
+  sync: "Synced" | "OutOfSync" | "Unknown";
+  revision: string;
+  images: string[];
+  pods: number;
+  pods_ready: number;
+}
+
+export interface FleetRow {
+  name: string;
+  group: string;
+  template: string;
+  /** by target id */
+  cells: Record<string, FleetCell>;
+}
+
+export interface FleetTarget {
+  id: number;
+  name: string;
+  environment?: string;
+  provider: string;
+  capabilities: LiveCapabilities;
+  agent_version: string;
+  last_seen_at: string | null;
+  synced: boolean;
+}
+
+export interface FleetPage {
+  rows: FleetRow[];
+  total: number;
+  targets: FleetTarget[];
+}
+
+/** Applications by name across every cluster and project. */
+export function getFleet(f: { environment?: string; template?: string; q?: string; limit?: number }): Promise<FleetPage> {
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(f)) if (v) qs.set(k, String(v));
+  return fetchJSON(`/live/fleet${qs.size ? `?${qs}` : ""}`);
+}
+
+/** One application declared on many targets (path and namespace may use {target}, {environment}, {name}). */
+export interface LiveTemplate {
+  id: number;
+  name: string;
+  app_name: string;
+  namespace: string;
+  group: string;
+  path: string;
+  targets: string[];
+  environments: string[];
+  create_namespace: boolean;
+  auto_sync: boolean;
+  prune: boolean;
+  self_heal: boolean;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export type LiveTemplateInput = Omit<LiveTemplate, "id" | "created_by" | "created_at" | "updated_at">;
+
+export function listLiveTemplates(): Promise<LiveTemplate[]> {
+  return fetchJSON("/live/templates");
+}
+
+export function saveLiveTemplate(t: LiveTemplateInput, id?: number): Promise<LiveTemplate> {
+  return id ? putJSON(`/live/templates/${id}`, t) : postJSON("/live/templates", t);
+}
+
+export function deleteLiveTemplate(id: number): Promise<void> {
+  return requestVoid("DELETE", `/live/templates/${id}`);
+}

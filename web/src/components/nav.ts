@@ -155,7 +155,9 @@ export function crumbsFor(pathname: string, search: string): Crumb[] {
     case "changes":
       return b ? [{ label: "Changes", to: "/changes" }, { label: `Change ${b}` }] : [{ label: "Changes" }];
     case "applications":
-      return b ? [{ label: "Applications", to: "/applications" }, { label: "Application" }] : [{ label: "Applications" }];
+      return b
+        ? [{ label: "Applications", to: "/applications" }, { label: b === "fleet" ? "Fleet" : b === "templates" ? "Templates" : "Application" }]
+        : [{ label: "Applications" }];
     case "jobs": {
       if (!b) return [{ label: "Jobs" }];
       const p = q.get("pipeline");

@@ -39,6 +39,8 @@ import Account from "./pages/Account";
 import Applications from "./pages/Applications";
 import RepoApplications from "./pages/RepoApplications";
 import ApplicationDetail from "./pages/ApplicationDetail";
+import Fleet from "./pages/Fleet";
+import LiveTemplates from "./pages/LiveTemplates";
 import AdminLive from "./pages/AdminLive";
 import Shell from "./components/Shell";
 import { ToastProvider } from "./components/ui/Toast";
@@ -96,6 +98,8 @@ export default function App() {
           <Route path="/jobs" element={<Jobs />} />
           <Route path="/environments" element={<EnvironmentBoard />} />
           <Route path="/applications" element={<Applications />} />
+          <Route path="/applications/fleet" element={<Fleet />} />
+          <Route path="/applications/templates" element={<LiveTemplates />} />
           <Route path="/applications/:id" element={<ApplicationDetail />} />
           <Route path="/tokens" element={<ApiTokens />} />
           <Route path="/account" element={<Account />} />

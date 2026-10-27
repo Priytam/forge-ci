@@ -2,8 +2,11 @@ package kube
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -43,6 +46,22 @@ var watchedKinds = func() map[string]bool {
 	}
 	return out
 }()
+
+// digestOf identifies a render: its objects, in a stable order.
+func digestOf(objs []*unstructured.Unstructured) string {
+	parts := make([]string, 0, len(objs))
+	for _, o := range objs {
+		b, _ := json.Marshal(o.Object) // map keys sorted
+		parts = append(parts, keyOf(o)+"\x00"+string(b))
+	}
+	slices.Sort(parts)
+	h := sha256.New()
+	for _, p := range parts {
+		h.Write([]byte(p))
+		h.Write([]byte{0})
+	}
+	return "sha256:" + hex.EncodeToString(h.Sum(nil))
+}
 
 func keyOf(u *unstructured.Unstructured) string {
 	gv := u.GetAPIVersion()
@@ -139,7 +158,7 @@ func (w *watcher) setDesired(app live.App, rev live.Revision, path string, r *re
 		out.Error = renderErr.Error()
 		w.desired[app.Key] = nil
 	} else {
-		out.Tool = r.tool
+		out.Tool, out.Digest = r.tool, digestOf(r.objects)
 		d := &appDesired{rev: rev, objs: map[string]*unstructured.Unstructured{}, missing: map[string]bool{}}
 		for _, u := range r.objects {
 			if hookOf(u.GetAnnotations()).phase != "" || u.GetAPIVersion() == rolloutAPIVersion {
@@ -210,6 +229,7 @@ func (w *watcher) follow(ctx context.Context) {
 			return
 		case r := <-w.refresh:
 			pending = append(pending, r)
+		case <-w.kick:
 		case <-time.After(poll):
 		}
 	}
@@ -236,22 +256,23 @@ func (w *watcher) sync(ctx context.Context, last *string, hard bool) error {
 	w.mu.Lock()
 	w.head = sha
 	var todo []live.App
-	for key, keys := range w.rootsByApp {
-		a := w.apps[key]
-		if a == nil || len(keys) == 0 {
-			continue
+	var paths []string
+	for key, a := range w.apps {
+		if len(w.rootsByApp[key]) == 0 {
+			if _, ok := w.declared[key]; !ok {
+				continue // nothing of it in Git's care: an orphans row, or gone
+			}
 		}
-		path := repo.appPath(*a)
+		path := w.pathOf(*a)
 		_, known := w.desired[key]
 		if all || !known || touched(changed, path) {
-			todo = append(todo, *a)
+			todo, paths = append(todo, *a), append(paths, path)
 		}
 	}
 	w.mu.Unlock()
-	for _, a := range todo {
-		path := repo.appPath(a)
-		r, err := repo.render(ctx, sha, path, a.Namespace, a.Name)
-		w.setDesired(a, rev, path, r, err)
+	for i, a := range todo {
+		r, err := repo.render(ctx, sha, paths[i], a.Namespace, a.Name)
+		w.setDesired(a, rev, paths[i], r, err)
 	}
 	*last = sha
 	return nil

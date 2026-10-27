@@ -89,10 +89,14 @@ type LiveApp struct {
 	Provider        string      `json:"provider"`
 	Deployed        *LiveDeploy `json:"deployed"`
 	// Drifted and Prunable count the resources behind an OutOfSync.
-	Drifted  int         `json:"drifted"`
-	Prunable int         `json:"prunable"`
-	Orphans  bool        `json:"-"` // a namespace's orphaned resources, not an app
-	Policy   *LivePolicy `json:"policy"`
+	Drifted  int    `json:"drifted"`
+	Prunable int    `json:"prunable"`
+	Orphans  bool   `json:"-"`        // a namespace's orphaned resources, not an app
+	Template string `json:"template"` // the template that declared it
+	// DesiredDigest identifies what the app renders to (auto-sync acts when
+	// it changes, not on every commit to the repo).
+	DesiredDigest string      `json:"desired_digest"`
+	Policy        *LivePolicy `json:"policy"`
 }
 
 // LivePolicy is how Forge keeps an application in sync with Git.
@@ -327,14 +331,14 @@ func (s *Store) LiveIngest(ctx context.Context, targetID int64, fn func(*LiveTx)
 const liveAppCols = `a.id, a.target_id, a.key, a.name, a.namespace, a.app_group, a.health, a.health_message, a.health_since,
 	a.sync, a.resources, a.pods, a.pods_ready, a.images, a.tree, a.version, a.epoch, a.updated_at,
 	a.revision, a.revision_message, a.revision_author, a.revision_at, a.source_path, a.source_tool, a.source_error, a.desired_keys,
-	a.orphans, a.drifted, a.prunable`
+	a.orphans, a.drifted, a.prunable, a.template, a.desired_digest`
 
 func scanLiveApp(row pgx.Row, extra ...any) (*LiveApp, error) {
 	var a LiveApp
 	dest := append([]any{&a.ID, &a.TargetID, &a.Key, &a.Name, &a.Namespace, &a.Group, &a.Health, &a.HealthMessage, &a.HealthSince,
 		&a.Sync, &a.Resources, &a.Pods, &a.PodsReady, &a.Images, &a.Tree, &a.Version, &a.Epoch, &a.UpdatedAt,
 		&a.Revision, &a.RevisionMessage, &a.RevisionAuthor, &a.RevisionAt, &a.SourcePath, &a.SourceTool, &a.SourceError, &a.DesiredKeys,
-		&a.Orphans, &a.Drifted, &a.Prunable}, extra...)
+		&a.Orphans, &a.Drifted, &a.Prunable, &a.Template, &a.DesiredDigest}, extra...)
 	if err := row.Scan(dest...); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
@@ -386,21 +390,21 @@ func (l *LiveTx) SaveApp(ctx context.Context, a *LiveApp, summary bool) error {
 	var err error
 	if a.ID == 0 {
 		err = l.tx.QueryRow(ctx, `INSERT INTO live_apps (target_id, key, name, namespace, app_group, health, health_message, health_since,
-			resources, pods, pods_ready, images, tree, version, epoch, orphans)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id, updated_at`,
+			resources, pods, pods_ready, images, tree, version, epoch, orphans, template)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING id, updated_at`,
 			l.Target.ID, a.Key, a.Name, a.Namespace, a.Group, a.Health, a.HealthMessage, a.HealthSince,
-			a.Resources, a.Pods, a.PodsReady, a.Images, a.Tree, a.Version, a.Epoch, a.Orphans).Scan(&a.ID, &a.UpdatedAt)
+			a.Resources, a.Pods, a.PodsReady, a.Images, a.Tree, a.Version, a.Epoch, a.Orphans, a.Template).Scan(&a.ID, &a.UpdatedAt)
 		summary = true
 	} else {
 		err = l.tx.QueryRow(ctx, `UPDATE live_apps SET name=$2, namespace=$3, app_group=$4, health=$5, health_message=$6, health_since=$7,
 			resources=$8, pods=$9, pods_ready=$10, images=$11, tree=$12, version=$13, epoch=$14, sync=$15,
 			revision=$16, revision_message=$17, revision_author=$18, revision_at=$19, source_path=$20, source_tool=$21,
-			source_error=$22, desired_keys=$23, drifted=$24, prunable=$25, updated_at=now()
+			source_error=$22, desired_keys=$23, drifted=$24, prunable=$25, template=$26, desired_digest=$27, updated_at=now()
 			WHERE id=$1 RETURNING updated_at`,
 			a.ID, a.Name, a.Namespace, a.Group, a.Health, a.HealthMessage, a.HealthSince,
 			a.Resources, a.Pods, a.PodsReady, a.Images, a.Tree, a.Version, a.Epoch, a.Sync,
 			a.Revision, a.RevisionMessage, a.RevisionAuthor, a.RevisionAt, a.SourcePath, a.SourceTool,
-			a.SourceError, a.DesiredKeys, a.Drifted, a.Prunable).Scan(&a.UpdatedAt)
+			a.SourceError, a.DesiredKeys, a.Drifted, a.Prunable, a.Template, a.DesiredDigest).Scan(&a.UpdatedAt)
 	}
 	if err != nil {
 		return err
