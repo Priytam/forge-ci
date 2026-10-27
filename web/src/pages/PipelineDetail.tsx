@@ -43,6 +43,52 @@ interface Edge {
   d: string;
 }
 
+interface Box {
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+}
+
+/**
+ * SVG path for a needs edge from (x1,y1) to (x2,y2). A plain S-curve when the
+ * way is clear; when cards of an in-between column sit across it, the edge
+ * drops into the nearest free gap between rows, runs along it past those
+ * cards, and curves into its target — so it never looks attached to a job it
+ * merely passes.
+ */
+export function edgePath(x1: number, y1: number, x2: number, y2: number, boxes: Box[]): string {
+  const between = boxes.filter((b) => b.left > x1 + 2 && b.right < x2 - 2);
+  const crosses = (y: number) => between.some((b) => y > b.top - 3 && y < b.bottom + 3);
+  const bend = Math.max(24, Math.abs(x2 - x1) * 0.5);
+  const straight = `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 - bend} ${y2}, ${x2} ${y2}`;
+  if (between.length === 0) return straight;
+  // Sample the S-curve; if it clears every in-between card, keep it.
+  let blocked = false;
+  for (let t = 0.1; t < 1; t += 0.1) {
+    const u = 1 - t;
+    const x = u * u * u * x1 + 3 * u * u * t * (x1 + bend) + 3 * u * t * t * (x2 - bend) + t * t * t * x2;
+    const y = u * u * u * y1 + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t * t * t * y2;
+    if (between.some((b) => x > b.left && x < b.right && y > b.top - 3 && y < b.bottom + 3)) {
+      blocked = true;
+      break;
+    }
+  }
+  if (!blocked) return straight;
+  // Free horizontal lanes: just above or below each in-between card.
+  const lanes = between.flatMap((b) => [b.top - 6, b.bottom + 6]).filter((y) => y > 2 && !crosses(y));
+  if (lanes.length === 0) return straight;
+  const lane = lanes.reduce((best, y) => (Math.abs(y - y1) < Math.abs(best - y1) ? y : best));
+  const left = Math.min(...between.map((b) => b.left));
+  const right = Math.max(...between.map((b) => b.right));
+  const inX = Math.max(x1 + 12, left - 14);
+  const outX = Math.min(x2 - 12, right + 14);
+  return (
+    `M ${x1} ${y1} C ${(x1 + inX) / 2} ${y1}, ${(x1 + inX) / 2} ${lane}, ${inX} ${lane} ` +
+    `L ${outX} ${lane} C ${(outX + x2) / 2} ${lane}, ${(outX + x2) / 2} ${y2}, ${x2} ${y2}`
+  );
+}
+
 /** A job's run time for its pill: "42s", "3m 05s", or "1h 02m"; live while running. */
 function jobTook(start: string, end: string | null): string {
   const s = Math.max(0, Math.round(((end ? new Date(end).getTime() : Date.now()) - new Date(start).getTime()) / 1000));
@@ -246,6 +292,18 @@ export default function PipelineDetail() {
     const scrollLeft = board.scrollLeft;
     const scrollTop = board.scrollTop;
 
+    // Every card's box in board coordinates, so an edge that skips a column
+    // can be routed around the cards in between instead of through them.
+    const boxes = [...cardRefs.current.values()].map((el) => {
+      const r = el.getBoundingClientRect();
+      return {
+        left: r.left - boardRect.left + scrollLeft,
+        right: r.right - boardRect.left + scrollLeft,
+        top: r.top - boardRect.top + scrollTop,
+        bottom: r.bottom - boardRect.top + scrollTop,
+      };
+    });
+
     const next: Edge[] = [];
     for (const job of jobs) {
       const toEl = cardRefs.current.get(job.id);
@@ -261,11 +319,7 @@ export default function PipelineDetail() {
         // end = left-center of the dependent job's card
         const x2 = toRect.left - boardRect.left + scrollLeft;
         const y2 = toRect.top + toRect.height / 2 - boardRect.top + scrollTop;
-        // cubic bezier: leaves the source pill horizontally, enters the
-        // target pill horizontally (GitLab-style rounded connector).
-        const bend = Math.max(24, Math.abs(x2 - x1) * 0.5);
-        const d = `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 - bend} ${y2}, ${x2} ${y2}`;
-        next.push({ key: `${needId}-${job.id}`, d });
+        next.push({ key: `${needId}-${job.id}`, d: edgePath(x1, y1, x2, y2, boxes) });
       }
     }
     setEdges(next);
