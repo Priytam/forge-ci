@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -91,5 +92,26 @@ func TestTaskLoop(t *testing.T) {
 	bad := reports["/api/v1/runner/tasks/2/complete"]
 	if bad.Error == "" || strings.Contains(bad.Error, "s3cret") {
 		t.Errorf("failure report = %q (must exist and never carry the credential)", bad.Error)
+	}
+}
+
+// TestTaskLoopBacksOffOnFastEmpty: a server that answers "no task" at once
+// must not turn the loop into a hot loop.
+func TestTaskLoopBacksOffOnFastEmpty(t *testing.T) {
+	if !mirror.Supported() {
+		t.Skip("git 2.27+ not found")
+	}
+	t.Setenv("RUNNER_MIRROR_DIR", t.TempDir())
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	taskLoop(ctx, &client{base: srv.URL, http: srv.Client()}, "runner-t")
+	if n := calls.Load(); n > 1 {
+		t.Fatalf("%d acquires in 1s against an instant 204; want 1 (then a %v pause)", n, acquireRetryPause)
 	}
 }

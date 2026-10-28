@@ -305,3 +305,23 @@ func TestDiffOpensMeetTheTargets(t *testing.T) {
 	}
 	t.Logf("diff open p95 %.2f ms over %d opens; hit ratio %.4f", st.DiffOpenP95MS, st.DiffOpenSamples, st.Diffs.HitRatio)
 }
+
+// TestTaskAcquirePausedHoldsThePoll: a paused runner gets no task, but only
+// after the full long poll — an instant 204 made it ask again at once.
+func TestTaskAcquirePausedHoldsThePoll(t *testing.T) {
+	h := newDiffHarness(t)
+	ctx := context.Background()
+	if _, err := h.st.TouchRunner(ctx, "paused-1", "shell", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.st.SetRunnerPaused(ctx, "paused-1", true); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if h.runnerDo("paused-1") {
+		t.Fatal("a paused runner was handed a task")
+	}
+	if took := time.Since(start); took < 250*time.Millisecond {
+		t.Fatalf("paused acquire answered in %v; it must hold the 300ms poll", took)
+	}
+}

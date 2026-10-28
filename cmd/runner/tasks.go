@@ -45,6 +45,7 @@ func taskLoop(ctx context.Context, c *client, runnerID string) {
 	}
 	req := proto.TaskAcquireRequest{RunnerID: runnerID, Version: buildinfo.Version, Kinds: kinds}
 	for ctx.Err() == nil {
+		asked := time.Now()
 		task, status, err := acquireTask(ctx, c, req)
 		switch {
 		case status == http.StatusNotFound:
@@ -58,6 +59,11 @@ func taskLoop(ctx context.Context, c *client, runnerID string) {
 			}
 			continue
 		case task == nil:
+			// The server long-polls; an empty answer that came back fast
+			// (an older server, a proxy) must not turn into a hot loop.
+			if time.Since(asked) < acquireRetryPause {
+				sleep(ctx, acquireRetryPause)
+			}
 			continue
 		}
 		report := runTask(ctx, task, root)

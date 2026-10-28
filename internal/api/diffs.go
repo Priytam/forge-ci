@@ -63,8 +63,14 @@ func (s *Server) acquireTask(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), acquireLongPoll())
 	defer cancel()
 	for ctx.Err() == nil {
+		// A paused runner still holds the poll for its full length: answering
+		// at once makes the runner ask again at once, a hot loop on the DB.
 		if s.taskPaused(ctx, req.RunnerID) {
-			break
+			select {
+			case <-ctx.Done():
+			case <-time.After(time.Second):
+			}
+			continue
 		}
 		t, err := s.store.ClaimRunnerTask(ctx, req.RunnerID, req.Kinds, mirrorAffinityWait(), taskLease)
 		if err != nil {
