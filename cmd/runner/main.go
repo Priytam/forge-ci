@@ -136,6 +136,10 @@ func main() {
 	// Runner tasks (diffs from a git mirror) run beside the job slots.
 	go taskLoop(drainCtx, c, *runnerID)
 
+	// Disk janitor: tidies Docker's disk before and after every job.
+	janitor = newDiskJanitor()
+	janitor.sweep(context.Background(), "at runner start")
+
 	// The manager stays resident; each slot forks work per acquired job
 	// (with the kubernetes executor, that fork is an ephemeral pod).
 	var wg sync.WaitGroup
@@ -352,6 +356,12 @@ func runJob(execCtx, drainCtx context.Context, c *client, exec executor.Executor
 			return status, exitCode
 		}
 	}
+
+	if line := janitor.sweep(jobCtx, "before the job"); line != "" {
+		logs.printf("%s", line)
+	}
+	// After the job, tidy again without holding the slot or the report.
+	defer func() { go janitor.sweep(context.Background(), "after the job") }()
 
 	status, exitCode := "success", 0
 	workdir, err := os.MkdirTemp("", "forge-job-*")
