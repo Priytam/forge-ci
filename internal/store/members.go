@@ -244,6 +244,21 @@ func (s *Store) memberRole(ctx context.Context, repo, username string) (string, 
 	return role, err
 }
 
+// DefaultApproverRoles is who may approve when a rule names no roles. There is
+// no "maintainer" role: owner is the senior-reviewer role, and developers are
+// never approvers unless a rule lists them explicitly.
+var DefaultApproverRoles = []string{"admin", "owner"}
+
+// effectiveApproverRoles treats an empty role list as the default. An empty
+// list used to be stored as-is (the settings form with every box unticked),
+// leaving a gate nobody could ever approve.
+func effectiveApproverRoles(roles []string) []string {
+	if len(roles) == 0 {
+		return append([]string(nil), DefaultApproverRoles...)
+	}
+	return roles
+}
+
 // resolveProtectedEnv returns the approval rule for (repo, env): the
 // repo-specific row if present, else the global (repo=”) default, else nil.
 func (s *Store) resolveProtectedEnv(ctx context.Context, repo, name string) (*proto.ProtectedEnvironment, error) {
@@ -262,6 +277,7 @@ func (s *Store) resolveProtectedEnv(ctx context.Context, repo, name string) (*pr
 	if err != nil {
 		return nil, err
 	}
+	pe.ApproverRoles = effectiveApproverRoles(pe.ApproverRoles)
 	return &pe, nil
 }
 
@@ -281,6 +297,7 @@ func (s *Store) ListProtectedEnvs(ctx context.Context, repo string) ([]proto.Pro
 			&pe.ApprovalTimeoutHours, &pe.ApproverRoles, &pe.AllowSelfApproval); err != nil {
 			return nil, err
 		}
+		pe.ApproverRoles = effectiveApproverRoles(pe.ApproverRoles)
 		out = append(out, pe)
 	}
 	return out, rows.Err()
@@ -288,9 +305,7 @@ func (s *Store) ListProtectedEnvs(ctx context.Context, repo string) ([]proto.Pro
 
 // UpsertProtectedEnv creates or updates a repo-scoped approval rule.
 func (s *Store) UpsertProtectedEnv(ctx context.Context, pe proto.ProtectedEnvironment) (*proto.ProtectedEnvironment, error) {
-	if pe.ApproverRoles == nil {
-		pe.ApproverRoles = []string{"admin", "owner"}
-	}
+	pe.ApproverRoles = effectiveApproverRoles(pe.ApproverRoles)
 	err := s.pool.QueryRow(ctx,
 		`INSERT INTO protected_environments
 		     (repo, name, required_approvals, approval_timeout_hours, approver_roles, allow_self_approval)

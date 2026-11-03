@@ -673,6 +673,13 @@ func (s *Server) upsertProtectedEnv(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "name is required")
 		return
 	}
+	for _, role := range pe.ApproverRoles {
+		if role != "admin" && role != "owner" && role != "developer" {
+			writeErr(w, http.StatusBadRequest,
+				fmt.Sprintf("unknown approver role %q: roles are admin, owner and developer", role))
+			return
+		}
+	}
 	if pe.RequiredApprovals < 1 {
 		pe.RequiredApprovals = 1
 	}

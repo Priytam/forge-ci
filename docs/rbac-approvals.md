@@ -73,7 +73,7 @@ curl -X POST $FORGE/api/v1/protected-environments -d '{
 | Field | Behavior |
 |---|---|
 | `required_approvals` | Votes needed before the job is released to a runner |
-| `approver_roles` | Only members with one of these roles may vote |
+| `approver_roles` | Only members with one of these roles may vote. Empty means the default `admin, owner`; developers approve only when listed. Unknown roles are rejected (`400`) |
 | `allow_self_approval` | When false, the pipeline's `triggered_by` user cannot approve their own deployment (separation of duties) |
 | `approval_timeout_hours` | Blocked jobs fail automatically after this window |
 

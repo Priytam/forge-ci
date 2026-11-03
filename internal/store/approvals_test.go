@@ -153,3 +153,29 @@ func TestApproveRefusesManualJob(t *testing.T) {
 		t.Fatalf("vote on manual job: err = %v, want ErrNotBlocked", err)
 	}
 }
+
+// A rule with no roles (every box unticked, or a row written before the
+// default applied) means the default admin/owner, never developers and never
+// "nobody".
+func TestApproveEmptyRolesMeansDefault(t *testing.T) {
+	ctx := context.Background()
+	st := newDeployTestStore(t)
+	const repo = "acme/empty-roles"
+	for user, role := range map[string]string{"dev@acme.io": "developer", "owner@acme.io": "owner"} {
+		if _, err := st.AddMember(ctx, repo, user, role); err != nil {
+			t.Fatal(err)
+		}
+	}
+	protect(t, st, repo, []string{}, true)
+	if _, err := st.pool.Exec(ctx,
+		`UPDATE protected_environments SET approver_roles='{}' WHERE repo=$1`, repo); err != nil {
+		t.Fatal(err)
+	}
+	jobID := blockedDeploy(t, st, repo, "someone@acme.io")
+	if err := vote(st, jobID, Approver{Name: "dev@acme.io"}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("developer vote under empty roles: err = %v, want ErrForbidden", err)
+	}
+	if err := vote(st, jobID, Approver{Name: "owner@acme.io"}); err != nil {
+		t.Fatalf("owner vote under empty roles: %v", err)
+	}
+}

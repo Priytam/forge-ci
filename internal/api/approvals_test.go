@@ -116,3 +116,12 @@ func TestApprovalOpenMode(t *testing.T) {
 	h.expect(h.do(anon, "POST", "/api/v1/jobs/"+pid(job)+"/approvals",
 		map[string]string{"approver": "owner@acme.io", "verdict": "approved"}), 200, "open-mode owner")
 }
+
+// Approver roles must be real roles: a typo such as "maintainer" would
+// otherwise save a rule nobody can satisfy.
+func TestProtectedEnvRejectsUnknownRole(t *testing.T) {
+	h := newEnforcedHarness(t)
+	h.expect(h.do(h.login("admin@acme.io"), "POST", "/api/v1/protected-environments", proto.ProtectedEnvironment{
+		Repo: "acme/x", Name: "production", ApproverRoles: []string{"admin", "maintainer"},
+	}), 400, "unknown role")
+}
