@@ -228,23 +228,20 @@ func (s *Store) RemoveMember(ctx context.Context, id int64) error {
 }
 
 // memberRole returns the user's role on a repo, or "" if not a member.
+// Usernames match case-insensitively, as in RepoAccess: SSO identities are
+// emails and members are usually added by hand.
 func (s *Store) memberRole(ctx context.Context, repo, username string) (string, error) {
+	if username == "" {
+		return "", nil
+	}
 	var role string
 	err := s.pool.QueryRow(ctx,
-		`SELECT role FROM repo_members WHERE repo=$1 AND username=$2`, repo, username).Scan(&role)
+		`SELECT role FROM repo_members WHERE repo=$1 AND lower(username)=lower($2) LIMIT 1`,
+		repo, username).Scan(&role)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", nil
 	}
 	return role, err
-}
-
-// repoHasMembers reports whether any membership exists for the repo. Repos
-// with no members run in bootstrap mode: anyone may approve (documented).
-func (s *Store) repoHasMembers(ctx context.Context, repo string) (bool, error) {
-	var exists bool
-	err := s.pool.QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM repo_members WHERE repo=$1)`, repo).Scan(&exists)
-	return exists, err
 }
 
 // resolveProtectedEnv returns the approval rule for (repo, env): the

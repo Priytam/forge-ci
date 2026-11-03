@@ -1,5 +1,12 @@
 import { useEffect, useState } from "react";
-import { getMe, submitApproval, type AuthUser, type JobApproval } from "../api";
+import {
+  getApprovalPermission,
+  getMe,
+  submitApproval,
+  type ApprovalPermission,
+  type AuthUser,
+  type JobApproval,
+} from "../api";
 import Avatar, { displayName } from "./Avatar";
 
 interface ApprovalGateProps {
@@ -33,10 +40,33 @@ export default function ApprovalGate({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [me, setMe] = useState<AuthUser | null>(null);
+  // null until the server says whether this viewer may vote; the buttons stay
+  // hidden until then (and if the check fails) so nobody is offered a vote the
+  // server will refuse.
+  const [perm, setPerm] = useState<ApprovalPermission | null>(null);
 
   useEffect(() => {
     void getMe().then(setMe);
   }, []);
+
+  useEffect(() => {
+    if (status === "failed") return;
+    let live = true;
+    getApprovalPermission(jobId)
+      .then((p) => live && setPerm(p))
+      .catch(
+        () =>
+          live &&
+          setPerm({
+            can_approve: false,
+            asserted: false,
+            reason: "could not check your approval rights",
+          })
+      );
+    return () => {
+      live = false;
+    };
+  }, [jobId, status, approvals.length]);
 
   const rejection = approvals.find((a) => a.verdict === "rejected");
   const approved = approvals.filter((a) => a.verdict === "approved");
@@ -145,8 +175,12 @@ export default function ApprovalGate({
           </svg>
           Your vote is recorded. One vote per person.
         </div>
+      ) : status === "failed" ? null : perm && !perm.can_approve ? (
+        <div className="approval-voted">
+          {perm.reason ? `You can't vote: ${perm.reason}.` : "You can't vote on this deploy."}
+        </div>
       ) : (
-        status !== "failed" && (
+        perm && (
           <div className="approval-actions">
             <button
               type="button"

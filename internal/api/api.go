@@ -70,6 +70,7 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 	m.HandleFunc("GET /api/v1/jobs/{id}/logs", srv.getLogs)
 	m.HandleFunc("GET /api/v1/jobs/{id}/logs/stream", srv.streamLogs)
 	m.HandleFunc("POST /api/v1/jobs/{id}/approvals", srv.approve)
+	m.HandleFunc("GET /api/v1/jobs/{id}/approval-permission", srv.approvalPermission)
 	m.HandleFunc("POST /api/v1/jobs/{id}/cancel", srv.cancelJob)
 	m.HandleFunc("POST /api/v1/jobs/{id}/play", srv.playJob)
 	m.HandleFunc("GET /api/v1/permissions", srv.permissions)
@@ -361,6 +362,27 @@ func (s *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 	_, _ = io.WriteString(w, s.logs.Metrics().Render(s.logs.Backend()))
 }
 
+// approverFor resolves who is voting on a request. With a session (SSO cookie
+// or personal API token) the approver is the authenticated identity and a
+// client-supplied name is ignored; only such an identity can count as a
+// platform admin. In open bootstrap mode (no SSO, no session) the name is
+// client-asserted and never an admin — isAdmin treats every open-mode caller
+// as admin, which must not leak into approvals, or every rule that lists
+// "admin" would let anyone through. asserted reports the open-mode case.
+func (s *Server) approverFor(r *http.Request, bodyName string) (who store.Approver, asserted, ok bool) {
+	if sess := s.currentSession(r); sess != nil {
+		return store.Approver{
+			Name:          sess.Email,
+			PlatformAdmin: adminEmails()[strings.ToLower(sess.Email)],
+		}, false, true
+	}
+	if s.ssoEnforced(r.Context()) {
+		// Defense in depth: reach here only if the middleware were bypassed.
+		return store.Approver{}, false, false
+	}
+	return store.Approver{Name: strings.TrimSpace(bodyName)}, true, true
+}
+
 func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(r)
 	if !ok {
@@ -372,18 +394,12 @@ func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	// Identity-from-session: with a live SSO session the approver is the
-	// AUTHENTICATED identity and the client-supplied name is ignored. When SSO
-	// is enforced a session is guaranteed by requireAuth, so a body approver can
-	// never be honored; in open bootstrap mode the client value is used.
-	if sess := s.currentSession(r); sess != nil {
-		req.Approver = sess.Email
-	} else if s.ssoEnforced(r.Context()) {
-		// Defense in depth: reach here only if the middleware were bypassed.
+	who, _, ok := s.approverFor(r, req.Approver)
+	if !ok {
 		writeErr(w, http.StatusUnauthorized, "authentication required — sign in via SSO")
 		return
 	}
-	if req.Approver == "" {
+	if who.Name == "" {
 		writeErr(w, http.StatusBadRequest, "approver is required")
 		return
 	}
@@ -392,7 +408,7 @@ func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	target := strconv.FormatInt(id, 10)
-	job, err := s.store.Approve(r.Context(), id, req)
+	job, err := s.store.Approve(r.Context(), id, who, req)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		writeErr(w, http.StatusNotFound, "job not found")
@@ -400,20 +416,62 @@ func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusConflict, "job is not waiting for approval")
 	case errors.Is(err, store.ErrDuplicateVote):
 		writeErr(w, http.StatusConflict, "you have already voted on this job")
-	case errors.Is(err, store.ErrForbidden):
-		s.auditAs(r, req.Approver, "approval.vote", target, "", "denied", map[string]any{"verdict": req.Verdict})
-		writeErr(w, http.StatusForbidden, err.Error())
-	case errors.Is(err, store.ErrSelfApproval):
-		s.auditAs(r, req.Approver, "approval.vote", target, "", "denied", map[string]any{"verdict": req.Verdict})
+	case errors.Is(err, store.ErrForbidden), errors.Is(err, store.ErrSelfApproval):
+		s.auditAs(r, who.Name, "approval.vote", target, "", "denied", map[string]any{"verdict": req.Verdict})
 		writeErr(w, http.StatusForbidden, err.Error())
 	case err != nil:
 		slog.Error("approve", "err", err)
 		writeErr(w, http.StatusInternalServerError, "failed to record approval")
 	default:
 		// Actor is the resolved approver (session email when enforced).
-		s.auditAs(r, req.Approver, "approval.vote", target, "", "ok", map[string]any{"verdict": req.Verdict})
+		s.auditAs(r, who.Name, "approval.vote", target, "", "ok", map[string]any{"verdict": req.Verdict})
 		writeJSON(w, http.StatusOK, map[string]any{"job": job})
 	}
+}
+
+// approvalPermission tells the UI whether the caller may vote on a blocked job,
+// so the approval gate shows Approve and Reject only to people who can use
+// them. It runs the same check as approve. In open bootstrap mode there is no
+// identity until the voter types a name, so it answers for ?approver= when
+// given and otherwise reports asserted=true (the vote is checked on submit).
+func (s *Server) approvalPermission(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+	who, asserted, ok := s.approverFor(r, r.URL.Query().Get("approver"))
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, "authentication required — sign in via SSO")
+		return
+	}
+	out := map[string]any{"can_approve": false, "asserted": asserted}
+	if asserted && who.Name == "" {
+		out["can_approve"] = true
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+	rule, err := s.store.CanApprove(r.Context(), id, who)
+	if rule != nil {
+		out["approver_roles"] = rule.ApproverRoles
+		out["allow_self_approval"] = rule.AllowSelfApproval
+	}
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		writeErr(w, http.StatusNotFound, "job not found")
+		return
+	case errors.Is(err, store.ErrNotBlocked):
+		out["reason"] = "job is not waiting for approval"
+	case errors.Is(err, store.ErrForbidden), errors.Is(err, store.ErrSelfApproval):
+		out["reason"] = err.Error()
+	case err != nil:
+		slog.Error("approval permission", "err", err)
+		writeErr(w, http.StatusInternalServerError, "failed to check approval permission")
+		return
+	default:
+		out["can_approve"] = true
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // cancelPipeline cancels every non-terminal job in a pipeline. Idempotent: a

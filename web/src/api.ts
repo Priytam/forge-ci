@@ -1052,6 +1052,22 @@ export function submitApproval(
   return postJSON<{ job: Job }>(`/jobs/${jobId}/approvals`, body);
 }
 
+/** Whether the viewer may vote on a blocked job. In open mode (no SSO) there is
+ *  no identity until a name is typed, so `asserted` is true and the server
+ *  checks the vote on submit. */
+export interface ApprovalPermission {
+  can_approve: boolean;
+  asserted: boolean;
+  reason?: string;
+  approver_roles?: string[];
+}
+
+export function getApprovalPermission(
+  jobId: number | string
+): Promise<ApprovalPermission> {
+  return getJSON<ApprovalPermission>(`/jobs/${jobId}/approval-permission`);
+}
+
 /** Release a manual-gated blocked job (blocked → created). */
 export function playJob(jobId: number | string): Promise<{ job: Job }> {
   return postJSON<{ job: Job }>(`/jobs/${jobId}/play`, {});
