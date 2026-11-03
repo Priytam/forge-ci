@@ -159,6 +159,24 @@ func drainGraceFromEnv() time.Duration {
 	return defaultDrainGrace
 }
 
+// transferTimeout bounds one cache or artifact transfer: archive plus upload,
+// or download plus unpack. It was a fixed 2 minutes, which a cache near the
+// server's 500 MiB cap (MAX_CACHE_BYTES / MAX_ARTIFACT_BYTES) cannot meet on an
+// ordinary link: the save was killed every time, logged as "continuing", and
+// every run started cold. RUNNER_TRANSFER_TIMEOUT overrides it.
+var transferTimeout = transferTimeoutFromEnv()
+
+const defaultTransferTimeout = 15 * time.Minute
+
+func transferTimeoutFromEnv() time.Duration {
+	if v := os.Getenv("RUNNER_TRANSFER_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return defaultTransferTimeout
+}
+
 func concFromEnv() int {
 	if v := os.Getenv("RUNNER_CONCURRENCY"); v != "" {
 		var n int
@@ -483,7 +501,7 @@ func signedCodeCommitRemote(ctx context.Context, logs *logStreamer, job *proto.R
 // restoreDependency downloads an upstream job's artifact archive and unpacks
 // it into the workspace.
 func restoreDependency(ctx context.Context, c *client, logs *logStreamer, dep proto.DependencyArtifact, workdir string) error {
-	rctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	rctx, cancel := context.WithTimeout(ctx, transferTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(rctx, http.MethodGet,
 		fmt.Sprintf("%s/api/v1/artifacts/%d/download", c.base, dep.ArtifactID), nil)
@@ -585,7 +603,8 @@ func restoreCache(ctx context.Context, c *client, logs *logStreamer, job *proto.
 	for _, k := range keys[1:] {
 		q.Add("fallback", k)
 	}
-	rctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	started := time.Now()
+	rctx, cancel := context.WithTimeout(ctx, transferTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(rctx, http.MethodGet,
 		fmt.Sprintf("%s/api/v1/runner/jobs/%d/cache?%s", c.base, job.ID, q.Encode()), nil)
@@ -617,7 +636,7 @@ func restoreCache(ctx context.Context, c *client, logs *logStreamer, job *proto.
 	if matched == "" {
 		matched = keys[0]
 	}
-	logs.printf("cache restored (key %s)\n", matched)
+	logs.printf("cache restored (key %s) in %s\n", matched, time.Since(started).Round(100*time.Millisecond))
 }
 
 // saveCache archives the declared cache paths and uploads them to the server
@@ -654,7 +673,8 @@ func saveCache(c *client, logs *logStreamer, job *proto.RunnerJob, workdir, key 
 	archive.Close()
 	defer os.Remove(archive.Name())
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	started := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), transferTimeout)
 	defer cancel()
 	tarArgs := append([]string{"-czf", archive.Name(), "-C", workdir}, existing...)
 	if out, err := osexec.CommandContext(ctx, "tar", tarArgs...).CombinedOutput(); err != nil {
@@ -690,7 +710,8 @@ func saveCache(c *client, logs *logStreamer, job *proto.RunnerJob, workdir, key 
 		logs.printf("cache: save rejected with status %d (continuing)\n", resp.StatusCode)
 		return
 	}
-	logs.printf("cache saved (key %s, %d bytes: %s)\n", key, stat.Size(), strings.Join(existing, ", "))
+	logs.printf("cache saved (key %s, %d bytes: %s) in %s\n", key, stat.Size(),
+		strings.Join(existing, ", "), time.Since(started).Round(100*time.Millisecond))
 }
 
 // uploadArtifacts archives the declared workspace paths with tar and streams
@@ -722,7 +743,8 @@ func uploadArtifacts(c *client, logs *logStreamer, job *proto.RunnerJob, workdir
 	archive.Close()
 	defer os.Remove(archive.Name())
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	started := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), transferTimeout)
 	defer cancel()
 	tarArgs := append([]string{"-czf", archive.Name(), "-C", workdir}, existing...)
 	if out, err := osexec.CommandContext(ctx, "tar", tarArgs...).CombinedOutput(); err != nil {
@@ -753,7 +775,8 @@ func uploadArtifacts(c *client, logs *logStreamer, job *proto.RunnerJob, workdir
 		logs.printf("artifacts: upload rejected with status %d\n", resp.StatusCode)
 		return
 	}
-	logs.printf("artifacts: uploaded %d bytes (%s)\n", stat.Size(), strings.Join(existing, ", "))
+	logs.printf("artifacts: uploaded %d bytes (%s) in %s\n", stat.Size(),
+		strings.Join(existing, ", "), time.Since(started).Round(100*time.Millisecond))
 }
 
 // uploadJUnitReports resolves the job's reports.junit globs against the

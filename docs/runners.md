@@ -171,6 +171,9 @@ Deployment:
 - A runner that dies mid-job stops heartbeating; the scheduler fails the job
   after 90s and the runner registry shows it offline after 30s.
 - Give every long-lived runner a stable `--id`; ephemeral pods use pod names.
+- Each cache or artifact transfer (archive + upload, or download + unpack) may
+  take up to `RUNNER_TRANSFER_TIMEOUT` (default `15m`). Cache lines in the job
+  log report how long each restore and save took.
 
 ### Graceful shutdown (drain)
 
