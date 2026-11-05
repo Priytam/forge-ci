@@ -66,7 +66,7 @@ export const SETTINGS_NAV: NavSection[] = [
     title: "Access",
     adminOnly: true,
     items: [
-      { to: "/admin/admins", label: "Platform admins", icon: "shield", keywords: "admin administrator superuser grant revoke ADMIN_EMAILS" },
+      { to: "/admin/people", label: "People & roles", icon: "shield", keywords: "people users members admin administrator platform role superuser grant revoke ADMIN_EMAILS", match: ["/admin/admins"] },
       { to: "/admin/sso", label: "Sign-in & identity", icon: "lock", keywords: "sso login oidc okta keycloak ldap active directory groups roles session google microsoft github" },
       { to: "/admin/service-accounts", label: "Service accounts", icon: "key", keywords: "robot bot automation token" },
       { to: "/admin/runner-tokens", label: "Runner tokens", icon: "key", keywords: "register runner" },
@@ -110,7 +110,7 @@ export const EXTRA_PAGES: NavItem[] = [
 
 const ADMIN_TITLES: Record<string, string> = {
   sso: "Sign-in & identity",
-  admins: "Platform admins",
+  people: "People & roles",
   audit: "Audit log",
   "runner-tokens": "Runner tokens",
   environments: "Environments & branches",

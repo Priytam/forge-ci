@@ -112,6 +112,58 @@ func normalizeAdminEmail(raw string) (string, bool) {
 	return strings.ToLower(raw), true
 }
 
+// grantAdmin makes email (already normalized) a platform admin from the UI.
+// On refusal it returns the HTTP status and message to send.
+func (s *Server) grantAdmin(r *http.Request, email string) (*store.PlatformAdmin, int, string) {
+	if adminEmails()[email] {
+		return nil, http.StatusConflict, email + " is already an admin through ADMIN_EMAILS"
+	}
+	a, err := s.store.AddPlatformAdmin(r.Context(), email, s.sessionActor(r))
+	if errors.Is(err, store.ErrAlreadyAdmin) {
+		return nil, http.StatusConflict, email + " is already a platform admin"
+	}
+	if err != nil {
+		slog.Error("add platform admin", "err", err)
+		return nil, http.StatusInternalServerError, "failed to add platform admin"
+	}
+	s.audit(r, "platform-admin.add", email, "", "ok", nil)
+	return a, 0, ""
+}
+
+// revokeAdmin removes a UI-granted platform admin. ADMIN_EMAILS admins, the
+// caller themself, and the last admin are refused.
+func (s *Server) revokeAdmin(r *http.Request, email string) (int, string) {
+	if adminEmails()[email] {
+		return http.StatusConflict, email + " is an admin through ADMIN_EMAILS; remove it from the server config instead"
+	}
+	if email == strings.ToLower(s.sessionActor(r)) {
+		return http.StatusConflict, "you can't remove yourself; ask another admin"
+	}
+	// Never leave the platform without an admin: once SSO is enforced nobody
+	// could get back into the admin pages.
+	if len(adminEmails()) == 0 {
+		granted, err := s.store.ListPlatformAdmins(r.Context())
+		if err != nil {
+			return http.StatusInternalServerError, "failed to remove platform admin"
+		}
+		groups, err := s.store.HasGroupAdminMapping(r.Context())
+		if err != nil {
+			return http.StatusInternalServerError, "failed to remove platform admin"
+		}
+		if !groups && len(granted) == 1 && granted[0].Email == email {
+			return http.StatusConflict, "this is the last platform admin; add another one first"
+		}
+	}
+	if err := s.store.RemovePlatformAdmin(r.Context(), email); errors.Is(err, store.ErrNotFound) {
+		return http.StatusNotFound, email + " is not an admin granted here"
+	} else if err != nil {
+		slog.Error("remove platform admin", "err", err)
+		return http.StatusInternalServerError, "failed to remove platform admin"
+	}
+	s.audit(r, "platform-admin.remove", email, "", "ok", nil)
+	return 0, ""
+}
+
 func (s *Server) addPlatformAdmin(w http.ResponseWriter, r *http.Request) {
 	if !s.requireBrowserAdmin(w, r) {
 		return
@@ -128,21 +180,11 @@ func (s *Server) addPlatformAdmin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "enter one email address, e.g. alice@acme.io")
 		return
 	}
-	if adminEmails()[email] {
-		writeErr(w, http.StatusConflict, email+" is already an admin through ADMIN_EMAILS")
+	a, code, msg := s.grantAdmin(r, email)
+	if code != 0 {
+		writeErr(w, code, msg)
 		return
 	}
-	a, err := s.store.AddPlatformAdmin(r.Context(), email, s.sessionActor(r))
-	if errors.Is(err, store.ErrAlreadyAdmin) {
-		writeErr(w, http.StatusConflict, email+" is already a platform admin")
-		return
-	}
-	if err != nil {
-		slog.Error("add platform admin", "err", err)
-		writeErr(w, http.StatusInternalServerError, "failed to add platform admin")
-		return
-	}
-	s.audit(r, "platform-admin.add", email, "", "ok", nil)
 	writeJSON(w, http.StatusCreated, platformAdminEntry{Email: a.Email, Source: "ui", AddedBy: a.AddedBy, CreatedAt: &a.CreatedAt})
 }
 
@@ -150,41 +192,9 @@ func (s *Server) removePlatformAdmin(w http.ResponseWriter, r *http.Request) {
 	if !s.requireBrowserAdmin(w, r) {
 		return
 	}
-	email := strings.ToLower(strings.TrimSpace(r.PathValue("email")))
-	if adminEmails()[email] {
-		writeErr(w, http.StatusConflict, email+" is an admin through ADMIN_EMAILS; remove it from the server config instead")
+	if code, msg := s.revokeAdmin(r, strings.ToLower(strings.TrimSpace(r.PathValue("email")))); code != 0 {
+		writeErr(w, code, msg)
 		return
 	}
-	if email == strings.ToLower(s.sessionActor(r)) {
-		writeErr(w, http.StatusConflict, "you can't remove yourself; ask another admin")
-		return
-	}
-	// Never leave the platform without an admin: once SSO is enforced nobody
-	// could get back into the admin pages.
-	if len(adminEmails()) == 0 {
-		granted, err := s.store.ListPlatformAdmins(r.Context())
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "failed to remove platform admin")
-			return
-		}
-		groups, err := s.store.HasGroupAdminMapping(r.Context())
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "failed to remove platform admin")
-			return
-		}
-		if !groups && len(granted) == 1 && granted[0].Email == email {
-			writeErr(w, http.StatusConflict, "this is the last platform admin; add another one first")
-			return
-		}
-	}
-	if err := s.store.RemovePlatformAdmin(r.Context(), email); errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, email+" is not an admin granted here")
-		return
-	} else if err != nil {
-		slog.Error("remove platform admin", "err", err)
-		writeErr(w, http.StatusInternalServerError, "failed to remove platform admin")
-		return
-	}
-	s.audit(r, "platform-admin.remove", email, "", "ok", nil)
 	w.WriteHeader(http.StatusNoContent)
 }
