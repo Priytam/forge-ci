@@ -33,27 +33,34 @@ admin*. Admin is determined by:
   (bootstrap — there is no authz until you enable SSO).
 - **Enforced mode** (SSO enabled): the caller must have a session whose email
   is listed in **`ADMIN_EMAILS`** (comma-separated), e.g.
-  `ADMIN_EMAILS="alice@acme.io,bob@acme.io"`, **or** was added on
-  **Admin → Access → Platform admins**, **or** belongs to an IdP group mapped
+  `ADMIN_EMAILS="alice@acme.io,bob@acme.io"`, **or** was made admin on
+  **Admin → Access → People & roles**, **or** belongs to an IdP group mapped
   to *platform admin* (below). Non-admins get `403`; unauthenticated callers
   get `401`.
 
-**Platform admins page.** Admins add and remove other admins by email; it
-takes effect on that person's next request and is audit-logged
-(`platform-admin.add` / `platform-admin.remove`). `ADMIN_EMAILS` entries show
-as *server config* and can only be changed on the server; keep at least one
-there as a break-glass admin. Granting or revoking needs a signed-in browser
-session (not an API token), you can't remove yourself, and the last admin
-can't be removed. API: `GET/POST /api/v1/platform-admins`,
-`DELETE /api/v1/platform-admins/{email}`. This is the way to add a single
-admin when sign-in is the built-in Google, Microsoft or GitHub button, which
-sends no groups for group mappings.
+**People & roles page** (Admin → Access → People & roles). Lists everyone
+who has signed in, plus admins who haven't yet, with their platform role,
+direct repo roles and last sign-in. Search by name or email, filter to
+admins, and switch a person between **Admin** and **Member** from the
+dropdown; it takes effect on their next request and is audit-logged
+(`platform-admin.add` / `platform-admin.remove`). Admins from `ADMIN_EMAILS`
+(*server config*) or an IdP group (*via group*) are shown but locked; keep at
+least one `ADMIN_EMAILS` entry as a break-glass admin. **Add admin by email**
+grants admin to someone before their first sign-in. Changing roles needs a
+signed-in browser session (not an API token), you can't demote yourself, and
+the last admin can't be removed. Repo roles are changed on each repo's
+Settings → Members. API: `GET /api/v1/people?q=&role=admin&limit=&offset=`
+(paged, `X-Total-Count`), `PUT /api/v1/people/{email}/platform-role`
+`{"role":"admin"|"member"}`, and `GET/POST /api/v1/platform-admins`,
+`DELETE /api/v1/platform-admins/{email}`. This is how to add an admin when
+sign-in is the built-in Google, Microsoft or GitHub button, which sends no
+groups for group mappings.
 
 `GET /api/v1/auth/me` returns an `is_admin` boolean so the UI can hide
 admin-only navigation.
 
 > Footgun: enabling SSO with no admin (empty `ADMIN_EMAILS`, nobody on the
-> Platform admins page, no admin group) locks everyone out of admin
+> People & roles page, no admin group) locks everyone out of admin
 > mutations. Set `ADMIN_EMAILS` or add admins **before** enabling a provider.
 
 ## Identity from the session (no client-asserted identity when enforced)
@@ -70,7 +77,8 @@ request body:
 
 In **open bootstrap mode** (no SSO enabled) there is no session, so a
 client-supplied approver/author is still accepted — this keeps CLI/dev bootstrap
-working. Mutating admin endpoints additionally require `requireAdmin`; with SSO
+working. An asserted approver must still be a repo member with one of the
+environment's `approver_roles` (docs/rbac-approvals.md). Mutating admin endpoints additionally require `requireAdmin`; with SSO
 enforced that means a session whose email is in `ADMIN_EMAILS`, and every
 mutating admin route is gated (unauthenticated → `401`, non-admin → `403`).
 

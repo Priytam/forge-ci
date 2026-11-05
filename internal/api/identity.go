@@ -61,6 +61,9 @@ func (s *Server) finishLogin(ctx context.Context, w http.ResponseWriter, provide
 	if err := s.store.RecordUserGroups(ctx, email, provider, groups); err != nil {
 		return err
 	}
+	if err := s.store.RecordSignIn(ctx, email, name, provider); err != nil {
+		return err
+	}
 	ttl := s.sessionLifetime(ctx)
 	sess, err := s.store.CreateSession(ctx, email, name, provider, ttl)
 	if err != nil {

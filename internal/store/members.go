@@ -228,8 +228,12 @@ func (s *Store) RemoveMember(ctx context.Context, id int64) error {
 }
 
 // memberRole returns the user's role on a repo, or "" if not a member.
-// It includes roles granted through the user's IdP groups.
+// It includes roles granted through the user's IdP groups. Usernames match
+// case-insensitively: SSO identities are emails and members are added by hand.
 func (s *Store) memberRole(ctx context.Context, repo, username string) (string, error) {
+	if username == "" {
+		return "", nil
+	}
 	var role string
 	err := s.pool.QueryRow(ctx,
 		`SELECT role FROM repo_members WHERE repo=$1 AND lower(username)=lower($2)`, repo, username).Scan(&role)
@@ -243,8 +247,24 @@ func (s *Store) memberRole(ctx context.Context, repo, username string) (string, 
 	return higherRole(role, g), nil
 }
 
+// DefaultApproverRoles is who may approve when a rule names no roles. There is
+// no "maintainer" role: owner is the senior-reviewer role, and developers are
+// never approvers unless a rule lists them explicitly.
+var DefaultApproverRoles = []string{"admin", "owner"}
+
+// effectiveApproverRoles treats an empty role list as the default. An empty
+// list used to be stored as-is (the settings form with every box unticked),
+// leaving a gate nobody could ever approve.
+func effectiveApproverRoles(roles []string) []string {
+	if len(roles) == 0 {
+		return append([]string(nil), DefaultApproverRoles...)
+	}
+	return roles
+}
+
 // repoHasMembers reports whether any membership exists for the repo. Repos
-// with no members run in bootstrap mode: anyone may approve (documented).
+// with no members run in bootstrap mode for retry/cancel/play and notifications.
+// Approvals do not use it: approver_roles is enforced on every repo.
 func (s *Store) repoHasMembers(ctx context.Context, repo string) (bool, error) {
 	var exists bool
 	err := s.pool.QueryRow(ctx,
@@ -279,6 +299,7 @@ func (s *Store) resolveProtectedEnv(ctx context.Context, repo, name string) (*pr
 	if err != nil {
 		return nil, err
 	}
+	pe.ApproverRoles = effectiveApproverRoles(pe.ApproverRoles)
 	return &pe, nil
 }
 
@@ -299,6 +320,7 @@ func (s *Store) ListProtectedEnvs(ctx context.Context, repo string) ([]proto.Pro
 			&pe.RequiredGroup, &pe.RequiredGroupApprovals); err != nil {
 			return nil, err
 		}
+		pe.ApproverRoles = effectiveApproverRoles(pe.ApproverRoles)
 		out = append(out, pe)
 	}
 	if err := rows.Err(); err != nil {
@@ -406,9 +428,7 @@ func (s *Store) foldProtectedEnvRules(ctx context.Context, policy *EnvPolicy) (i
 
 // UpsertProtectedEnv creates or updates a repo-scoped approval rule.
 func (s *Store) UpsertProtectedEnv(ctx context.Context, pe proto.ProtectedEnvironment) (*proto.ProtectedEnvironment, error) {
-	if pe.ApproverRoles == nil {
-		pe.ApproverRoles = []string{"admin", "owner"}
-	}
+	pe.ApproverRoles = effectiveApproverRoles(pe.ApproverRoles)
 	err := s.pool.QueryRow(ctx,
 		`INSERT INTO protected_environments
 		     (repo, name, required_approvals, approval_timeout_hours, approver_roles, allow_self_approval,

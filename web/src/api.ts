@@ -1404,6 +1404,22 @@ export function submitApproval(
   return postJSON<{ job: Job }>(`/jobs/${jobId}/approvals`, body);
 }
 
+/** Whether the viewer may vote on a blocked job. In open mode (no SSO) there is
+ *  no identity until a name is typed, so `asserted` is true and the server
+ *  checks the vote on submit. */
+export interface ApprovalPermission {
+  can_approve: boolean;
+  asserted: boolean;
+  reason?: string;
+  approver_roles?: string[];
+}
+
+export function getApprovalPermission(
+  jobId: number | string
+): Promise<ApprovalPermission> {
+  return getJSON<ApprovalPermission>(`/jobs/${jobId}/approval-permission`);
+}
+
 /** Release a manual-gated blocked job (blocked → created). */
 export function playJob(jobId: number | string): Promise<{ job: Job }> {
   return postJSON<{ job: Job }>(`/jobs/${jobId}/play`, {});
@@ -2055,6 +2071,45 @@ export function addPlatformAdmin(email: string): Promise<PlatformAdmin> {
 
 export function removePlatformAdmin(email: string): Promise<void> {
   return requestVoid("DELETE", `/platform-admins/${encodeURIComponent(email)}`);
+}
+
+// --- People (Admin → People) ---
+
+/** Someone who has signed in (or a platform admin who hasn't yet). */
+export interface Person {
+  email: string;
+  name: string;
+  provider: string;
+  /** null: never signed in */
+  last_sign_in_at: string | null;
+  /** why they're a platform admin: server config, set on this page, or an IdP group */
+  admin_source: "env" | "ui" | "group" | "";
+  admin_groups: string[];
+  repo_roles: { repo: string; role: string }[];
+}
+
+export interface PeoplePage {
+  items: Person[];
+  total: number;
+  hasMore: boolean;
+}
+
+/** One page of people; search, filter and paging happen on the server. */
+export async function listPeople(q: string, adminsOnly: boolean, offset: number, limit: number): Promise<PeoplePage> {
+  const qs = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  if (q) qs.set("q", q);
+  if (adminsOnly) qs.set("role", "admin");
+  const res = await fetch(`${BASE}/people?${qs.toString()}`, { headers: { Accept: "application/json" } });
+  if (!res.ok) throw await parseError(res);
+  return {
+    items: (await res.json()) as Person[],
+    total: Number(res.headers.get("X-Total-Count") ?? 0),
+    hasMore: res.headers.get("X-Has-More") === "true",
+  };
+}
+
+export function setPlatformRole(email: string, role: "admin" | "member"): Promise<void> {
+  return requestVoid("PUT", `/people/${encodeURIComponent(email)}/platform-role`, { role });
 }
 
 export function listServiceTokens(id: number): Promise<ApiToken[]> {

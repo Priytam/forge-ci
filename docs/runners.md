@@ -174,6 +174,47 @@ Deployment:
 - A runner that dies mid-job stops heartbeating; the scheduler fails the job
   after 90s and the runner registry shows it offline after 30s.
 - Give every long-lived runner a stable `--id`; ephemeral pods use pod names.
+- Each cache or artifact transfer (archive + upload, or download + unpack) may
+  take up to `RUNNER_TRANSFER_TIMEOUT` (default `15m`). Cache lines in the job
+  log report how long each restore and save took.
+
+### Image builds: privileged services and the layer cache
+
+Docker-in-docker (`docker:*-dind`, the daemon a `docker build` job talks to)
+only starts in a privileged container; otherwise dockerd exits at once with
+`mount: permission denied`. The docker executor never runs anything privileged
+unless the runner opts in:
+
+```sh
+RUNNER_PRIVILEGED_SERVICES=true forge-runner --executor docker --tags docker,privileged
+```
+
+With it, the job's **service** containers run with `--privileged`; the job
+container never does. A privileged container is root on the runner host, so
+enable this only on runners dedicated to image builds and route those jobs
+there with a tag (`tags: [docker, privileged]`). Same model as GitLab's
+`privileged = true`.
+
+Each job gets a fresh dind daemon, so its local layer cache is always empty.
+Use BuildKit's registry cache (the *Docker — build, scan, push* recipe):
+
+```sh
+docker buildx create --use --driver docker-container
+docker buildx build --load \
+  --cache-from type=registry,ref=$IMAGE:buildcache \
+  --cache-to   type=registry,ref=$IMAGE:buildcache,mode=max \
+  -t "$IMAGE:$CI_COMMIT_REF_NAME" .
+```
+
+Read the cache on every branch; write it (`--cache-to`) only from the default
+branch, where the registry credentials are. A missing cache is a warning. On a
+measured build with a 25 s `RUN` step, the second run took 4 s for the build
+instead of 29 s. What remains per job is fixed overhead: starting dind and
+pulling the `moby/buildkit` builder image into the empty daemon (about 14 s
+here). A registry mirror for `moby/buildkit` (`--driver-opt image=…`) cuts
+that. A persistent per-runner BuildKit daemon would remove it, but a shared
+daemon exposes one repo's cache and build secrets to other repos' jobs, so it
+is not shipped.
 
 ### Graceful shutdown (drain)
 

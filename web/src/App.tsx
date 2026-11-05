@@ -15,7 +15,7 @@ import Recipes from "./pages/Recipes";
 import AddRepo from "./pages/AddRepo";
 import Login from "./pages/Login";
 import AdminSso from "./pages/AdminSso";
-import AdminPlatformAdmins from "./pages/AdminPlatformAdmins";
+import AdminPeople from "./pages/AdminPeople";
 import AdminAudit from "./pages/AdminAudit";
 import AdminRunnerTokens from "./pages/AdminRunnerTokens";
 import AllPipelines from "./pages/AllPipelines";
@@ -82,7 +82,8 @@ export default function App() {
           <Route path="/admin" element={<SettingsLayout />}>
             <Route index element={<Navigate to={SETTINGS_HOME} replace />} />
             <Route path="sso" element={<AdminSso />} />
-            <Route path="admins" element={<AdminPlatformAdmins />} />
+            <Route path="people" element={<AdminPeople />} />
+            <Route path="admins" element={<Navigate to="/admin/people" replace />} />
             <Route path="environments" element={<AdminEnvironments />} />
             <Route path="notifications" element={<AdminNotifications />} />
             <Route path="approver-groups" element={<AdminApproverGroups />} />

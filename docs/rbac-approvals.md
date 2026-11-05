@@ -15,7 +15,7 @@ Membership is per repo, one role per user:
 | Action | Who |
 |---|---|
 | Retry or cancel a pipeline, play or cancel a job | Platform admins, plus any member of the repo (`admin`, `owner` or `developer`). On a repo with no members (bootstrap mode) any signed-in user. |
-| Variables and secrets, runners and runner tokens, members, approval rules, SSO, token policy | Platform admins only (`ADMIN_EMAILS`, Admin → Platform admins, or an admin IdP group) |
+| Variables and secrets, runners and runner tokens, members, approval rules, SSO, token policy | Platform admins only (`ADMIN_EMAILS`, Admin → People & roles, or an admin IdP group) |
 
 Members are matched to the signed-in email case-insensitively. The UI asks
 `GET /api/v1/permissions?repo=<repo>` (`{is_admin, can_run, can_cancel}`) to
@@ -32,16 +32,24 @@ curl "$FORGE/api/v1/members?repo=acme/checkout-service"      # list
 curl -X DELETE $FORGE/api/v1/members/<id>                     # remove
 ```
 
-> **Bootstrap mode:** a repo with **zero** members skips role checks entirely
-> (anyone may approve). The moment the first member is added, enforcement
-> turns on. Add members before you rely on the gate.
+> **Approvals are never open.** `approver_roles` is enforced on every repo,
+> including one with no members yet. A voter must be a member holding one of
+> the rule's roles (directly or through an IdP group grant), or a member of the
+> rule's `required_group`. A signed-in platform admin (`ADMIN_EMAILS`, granted
+> in Admin → Platform admins, or an IdP admin group) counts as `admin` on every
+> repo, so on a repo with no members only platform admins can
+> approve, and only when the rule lists `admin`. (Earlier versions skipped the
+> role check on repos with zero members, so anyone could approve there.)
+> Retry, cancel and play keep the bootstrap rule above; approvals do not.
 
 > **Identity:** When SSO is enforced (any provider enabled — see
 > `docs/sso.md`), the approver is the **authenticated session email**; a body
 > `approver` is ignored and the endpoint is unreachable without a session
 > (`401`). RBAC membership should therefore use work emails as usernames. In
 > **open bootstrap mode** (no SSO enabled) there is no session, so the approver
-> name is client-asserted — enable SSO before relying on approver identity.
+> name is client-asserted: it must still be a member with an allowed role, but
+> nothing stops someone typing another member's name, and nobody counts as a
+> platform admin. Enable SSO before relying on approver identity.
 > Every vote (and every denied vote) is recorded in `audit_log` as
 > `approval.vote` with the resolved approver as `actor` (see `docs/sso.md` →
 > Audit log).
@@ -67,7 +75,7 @@ curl -X POST $FORGE/api/v1/protected-environments -d '{
 | Field | Behavior |
 |---|---|
 | `required_approvals` | Votes needed before the job is released to a runner: `0`–`20`, default `1` when left out. `0` means no approval: jobs run at once (freezes and the environment's branch rules still apply), and Live syncs and rollbacks are not held. A repo's rule beats the global default, so a repo rule with `0` releases that repo's jobs even when the global rule asks for votes |
-| `approver_roles` | Only members with one of these roles may vote |
+| `approver_roles` | Only members with one of these roles may vote. Empty means the default `admin, owner`; developers approve only when listed. Unknown roles are rejected (`400`) |
 | `allow_self_approval` | When false, the pipeline's `triggered_by` user cannot approve their own deployment (separation of duties) |
 | `approval_timeout_hours` | Blocked jobs fail automatically after this window (default 24) |
 
@@ -75,11 +83,16 @@ Invalid values are refused with `400` and a message — a negative or too
 large `required_approvals`, a negative timeout, or `required_group` with
 `required_approvals: 0` — instead of being changed silently.
 
+`GET /api/v1/jobs/{id}/approval-permission` runs the same check for the caller
+(`{can_approve, asserted, reason, approver_roles}`); the approval gate in the UI
+shows Approve and Reject only when it says yes.
+
 Enforced transitions (all server-side, all audited in `job_approvals`):
 
 1. Job with a protected environment → `blocked` once its needs pass.
 2. Vote: `POST /api/v1/jobs/{id}/approvals {"approver","verdict","comment"}`
-   - approver's role not in `approver_roles` → **403**
+   - approver's role not in `approver_roles` → **403** (a vote on a manual job
+     still waiting for Play → **409**)
    - approver == pipeline author and self-approval disabled → **403**
    - second vote by the same approver → **409**
 3. Any `rejected` vote → job **failed**. `required_approvals` approvals →

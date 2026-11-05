@@ -51,7 +51,7 @@ func New(kind string) (Executor, error) {
 	case "shell":
 		return shellExecutor{}, nil
 	case "docker":
-		return dockerExecutor{}, nil
+		return dockerExecutor{privilegedServices: privilegedServicesFromEnv()}, nil
 	case "kubernetes":
 		return newKubeExecutor()
 	default:
@@ -63,6 +63,19 @@ func New(kind string) (Executor, error) {
 // timed-out or canceled job needs to reach its whole process tree, and the
 // mechanism for that (process groups + SIGKILL vs TerminateProcess) is not
 // portable. See those files for the platform-specific cmd.Cancel/SysProcAttr.
+
+// privilegedServicesFromEnv reads RUNNER_PRIVILEGED_SERVICES. When true, the
+// docker executor starts a job's service containers with --privileged, which
+// docker-in-docker (docker:*-dind, the daemon an image build talks to) needs:
+// without it dockerd exits at once with "mount: permission denied". It is a
+// runner-level opt-in, like GitLab's privileged = true: a privileged container
+// is root on the runner host, so enable it only on runners dedicated to image
+// builds and route those jobs there with a tag. The job container itself is
+// never privileged.
+func privilegedServicesFromEnv() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("RUNNER_PRIVILEGED_SERVICES")))
+	return v == "true" || v == "1" || v == "yes"
+}
 
 // RunDirMount is where a job's run directory (job.RunDir) appears inside a
 // container (docker and kubernetes executors).
@@ -139,7 +152,9 @@ func (shellExecutor) Start(ctx context.Context, job *proto.RunnerJob, workdir st
 	return start(cmd)
 }
 
-type dockerExecutor struct{}
+type dockerExecutor struct {
+	privilegedServices bool // RUNNER_PRIVILEGED_SERVICES
+}
 
 func (dockerExecutor) Name() string { return "docker" }
 
@@ -181,7 +196,7 @@ func dockerCmd(ctx context.Context, job *proto.RunnerJob, args ...string) *exec.
 	return exec.CommandContext(ctx, "docker", args...)
 }
 
-func (dockerExecutor) Start(ctx context.Context, job *proto.RunnerJob, workdir string) (io.ReadCloser, func() int, error) {
+func (d dockerExecutor) Start(ctx context.Context, job *proto.RunnerJob, workdir string) (io.ReadCloser, func() int, error) {
 	image := job.Image
 	if image == "" {
 		image = defaultImage
@@ -211,7 +226,7 @@ func (dockerExecutor) Start(ctx context.Context, job *proto.RunnerJob, workdir s
 		return pr, waitCleanup, nil
 	}
 
-	return startDockerWithServices(ctx, job, workdir, image, name)
+	return startDockerWithServices(ctx, job, workdir, image, name, d.privilegedServices)
 }
 
 // startDockerWithServices runs a job that declares sidecar services. It creates
@@ -221,7 +236,7 @@ func (dockerExecutor) Start(ctx context.Context, job *proto.RunnerJob, workdir s
 // image ships a HEALTHCHECK), then runs the job container on the same network.
 // Everything — services, job container, network — is torn down in all exit
 // paths (success, failure, timeout, cancel, and any error during setup).
-func startDockerWithServices(ctx context.Context, job *proto.RunnerJob, workdir, image, name string) (io.ReadCloser, func() int, error) {
+func startDockerWithServices(ctx context.Context, job *proto.RunnerJob, workdir, image, name string, privileged bool) (io.ReadCloser, func() int, error) {
 	network := fmt.Sprintf("forge-net-%d", job.ID)
 
 	// Best-effort teardown of every resource this job created. Safe to call
@@ -253,6 +268,9 @@ func startDockerWithServices(ctx context.Context, job *proto.RunnerJob, workdir,
 	for i, svc := range job.Services {
 		args := []string{"run", "-d", "--rm", "--name", svcNames[i],
 			"--network", network, "--network-alias", svc.Alias}
+		if privileged {
+			args = append(args, "--privileged")
+		}
 		for k, v := range svc.Env {
 			args = append(args, "-e", k+"="+v)
 		}

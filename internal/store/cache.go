@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -26,16 +27,29 @@ func (s *Store) RepoForJob(ctx context.Context, jobID int64) (string, error) {
 // keys that exists (the fallback chain: exact key, then prefix/default). It
 // returns the matched key too so the caller can log which key hit. ErrNotFound
 // when none of the keys has a cache entry.
+//
+// keys[0] is matched exactly. A later (fallback) key also matches the newest
+// entry saved under "<key>-…": a job keyed by `files:` saves only
+// "<prefix>-<hash>", so the bare prefix the runner falls back to would
+// otherwise never exist, and every lockfile change would start cold.
 func (s *Store) LookupCache(ctx context.Context, repo string, keys []string) (blobKey, matchedKey string, err error) {
-	for _, k := range keys {
+	for i, k := range keys {
 		if k == "" {
 			continue
 		}
-		err = s.pool.QueryRow(ctx,
-			`SELECT blob_key FROM cache_entries WHERE repo=$1 AND cache_key=$2`,
-			repo, k).Scan(&blobKey)
+		if i == 0 {
+			err = s.pool.QueryRow(ctx,
+				`SELECT blob_key, cache_key FROM cache_entries WHERE repo=$1 AND cache_key=$2`,
+				repo, k).Scan(&blobKey, &matchedKey)
+		} else {
+			err = s.pool.QueryRow(ctx,
+				`SELECT blob_key, cache_key FROM cache_entries
+				 WHERE repo=$1 AND (cache_key=$2 OR cache_key LIKE $3 ESCAPE '\')
+				 ORDER BY (cache_key=$2) DESC, updated_at DESC LIMIT 1`,
+				repo, k, likePrefix(k)+"-%").Scan(&blobKey, &matchedKey)
+		}
 		if err == nil {
-			return blobKey, k, nil
+			return blobKey, matchedKey, nil
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return "", "", err
@@ -44,17 +58,44 @@ func (s *Store) LookupCache(ctx context.Context, repo string, keys []string) (bl
 	return "", "", ErrNotFound
 }
 
-// SaveCache upserts the cache metadata row for (repo, key), pointing it at
-// blobKey with the given size. A repeat save for the same key overwrites the
-// row (the blob key is deterministic, so the same object is overwritten).
-func (s *Store) SaveCache(ctx context.Context, repo, key, blobKey string, size int64) error {
-	_, err := s.pool.Exec(ctx,
+// likePrefix escapes LIKE metacharacters so s matches literally.
+func likePrefix(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
+}
+
+// SaveCache points the cache row for (repo, key) at blobKey with the given
+// size, and returns the blob key it replaced ("" when there was none) so the
+// caller can delete the old object. Each save uploads to a fresh blob key and
+// swaps the row only after the upload completed, so a reader never sees a
+// half-written archive and a failed or over-cap upload leaves the previous
+// cache intact.
+func (s *Store) SaveCache(ctx context.Context, repo, key, blobKey string, size int64) (previous string, err error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback(ctx)
+	err = tx.QueryRow(ctx,
+		`SELECT blob_key FROM cache_entries WHERE repo=$1 AND cache_key=$2 FOR UPDATE`,
+		repo, key).Scan(&previous)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return "", err
+	}
+	if _, err := tx.Exec(ctx,
 		`INSERT INTO cache_entries (repo, cache_key, blob_key, size_bytes, updated_at)
 		 VALUES ($1,$2,$3,$4, now())
 		 ON CONFLICT (repo, cache_key)
 		 DO UPDATE SET blob_key=EXCLUDED.blob_key, size_bytes=EXCLUDED.size_bytes, updated_at=now()`,
-		repo, key, blobKey, size)
-	return err
+		repo, key, blobKey, size); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
+	}
+	if previous == blobKey {
+		previous = ""
+	}
+	return previous, nil
 }
 
 // ExpiredCacheBlobKeys returns the blob keys of cache entries not updated within

@@ -8309,6 +8309,46 @@ textarea {
   max-width: 420px;
 }
 
+/* Admin → People & roles */
+.people-toolbar {
+  align-items: center;
+}
+.people-search {
+  flex: 1 1 320px;
+  max-width: 420px;
+}
+.people-count {
+  margin-left: auto;
+  font-size: var(--fs-sm);
+}
+.people-card {
+  overflow-x: auto;
+}
+.people-name {
+  font-weight: 600;
+}
+.people-email {
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+  word-break: normal;
+  overflow-wrap: normal;
+}
+.people-table td:first-child {
+  min-width: 240px;
+}
+.people-role {
+  width: auto;
+  min-width: 110px;
+}
+.people-src {
+  margin-left: 8px;
+}
+.people-repos {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
 .lint-warning {
   margin-top: 6px;
   font-size: var(--fs-sm);
