@@ -179,10 +179,14 @@ func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if req.Repo == "" || req.Ref == "" || req.Config == "" {
-		writeErr(w, http.StatusBadRequest, "repo, ref and config are required")
+	if req.Repo == "" || req.Ref == "" {
+		writeErr(w, http.StatusBadRequest, "repo and ref are required")
 		return
 	}
+	// No config: run what a push of the ref would run — the repo's
+	// .forge-ci.yml at the ref's commit (or its registered config, per the
+	// repo's config source). This replays a missed webhook without YAML.
+	fromRepo := req.Config == ""
 	// Identity-from-session: when SSO is enforced, the trigger identity is the
 	// authenticated user — a client-supplied triggered_by is ignored. This keeps
 	// the separation-of-duties self-approval check (pipeline author may not
@@ -206,6 +210,21 @@ func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
 		}
 		req.SHA = sha
 	}
+	var configVersion *int
+	if fromRepo {
+		cfg, version, source, err := s.store.ResolvePipelineConfig(r.Context(), req.Repo, req.SHA)
+		if errors.Is(err, store.ErrNotFound) {
+			writeErr(w, http.StatusBadRequest, fmt.Sprintf(
+				"no config given and %s has no pipeline config at %s (no %s in the repo and no registered config)",
+				req.Repo, req.Ref, vcs.DefaultConfigPath))
+			return
+		}
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, "could not read the repo's pipeline config: "+err.Error())
+			return
+		}
+		req.Config, req.ConfigSource, configVersion = cfg, source, version
+	}
 	jobs, err := compiler.CompileWith(req.Config, req.Ref, compiler.SourceAPI, s.store.CompileOpts(r.Context(), req.Repo))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -218,8 +237,7 @@ func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
 	}
 	// Stamp the config version when the submitted YAML matches the current
 	// registered config; otherwise it's recorded as a one-off custom run.
-	var configVersion *int
-	if current, err := s.store.GetRepoConfig(r.Context(), req.Repo); err == nil && current == req.Config {
+	if current, err := s.store.GetRepoConfig(r.Context(), req.Repo); !fromRepo && err == nil && current == req.Config {
 		if v, err := s.store.CurrentConfigVersion(r.Context(), req.Repo); err == nil && v > 0 {
 			configVersion = &v
 		}

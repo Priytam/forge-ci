@@ -354,7 +354,8 @@ export interface CreatePipelineRequest {
   ref: string;
   /** Optional: connected repos resolve the ref tip server-side. */
   sha?: string;
-  config: string;
+  /** Omit to run the repo's own pipeline config at the ref (what a push runs). */
+  config?: string;
 }
 
 const BASE = "/api/v1";
