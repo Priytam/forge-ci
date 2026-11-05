@@ -1640,3 +1640,12 @@ CREATE TABLE IF NOT EXISTS live_templates (
 ALTER TABLE live_apps ADD COLUMN IF NOT EXISTS template TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS live_apps_template_idx ON live_apps (template) WHERE template <> '';
 ALTER TABLE live_apps ADD COLUMN IF NOT EXISTS desired_digest TEXT NOT NULL DEFAULT '';
+
+-- Platform admins granted from the Admin UI, alongside ADMIN_EMAILS (the
+-- bootstrap / break-glass list, which stays read-only in the UI) and IdP
+-- groups mapped to platform admin. Emails are stored lower-cased.
+CREATE TABLE IF NOT EXISTS platform_admins (
+    email      TEXT        PRIMARY KEY CHECK (email = lower(email) AND email <> ''),
+    added_by   TEXT        NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);

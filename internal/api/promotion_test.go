@@ -78,6 +78,9 @@ func runNext(t *testing.T, st *store.Store, db *pgx.Conn, srv *Server, want stri
 }
 
 func TestDeployRecordsAndPromotion(t *testing.T) {
+	// No blob store here, so pin the Postgres log backend: with REDIS_URL set
+	// (as in CI) Resolve would pick Redis and need a blob store for archives.
+	t.Setenv("LOG_BACKEND", "postgres")
 	st, db := newCFRStore(t, "")
 	ctx := context.Background()
 	srv := New(st, nil, logstore.Resolve(ctx, st, nil))

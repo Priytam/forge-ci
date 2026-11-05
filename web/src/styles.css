@@ -8294,3 +8294,8 @@ textarea {
 .lv-template-pick .check-row { display: flex; align-items: center; gap: 6px; padding: 2px 0; }
 .lv-template-on { margin-top: 10px; font-size: var(--fs-sm); }
 .lv-left { margin-right: auto; }
+
+.admin-email-field {
+  flex: 1 1 280px;
+  max-width: 420px;
+}

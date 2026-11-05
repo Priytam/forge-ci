@@ -33,15 +33,28 @@ admin*. Admin is determined by:
   (bootstrap — there is no authz until you enable SSO).
 - **Enforced mode** (SSO enabled): the caller must have a session whose email
   is listed in **`ADMIN_EMAILS`** (comma-separated), e.g.
-  `ADMIN_EMAILS="alice@acme.io,bob@acme.io"`, **or** belong to an IdP group
-  mapped to *platform admin* (below). Non-admins get `403`; unauthenticated
-  callers get `401`.
+  `ADMIN_EMAILS="alice@acme.io,bob@acme.io"`, **or** was added on
+  **Admin → Access → Platform admins**, **or** belongs to an IdP group mapped
+  to *platform admin* (below). Non-admins get `403`; unauthenticated callers
+  get `401`.
+
+**Platform admins page.** Admins add and remove other admins by email; it
+takes effect on that person's next request and is audit-logged
+(`platform-admin.add` / `platform-admin.remove`). `ADMIN_EMAILS` entries show
+as *server config* and can only be changed on the server; keep at least one
+there as a break-glass admin. Granting or revoking needs a signed-in browser
+session (not an API token), you can't remove yourself, and the last admin
+can't be removed. API: `GET/POST /api/v1/platform-admins`,
+`DELETE /api/v1/platform-admins/{email}`. This is the way to add a single
+admin when sign-in is the built-in Google, Microsoft or GitHub button, which
+sends no groups for group mappings.
 
 `GET /api/v1/auth/me` returns an `is_admin` boolean so the UI can hide
 admin-only navigation.
 
-> Footgun: enabling SSO with an empty `ADMIN_EMAILS` locks everyone out of
-> admin mutations. Set `ADMIN_EMAILS` **before** enabling a provider.
+> Footgun: enabling SSO with no admin (empty `ADMIN_EMAILS`, nobody on the
+> Platform admins page, no admin group) locks everyone out of admin
+> mutations. Set `ADMIN_EMAILS` or add admins **before** enabling a provider.
 
 ## Identity from the session (no client-asserted identity when enforced)
 
