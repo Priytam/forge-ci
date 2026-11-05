@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
-import { commitSubject, createLiveOp, getLiveApp, getLiveOrphans, listLiveOps, relativeTime, shortSha, subscribeLive, type Health, type LiveAppView, type LiveOp, type LivePatch, type LiveResource } from "../api";
+import { commitSubject, createLiveOp, setLiveAppEnvironment, getLiveApp, getLiveOrphans, listLiveOps, relativeTime, shortSha, subscribeLive, type Health, type LiveAppView, type LiveOp, type LivePatch, type LiveResource } from "../api";
 import { DiffPanel, HistoryPanel, PolicyDialog, SyncDialog } from "../components/live/AppPanels";
 import { networkTree, PodsView } from "../components/live/views";
 import Avatar, { displayName } from "../components/Avatar";
@@ -8,8 +8,9 @@ import ResourceList from "../components/live/ResourceList";
 import ResourcePanel from "../components/live/ResourcePanel";
 import ResourceTree from "../components/live/ResourceTree";
 import RolloutPanel from "../components/live/Rollout";
-import { HEALTH_ORDER, HEALTH_TONE, HealthIcon, KindIcon, requester, shortImage, SyncPill } from "../components/live/ui";
+import { EnvName, HEALTH_ORDER, HEALTH_TONE, HealthIcon, KindIcon, requester, shortImage, SyncPill } from "../components/live/ui";
 import { Skeleton } from "../components/ui/Pill";
+import ConfirmDialog from "../components/ui/ConfirmDialog";
 
 /** Applies a stream patch; null when the page's copy is not its base (refetch). */
 function applyPatch(v: LiveAppView, p: LivePatch): LiveAppView | null {
@@ -87,6 +88,8 @@ export default function ApplicationDetail() {
   const [health, setHealth] = useState<Health[]>([]);
   const [lastOp, setLastOp] = useState<LiveOp | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [envEdit, setEnvEdit] = useState<string | null>(null);
+  const [envError, setEnvError] = useState<string | null>(null);
   const loadOps = useCallback(() => {
     listLiveOps(id).then((ops) => setLastOp(ops.find((o) => o.kind === "sync" || o.kind === "rollback") ?? null), () => undefined);
   }, [id]);
@@ -167,7 +170,15 @@ export default function ApplicationDetail() {
           <div className="lv-meta">
             <span title={`${target.provider} target`}>{target.name}</span>
             {app.namespace && <span>{app.namespace}</span>}
-            {app.environment && <Link to={`/applications?environment=${encodeURIComponent(app.environment)}`}>{app.environment}</Link>}
+            {app.environment && (
+              <Link to={`/applications?environment=${encodeURIComponent(app.environment)}`}>
+                <EnvName app={app} />
+              </Link>
+            )}
+            <button type="button" className="link-btn" title="Set this application's environment in Forge"
+              onClick={() => { setEnvError(null); setEnvEdit(app.environment_override ?? ""); }}>
+              change environment
+            </button>
             {app.repo && <Link to={`/repos/${encodeURIComponent(app.repo)}`}>{app.repo}</Link>}
             {app.images[0] && <span className="mono" title={app.images.join("\n")}>{shortImage(app.images[0])}{app.images.length > 1 ? ` +${app.images.length - 1}` : ""}</span>}
             <span className="lv-live" title={target.capabilities.watch ? "Changes arrive as they happen" : `Reconciled every ${target.capabilities.reconcile_seconds}s`}>
@@ -190,6 +201,36 @@ export default function ApplicationDetail() {
           </button>
         </div>
       </div>
+      {(app.environment_conflict ?? []).length > 0 && (
+        <div className="error-banner">
+          The objects of {app.name} carry different environment labels ({(app.environment_conflict ?? []).join(", ")}), so the
+          label is ignored and the app counts as <strong>{app.environment}</strong> ({app.environment_source === "namespace" ? "its namespace's" : "the target's"} environment).
+          Label them all the same, or set the environment here.
+        </div>
+      )}
+      {envEdit !== null && (
+        <ConfirmDialog
+          title={`Environment of ${app.name}`}
+          confirmLabel="Save"
+          onCancel={() => setEnvEdit(null)}
+          onConfirm={() => {
+            setLiveAppEnvironment(app.id, envEdit.trim())
+              .then(() => { setEnvEdit(null); load(); })
+              .catch((e) => setEnvError(e instanceof Error ? e.message : String(e)));
+          }}
+        >
+          <p className="muted">
+            Set here, it wins over the environment label on the app's objects
+            {app.label_environment ? ` (${app.label_environment})` : ""}, the target's namespace map and the target's
+            environment. Leave empty to go back to those. It decides the app's approvals, freezes and environment pages.
+          </p>
+          <label className="lv-admin-field">
+            Environment
+            <input value={envEdit} placeholder={app.label_environment || app.environment} onChange={(e) => setEnvEdit(e.target.value)} />
+          </label>
+          {envError && <div className="error-banner">{envError}</div>}
+        </ConfirmDialog>
+      )}
       {gone && <div className="error-banner">This application no longer exists on {target.name}.</div>}
 
       <div className="lv-panels">

@@ -8364,3 +8364,5 @@ textarea {
 .dialog.dialog-wide { width: min(820px, calc(100vw - 32px)); }
 .retry-failed-list { margin-top: 10px; max-height: 50vh; overflow: auto; }
 .retry-failed-list table { margin-top: 6px; width: 100%; }
+
+.lv-env-conflict { color: var(--warning); font-size: var(--fs-sm); white-space: nowrap; }

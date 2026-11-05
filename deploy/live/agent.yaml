@@ -74,6 +74,9 @@ spec:
           args:
             - --provider=kubernetes
             - --exclude-namespaces=kube-system,kube-public,kube-node-lease,forge-live
+            # An app's environment comes from the forge.dev/environment label on
+            # its objects (change the key, or "-" for none):
+            # - --environment-label=forge.dev/environment
             # Watch only these namespaces (exclude still wins). One namespace is
             # filtered by the API server; several, in the agent.
             # - --include-namespaces=travafa-staging,travafa-prod

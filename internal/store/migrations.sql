@@ -1691,3 +1691,19 @@ ALTER TABLE live_targets ADD COLUMN IF NOT EXISTS default_policy JSONB;
 -- except admin-only actions) or admin (everything its owner may do). Empty is
 -- admin: tokens made before scopes existed keep working as they did.
 ALTER TABLE api_tokens ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT '';
+
+-- An app's environment from a label on its top-level objects (the agent's
+-- --environment-label), and the values when they disagree (then no label
+-- environment applies and the app is flagged).
+ALTER TABLE live_apps ADD COLUMN IF NOT EXISTS label_environment TEXT NOT NULL DEFAULT '';
+ALTER TABLE live_apps ADD COLUMN IF NOT EXISTS environment_conflict TEXT[] NOT NULL DEFAULT '{}';
+-- An app's environment set explicitly in Forge; it wins over everything
+-- else and outlives the app's row, like its sync policy.
+CREATE TABLE IF NOT EXISTS live_app_environments (
+    target_id   BIGINT      NOT NULL REFERENCES live_targets(id) ON DELETE CASCADE,
+    app_key     TEXT        NOT NULL,
+    environment TEXT        NOT NULL,
+    updated_by  TEXT        NOT NULL DEFAULT '',
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (target_id, app_key)
+);

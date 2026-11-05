@@ -149,16 +149,21 @@ func TestConvertTrimsManifests(t *testing.T) {
 type recorder struct {
 	res    map[string]live.Resource
 	app    map[string]string
+	apps   map[string]live.App // the latest of each app, by key
 	events []live.Event
 }
 
 func newRecorder() *recorder {
-	return &recorder{res: map[string]live.Resource{}, app: map[string]string{}}
+	return &recorder{res: map[string]live.Resource{}, app: map[string]string{}, apps: map[string]live.App{}}
 }
 func (r *recorder) Upsert(a live.App, res live.Resource) {
-	r.res[res.UID], r.app[res.UID] = res, a.Key
+	r.res[res.UID], r.app[res.UID], r.apps[a.Key] = res, a.Key, a
 }
-func (r *recorder) Delete(_ live.App, uid string)  { delete(r.res, uid); delete(r.app, uid) }
+func (r *recorder) Delete(a live.App, uid string) {
+	delete(r.res, uid)
+	delete(r.app, uid)
+	r.apps[a.Key] = a
+}
 func (r *recorder) Event(_ live.App, e live.Event) { r.events = append(r.events, e) }
 func (r *recorder) Synced()                        {}
 func (r *recorder) Desired(live.App, live.Desired) {}
@@ -175,7 +180,7 @@ func newWatcher(t *testing.T, cfg Config) (*watcher, *recorder) {
 		t.Fatal(err)
 	}
 	rec := newRecorder()
-	return &watcher{p: p, sink: rec, nodes: map[string]*node{}, apps: map[string]*live.App{},
+	return &watcher{p: p, sink: rec, nodes: map[string]*node{}, apps: map[string]*live.App{}, envs: map[string]map[string]int{},
 		strs: map[string]string{}, healths: map[live.Health]*live.Health{},
 		parked: map[string]map[string]parkedChild{}, parkedBy: map[string]string{}, restart: make(chan struct{})}, rec
 }

@@ -39,6 +39,7 @@ func main() {
 		kubeconfig = flag.String("kubeconfig", "", "kubeconfig to use outside a cluster (default: in-cluster)")
 		appLabels  = flag.String("app-labels", "app.kubernetes.io/instance,app.kubernetes.io/name", "labels naming a top-level object's application; the first present wins")
 		groupLabel = flag.String("group-label", "app.kubernetes.io/part-of", "label naming the system an application is part of")
+		envLabel   = flag.String("environment-label", kube.DefaultEnvironmentLabel, "label on an application's top-level objects naming its environment (\"-\": none)")
 		rootSel    = flag.String("root-selector", "", "label selector limiting which top-level objects are applications")
 		excludeNS  = flag.String("exclude-namespaces", "kube-system,kube-public,kube-node-lease", "namespaces never watched (wins over --include-namespaces)")
 		includeNS  = flag.String("include-namespaces", "", "if set, the only namespaces watched (comma-separated); --exclude-namespaces still applies")
@@ -78,7 +79,7 @@ func main() {
 		if err != nil {
 			fatal("kubernetes client: %v", err)
 		}
-		kc := kube.Config{AppLabels: split(*appLabels), GroupLabel: *groupLabel, RootSelector: *rootSel, ExcludeNamespaces: split(*excludeNS),
+		kc := kube.Config{AppLabels: split(*appLabels), GroupLabel: *groupLabel, EnvironmentLabel: *envLabel, RootSelector: *rootSel, ExcludeNamespaces: split(*excludeNS),
 			IncludeNamespaces: split(*includeNS),
 			Orphans:           *orphans}
 		if *sourceURL != "" {

@@ -56,6 +56,7 @@ func (s *Server) registerLiveRoutes() {
 	s.mux.HandleFunc("POST /api/v1/live/apps/{id}/ops", s.createLiveOp)
 	s.mux.HandleFunc("PUT /api/v1/live/apps/{id}/policy", s.setLivePolicy)
 	s.mux.HandleFunc("POST /api/v1/live/apps/policy", s.setLivePolicies)
+	s.mux.HandleFunc("PUT /api/v1/live/apps/{id}/environment", s.setLiveAppEnvironment)
 	s.mux.HandleFunc("POST /api/v1/live/templates", s.saveLiveTemplate)
 	s.mux.HandleFunc("PUT /api/v1/live/templates/{id}", s.saveLiveTemplate)
 	s.mux.HandleFunc("DELETE /api/v1/live/templates/{id}", s.deleteLiveTemplate)
@@ -642,6 +643,46 @@ func (s *Server) setLivePolicy(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "failed to load the application")
 		return
 	}
+	writeJSON(w, http.StatusOK, a)
+}
+
+// setLiveAppEnvironment is PUT /api/v1/live/apps/{id}/environment
+// {"environment": "production"}: set the app's environment in Forge, which
+// wins over its environment label, its namespace's mapping and the target's
+// environment; "" goes back to those. Admin only (the environment decides
+// which approval and freeze rules apply to the app).
+func (s *Server) setLiveAppEnvironment(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid application id")
+		return
+	}
+	var req struct {
+		Environment *string `json:"environment"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Environment == nil {
+		writeErr(w, http.StatusBadRequest, `want {"environment": "<name>"} ("" clears it)`)
+		return
+	}
+	env := strings.TrimSpace(*req.Environment)
+	if err := s.store.SetLiveAppEnvironment(r.Context(), id, env, s.actorLabel(r)); errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "application not found")
+		return
+	} else if err != nil {
+		slog.Error("live: set app environment", "id", id, "err", err)
+		writeErr(w, http.StatusInternalServerError, "failed to save the environment")
+		return
+	}
+	a, err := s.store.LiveApp(r.Context(), id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to load the application")
+		return
+	}
+	s.audit(r, "live.app.environment", a.Target+"/"+a.Key, a.Repo, "updated", map[string]any{
+		"environment": env, "effective": a.Environment, "source": a.EnvironmentSource})
 	writeJSON(w, http.StatusOK, a)
 }
 

@@ -384,11 +384,29 @@ pipelines and Applications tab.
 
 ### One cluster, several environments
 
-A cluster that runs staging and prod in different namespaces needs one
-target and one agent, not two. Under **Settings → Live agents → Edit**, map
-namespaces to environments, one per line (`travafa-staging = staging`,
-`travafa-prod = production`); apps in any other namespace keep the
-target's environment. Or through the API:
+A cluster that runs staging and prod needs one target and one agent, not
+two. An application's environment is decided, strongest first, by:
+
+1. **The app's own setting in Forge** — its page → *change environment*, or
+   `PUT /api/v1/live/apps/{id}/environment {"environment": "production"}`
+   (admin; `""` clears it). Kept per target and app key, so it survives the
+   app disappearing and coming back.
+2. **The environment label on its objects** — `forge.dev/environment:
+   production` on the app's top-level objects (Deployment, Service,
+   ConfigMap, …; pods and ReplicaSets do not count). The agent reads it; set
+   another key with `--environment-label=acme.io/env`, or turn it off with
+   `--environment-label=-`. Objects without the label do not count. **When
+   labelled objects disagree**, Forge does not pick one: the label is
+   ignored, the app falls through to the next rule, and the app is flagged
+   (*⚠ labels disagree* in the list, a banner on its page,
+   `environment_conflict` in the API) until the labels agree or the app's
+   environment is set in Forge.
+3. **The target's namespace map** — under **Settings → Live agents → Edit**,
+   one per line (`travafa-staging = staging`, `travafa-prod = production`),
+   or `PATCH /api/v1/live/targets/<id>` with `namespace_environments`
+   (`POST /api/v1/live/targets` takes the same field). Namespaces are matched
+   exactly.
+4. **The target's environment.**
 
 ```bash
 curl -X PATCH https://forge.example.com/api/v1/live/targets/<id> \
@@ -396,12 +414,14 @@ curl -X PATCH https://forge.example.com/api/v1/live/targets/<id> \
   -d '{"namespace_environments": {"travafa-staging": "staging", "travafa-prod": "production"}}'
 ```
 
-(`POST /api/v1/live/targets` takes the same field.) The app's environment
-then decides everything an environment decides: the Applications filter and
-facet, the repo's environment cards, which deployment the app is compared
-with, and the freeze and approval rules for its syncs and rollbacks.
-Namespaces are matched exactly. App templates still pick targets by the
-target's own environment.
+Each app in the API says which rule applied (`environment_source`: `app`,
+`label`, `namespace` or `target`; hover the environment in the UI). The app's
+environment then decides everything an environment decides: the
+Applications filter and facet, the repo's environment cards and the
+environments board, which deployment the app is compared with, the freeze
+and approval rules for its syncs and rollbacks, and whether it may
+self-heal. App templates still pick targets by the target's own
+environment.
 
 ## Numbers
 

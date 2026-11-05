@@ -2908,6 +2908,14 @@ export interface LiveApp {
   updated_at: string;
   target: string;
   environment: string;
+  /** where `environment` comes from, strongest first: app (set in Forge), label, namespace, target */
+  environment_source?: "app" | "label" | "namespace" | "target";
+  /** the environment set on the app in Forge ("" = none) */
+  environment_override?: string;
+  /** what its objects' environment label says, when they agree */
+  label_environment?: string;
+  /** the label's values when the app's objects disagree (then the label is not used) */
+  environment_conflict?: string[];
   repo: string;
   provider: string;
   deployed: LiveDeploy | null;
@@ -2934,6 +2942,11 @@ export interface LivePolicy {
   status: string;
   updated_by: string;
   updated_at: string | null;
+}
+
+/** Set the app's environment in Forge ("" goes back to its label / namespace / target). Admin only. */
+export function setLiveAppEnvironment(app: number, environment: string): Promise<LiveApp> {
+  return putJSON(`/live/apps/${app}/environment`, { environment });
 }
 
 export function setLivePolicy(app: number, p: Pick<LivePolicy, "auto_sync" | "prune" | "self_heal">): Promise<LiveApp> {

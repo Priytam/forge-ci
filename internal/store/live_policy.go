@@ -152,3 +152,29 @@ func (a *LiveApp) DeployedImage() string {
 	}
 	return repo + "@" + a.Deployed.Digest
 }
+
+// SetLiveAppEnvironment sets (env "": clears) the environment of app in
+// Forge, which wins over its label, namespace and target. It is kept per
+// target and app key, so it outlives the app's row.
+func (s *Store) SetLiveAppEnvironment(ctx context.Context, appID int64, env, by string) error {
+	var exists bool
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM live_apps WHERE id = $1)`, appID).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		return ErrNotFound
+	}
+	var err error
+	if env == "" {
+		_, err = s.pool.Exec(ctx, `DELETE FROM live_app_environments e USING live_apps a
+			WHERE a.id = $1 AND e.target_id = a.target_id AND e.app_key = a.key`, appID)
+	} else {
+		_, err = s.pool.Exec(ctx, `INSERT INTO live_app_environments (target_id, app_key, environment, updated_by)
+			SELECT target_id, key, $2, $3 FROM live_apps WHERE id = $1
+			ON CONFLICT (target_id, app_key) DO UPDATE SET environment = $2, updated_by = $3, updated_at = now()`, appID, env, by)
+	}
+	if err != nil {
+		return err
+	}
+	return s.notifyApp(ctx, appID)
+}

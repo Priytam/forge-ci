@@ -218,6 +218,11 @@ kubectl apply -f deploy/live/agent.yaml   # from a Forge checkout`}</pre>
           onCancel={() => setEditing(null)}
           onConfirm={() => void saveEdit()}
         >
+          <p className="muted">
+            An app's environment is, strongest first: the one set on the app (its page → change environment), the{" "}
+            <code>forge.dev/environment</code> label on its objects (the agent's <code>--environment-label</code>), the
+            namespace map below, then this target's environment.
+          </p>
           <label className="lv-admin-field">
             Environment (apps in any other namespace)
             <input value={editing.environment} onChange={(e) => setEditing({ ...editing, environment: e.target.value })} />

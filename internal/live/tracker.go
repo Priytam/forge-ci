@@ -172,6 +172,7 @@ func (t *Tracker) Delete(app App, uid string) {
 	if _, ok := a.resources[uid]; !ok {
 		return
 	}
+	a.app = app // what the app is may change with what it lost (its environment label)
 	t.objects--
 	delete(a.resources, uid)
 	a.touch(t.now())

@@ -122,6 +122,12 @@ type App struct {
 	Name      string `json:"name"`                // what people call it
 	Namespace string `json:"namespace,omitempty"` // Kubernetes namespace, or cloud region
 	Group     string `json:"group,omitempty"`     // the system it is part of (app.kubernetes.io/part-of)
+	// Environment is what the environment label on the app's top-level
+	// objects says, when they agree. When they disagree it is empty and
+	// EnvironmentConflict lists the values (sorted), so Forge can flag the
+	// app instead of guessing.
+	Environment         string   `json:"environment,omitempty"`
+	EnvironmentConflict []string `json:"environment_conflict,omitempty"`
 	// Orphans marks a namespace's orphaned resources: top-level objects no
 	// application owns. Not an application — pages show them on request.
 	Orphans bool `json:"orphans,omitempty"`
