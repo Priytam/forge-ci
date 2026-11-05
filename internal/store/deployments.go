@@ -27,7 +27,7 @@ func (s *Store) EnvironmentsForRepo(ctx context.Context, repo string) ([]EnvBoar
 	// row per environment under the ORDER BY, i.e. the highest id).
 	rows, err := s.pool.Query(ctx,
 		`SELECT DISTINCT ON (environment)
-		        environment, id, repo, sha, ref, pipeline_id, job_id, deployed_by, deployed_at, status
+		        environment, id, repo, sha, ref, pipeline_id, job_id, deployed_by, deployed_at, status, url, version, digest, promoted_from
 		 FROM deployments
 		 WHERE repo=$1 AND status='success'
 		 ORDER BY environment, id DESC`, repo)
@@ -40,7 +40,7 @@ func (s *Store) EnvironmentsForRepo(ctx context.Context, repo string) ([]EnvBoar
 	for rows.Next() {
 		var d proto.Deployment
 		if err := rows.Scan(&d.Environment, &d.ID, &d.Repo, &d.SHA, &d.Ref,
-			&d.PipelineID, &d.JobID, &d.DeployedBy, &d.DeployedAt, &d.Status); err != nil {
+			&d.PipelineID, &d.JobID, &d.DeployedBy, &d.DeployedAt, &d.Status, &d.URL, &d.Version, &d.Digest, &d.PromotedFrom); err != nil {
 			return nil, err
 		}
 		byEnv[d.Environment] = &EnvBoardRow{Environment: d.Environment, Current: d}
@@ -90,7 +90,7 @@ func (s *Store) ListDeployments(ctx context.Context, repo, env string, limit, of
 		return nil, 0, err
 	}
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, repo, environment, sha, ref, pipeline_id, job_id, deployed_by, deployed_at, status
+		`SELECT id, repo, environment, sha, ref, pipeline_id, job_id, deployed_by, deployed_at, status, url, version, digest, promoted_from
 		 FROM deployments
 		 WHERE repo=$1 AND environment=$2
 		 ORDER BY id DESC LIMIT $3 OFFSET $4`, repo, env, limit, offset)
@@ -102,7 +102,7 @@ func (s *Store) ListDeployments(ctx context.Context, repo, env string, limit, of
 	for rows.Next() {
 		var d proto.Deployment
 		if err := rows.Scan(&d.ID, &d.Repo, &d.Environment, &d.SHA, &d.Ref,
-			&d.PipelineID, &d.JobID, &d.DeployedBy, &d.DeployedAt, &d.Status); err != nil {
+			&d.PipelineID, &d.JobID, &d.DeployedBy, &d.DeployedAt, &d.Status, &d.URL, &d.Version, &d.Digest, &d.PromotedFrom); err != nil {
 			return nil, 0, err
 		}
 		out = append(out, d)

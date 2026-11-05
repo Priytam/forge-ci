@@ -42,3 +42,22 @@ The policy is checked on **every request**, not only at creation:
   any token older than `n` days.
 
 Revoke a token to stop it permanently.
+
+## Service accounts
+
+For automation that shouldn't depend on one person — a deploy script, a GitHub
+Action, a cron job — use a **service account** (Admin ▾ → Service accounts,
+`/api/v1/service-accounts`):
+
+- It acts as `svc:<name>` (e.g. `svc:deployer`): that is the identity in the
+  audit log, on pipelines it starts, and for repo membership. Grant it repo
+  access by adding `svc:deployer` as a member (Repo → Settings → Members), or
+  mark it **admin** for platform-wide rights.
+- Admins create its tokens (`POST /api/v1/service-accounts/{id}/tokens`
+  `{"description", "expires_in_days" | "no_expiry": true}`); the same token
+  policy applies as for personal tokens. Tokens are `fci_…` and used the same
+  way.
+- **Disable** the account and every token stops at once; **delete** removes it
+  and its tokens. Individual tokens can be revoked.
+- Managing service accounts needs an admin signed in with SSO — a token
+  (including an admin service account's) can't create accounts or tokens.

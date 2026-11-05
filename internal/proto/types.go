@@ -34,6 +34,10 @@ type Pipeline struct {
 	// the pull-request title for a PR run.
 	CommitMessage string    `json:"commit_message,omitempty"`
 	CreatedAt     time.Time `json:"created_at"`
+	// Coverage is the mean of the pipeline's job coverage values (nil = none
+	// reported). PromotedFrom is the deployment a promotion pipeline redeploys.
+	Coverage     *float64 `json:"coverage,omitempty"`
+	PromotedFrom *int64   `json:"promoted_from,omitempty"`
 }
 
 // StageStatus is the derived status of one stage, for the mini per-stage
@@ -75,6 +79,17 @@ type Job struct {
 	// when the job's failure does not fail dependents or the pipeline.
 	Manual       bool `json:"manual"`
 	AllowFailure bool `json:"allow_failure"`
+	// StatusReason says why a job ended without running — e.g. its branch may
+	// not deploy to its environment. Empty otherwise.
+	StatusReason string `json:"status_reason,omitempty"`
+	// RetryOf is the job this one re-runs (POST /jobs/{id}/retry), if any.
+	RetryOf *int64 `json:"retry_of,omitempty"`
+	// ResourceGroup: at most one job per (repo, group) runs at a time.
+	ResourceGroup string `json:"resource_group,omitempty"`
+	// Coverage is the job's coverage percentage, when it reports one.
+	Coverage *float64 `json:"coverage,omitempty"`
+	// RunnerID is the runner that ran (or is running) the job.
+	RunnerID *string `json:"runner_id,omitempty"`
 
 	// Approval gate, populated only for a job that targets a protected
 	// environment. Approvals is the append-only vote record (one per approver,
@@ -83,6 +98,14 @@ type Job struct {
 	// job with no gate.
 	Approvals         []JobApproval `json:"approvals,omitempty"`
 	RequiredApprovals int           `json:"required_approvals,omitempty"`
+	// RequiredGroup / RequiredGroupApprovals: the gate also needs this many
+	// approvals from members of this approver group.
+	RequiredGroup          string `json:"required_group,omitempty"`
+	RequiredGroupApprovals int    `json:"required_group_approvals,omitempty"`
+	// GroupApprovals: approved votes so far from the required group;
+	// GroupMembers: who could still supply one (the group's members).
+	GroupApprovals int      `json:"group_approvals,omitempty"`
+	GroupMembers   []string `json:"group_members,omitempty"`
 }
 
 // JobApproval is one recorded vote on an approval-gated job. Votes are
@@ -97,6 +120,11 @@ type JobApproval struct {
 
 // RunnerJob is the payload handed to a runner when it acquires a job.
 type RunnerJob struct {
+	// RunDir is runner-local (never sent over the wire): a per-job directory
+	// for files the runner keeps fresh while the job runs, such as the OIDC
+	// token file. Executors expose it to the job (see executor.RunPath).
+	RunDir string `json:"-"`
+
 	ID         int64             `json:"id"`
 	PipelineID int64             `json:"pipeline_id"`
 	Name       string            `json:"name"`
@@ -109,6 +137,18 @@ type RunnerJob struct {
 	// ReportJUnitPaths are workspace globs of JUnit XML the runner collects after
 	// a successful job and POSTs to the report endpoint for server-side parsing.
 	ReportJUnitPaths []string `json:"report_junit_paths,omitempty"`
+	// ReportDotenvPath is a KEY=VALUE file the runner reads after a successful
+	// job and posts to /runner/jobs/{id}/dotenv; CoverageReportPath is a
+	// Cobertura file posted to /runner/jobs/{id}/coverage. Both workspace-relative.
+	ReportDotenvPath   string `json:"report_dotenv_path,omitempty"`
+	CoverageReportPath string `json:"coverage_report_path,omitempty"`
+	// Secrets are fetched from external secret managers before the script
+	// (see compiler.secretSpec); RegistryLogins are registries to log into.
+	Secrets        map[string]SecretSpec `json:"secrets,omitempty"`
+	RegistryLogins []string              `json:"registry_logins,omitempty"`
+	// DockerConfigDir is runner-local: the directory holding the Docker
+	// config.json the runner prepared for this job ("" = none).
+	DockerConfigDir string `json:"-"`
 
 	// Cache directives (GitLab-style). The runner restores the cache before the
 	// script and saves it after, keyed by repo+key and shared across pipelines.
@@ -232,6 +272,22 @@ type Runner struct {
 	Online        bool      `json:"online"` // contacted within the last 30s
 	CreatedAt     time.Time `json:"created_at"`
 	LastContactAt time.Time `json:"last_contact_at"`
+	// Version is what the runner reported; Outdated when it differs from
+	// the runner the server bundles. Draining: taking no new jobs, with
+	// RunningJobs still in flight. UpdateRequested: will self-update when idle.
+	Version         string `json:"version,omitempty"`
+	Outdated        bool   `json:"outdated,omitempty"`
+	Draining        bool   `json:"draining,omitempty"`
+	UpdateRequested bool   `json:"update_requested,omitempty"`
+	RunningJobs     int    `json:"running_jobs"`
+	// Concurrency is the runner's job slots. Stale: not seen for a day —
+	// left out of capacity and tag counts, and removable.
+	Concurrency int  `json:"concurrency"`
+	Stale       bool `json:"stale"`
+	// Pool: the pool the runner reported, or — PoolInferred — the one pool
+	// whose tags equal the runner's (how the autoscaler counts its runners).
+	Pool         string `json:"pool,omitempty"`
+	PoolInferred bool   `json:"pool_inferred,omitempty"`
 }
 
 // ArtifactInfo is artifact metadata for list/download endpoints.
@@ -319,6 +375,12 @@ type AcquireRequest struct {
 	RunnerID string   `json:"runner_id"`
 	Executor string   `json:"executor"`
 	Tags     []string `json:"tags"`
+	Version  string   `json:"version,omitempty"` // runner build version
+	// Concurrency is how many jobs the runner runs in parallel (its slots);
+	// older runners omit it and count as 1.
+	Concurrency int `json:"concurrency,omitempty"`
+	// Pool is the autoscaled pool that launched the runner (RUNNER_POOL), if any.
+	Pool string `json:"pool,omitempty"`
 }
 
 type CompleteRequest struct {
@@ -339,6 +401,12 @@ type ApprovalRequest struct {
 }
 
 type CreatePipelineRequest struct {
+	// PromotedFrom is the deployment a promotion pipeline redeploys (0 = not a
+	// promotion). ExternalNeeds wires needs on jobs that aren't in this
+	// pipeline to jobs of another one (the build a promotion reuses).
+	PromotedFrom  int64            `json:"-"`
+	ExternalNeeds map[string]int64 `json:"-"`
+
 	Repo        string `json:"repo"`
 	Ref         string `json:"ref"`
 	SHA         string `json:"sha"`
@@ -402,6 +470,14 @@ type Deployment struct {
 	DeployedBy  string    `json:"deployed_by"`
 	DeployedAt  time.Time `json:"deployed_at"`
 	Status      string    `json:"status"`
+	// URL is where this deployment is reachable, Version what was deployed
+	// (the job's DEPLOY_VERSION, else the short sha), Digest the immutable
+	// build identity (an image digest, artifact checksum...) when the job
+	// reports one. PromotedFrom is the deployment this one was promoted from.
+	URL          string `json:"url,omitempty"`
+	Version      string `json:"version,omitempty"`
+	Digest       string `json:"digest,omitempty"`
+	PromotedFrom *int64 `json:"promoted_from,omitempty"`
 }
 
 // Drift indicator values for an environment card.
@@ -414,13 +490,21 @@ const (
 // EnvironmentBoard is one card on the per-repo environments board: the current
 // deployment plus derived indicators.
 type EnvironmentBoard struct {
-	Repo            string      `json:"repo"`
-	Environment     string      `json:"environment"`
-	Current         *Deployment `json:"current"`          // latest successful deployment
-	DeploymentCount int         `json:"deployment_count"` // total successful deployments to this env
-	Drift           string      `json:"drift"`            // in_sync | drifted | unknown
-	RefTipSHA       string      `json:"ref_tip_sha,omitempty"`
-	Frozen          bool        `json:"frozen"` // an active deploy freeze covers this env now
+	Repo            string       `json:"repo"`
+	Environment     string       `json:"environment"`
+	Current         *Deployment  `json:"current"`          // latest successful deployment
+	DeploymentCount int          `json:"deployment_count"` // total successful deployments to this env
+	Drift           string       `json:"drift"`            // in_sync | drifted | unknown
+	RefTipSHA       string       `json:"ref_tip_sha,omitempty"`
+	Frozen          bool         `json:"frozen"` // an active deploy freeze covers this env now
+	Live            *LiveSummary `json:"live,omitempty"`
+}
+
+// LiveSummary is what Forge Live sees running for one repo × environment.
+type LiveSummary struct {
+	Apps   int            `json:"apps"`
+	Health string         `json:"health"` // the worst of the apps'
+	Counts map[string]int `json:"counts"` // apps per health
 }
 
 // RollbackRequest targets a prior deployment to re-deploy. Exactly one of the
@@ -451,4 +535,164 @@ type ProtectedEnvironment struct {
 	ApprovalTimeoutHours int      `json:"approval_timeout_hours"`
 	ApproverRoles        []string `json:"approver_roles"`
 	AllowSelfApproval    bool     `json:"allow_self_approval"`
+	// RequiredGroup / RequiredGroupApprovals: of the RequiredApprovals, at
+	// least this many must come from members of this approver group.
+	RequiredGroup          string `json:"required_group"`
+	RequiredGroupApprovals int    `json:"required_group_approvals"`
+	// Inactive: the environment registry is in use and this rule's name
+	// resolves to no registered environment, so no job can ever match it.
+	Inactive bool `json:"inactive,omitempty"`
+}
+
+// OIDCTokenResponse is a freshly minted per-job OIDC token (runner protocol).
+type OIDCTokenResponse struct {
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// CatalogTemplate is one published version of an org-wide pipeline template,
+// included as `template: name@version`.
+type CatalogTemplate struct {
+	Name        string          `json:"name"`
+	Version     string          `json:"version"`
+	YAML        string          `json:"yaml"`
+	Description string          `json:"description"`
+	PublishedBy string          `json:"published_by"`
+	CreatedAt   time.Time       `json:"created_at"`
+	Inputs      []TemplateInput `json:"inputs"`
+}
+
+// TemplateInput is an input a template declares under spec: inputs:.
+type TemplateInput struct {
+	Name        string   `json:"name"`
+	Default     string   `json:"default,omitempty"`
+	Required    bool     `json:"required"`
+	Description string   `json:"description,omitempty"`
+	Options     []string `json:"options,omitempty"`
+}
+
+// SecretSpec names one external secret for the runner to fetch. Exactly one
+// provider field is set. File asks for the value to be written to a file in
+// the job's run directory, the variable holding its path.
+type SecretSpec struct {
+	Vault string `json:"vault,omitempty"` // KV v2 "path#field" or "path#field@mount"
+	AWS   string `json:"aws,omitempty"`   // Secrets Manager name or ARN, optional "#json-key"
+	GCP   string `json:"gcp,omitempty"`   // "projects/P/secrets/S[/versions/V]" or "S" (needs GCP_PROJECT)
+	Azure string `json:"azure,omitempty"` // "https://<vault>.vault.azure.net/secrets/<name>[/<version>]"
+	File  bool   `json:"file,omitempty"`
+}
+
+// ---- runner tasks (code review, batch 7) ----
+
+// Runner tasks are small system work that runs inside the runner process,
+// not in an executor: today, keeping a repo's blobless git mirror and
+// computing a diff from it. They have their own queue and long-poll, so they
+// never take a job slot, and repo affinity keeps a repo's mirror on one
+// runner.
+
+// TaskKindDiff computes a diff between two commits from the repo's mirror.
+const TaskKindDiff = "diff"
+
+// TaskKindMerge merges commits onto a branch in the repo's mirror and pushes
+// the result: merging a Forge-native change, or building a merge queue's
+// test commit.
+const TaskKindMerge = "merge"
+
+// TaskAcquireRequest asks for a task of one of Kinds.
+type TaskAcquireRequest struct {
+	RunnerID string   `json:"runner_id"`
+	Version  string   `json:"version,omitempty"`
+	Kinds    []string `json:"kinds"`
+}
+
+// RunnerTask is a claimed task. CloneURL carries a fresh credential (minted at
+// claim time); RedactValues must never be logged or written to disk.
+type RunnerTask struct {
+	ID           int64      `json:"id"`
+	Kind         string     `json:"kind"`
+	Repo         string     `json:"repo"`
+	CloneURL     string     `json:"clone_url"`
+	RedactValues []string   `json:"redact_values,omitempty"`
+	Diff         *DiffTask  `json:"diff,omitempty"`
+	Merge        *MergeTask `json:"merge,omitempty"`
+}
+
+// DiffTask: diff From..To. Mode "change" diffs from the merge base of From
+// (the target branch) and To (the head) — what a pull request changed; mode
+// "range" diffs the two commits directly (revision to revision). FetchRefs
+// are the refs to fetch when either commit is missing from the mirror.
+type DiffTask struct {
+	From      string   `json:"from"`
+	To        string   `json:"to"`
+	Mode      string   `json:"mode"`
+	FetchRefs []string `json:"fetch_refs"`
+}
+
+// DiffFile is one changed file. Patch is the unified diff for the file
+// (headers included); empty for binary files and for patches over the cap.
+type DiffFile struct {
+	Path      string `json:"path"`
+	OldPath   string `json:"old_path,omitempty"`
+	Status    string `json:"status"` // added | modified | deleted | renamed | copied | type_changed
+	Additions int    `json:"additions"`
+	Deletions int    `json:"deletions"`
+	Binary    bool   `json:"binary,omitempty"`
+	Generated bool   `json:"generated,omitempty"`
+	TooLarge  bool   `json:"too_large,omitempty"` // patch dropped: over the per-file cap
+	Patch     string `json:"patch,omitempty"`
+}
+
+// DiffResult is what the runner reports for a diff task.
+type DiffResult struct {
+	MergeBase string     `json:"merge_base"` // the commit the diff starts from
+	Files     []DiffFile `json:"files"`
+	Truncated bool       `json:"truncated,omitempty"` // later files' patches dropped: total over the cap
+	Fetched   bool       `json:"fetched"`             // the mirror had to fetch (a git call to the host)
+	ComputeMS int        `json:"compute_ms"`
+	// OwnersRead: the runner looked for a CODEOWNERS file at From (mode
+	// "change" only; older runners never set it). CodeOwnersPath is "" when
+	// there is none.
+	OwnersRead     bool   `json:"owners_read,omitempty"`
+	CodeOwnersPath string `json:"codeowners_path,omitempty"`
+	CodeOwners     string `json:"codeowners,omitempty"`
+}
+
+// MergeTask merges Heads, in order, onto Target's tip and pushes the result
+// to PushRef. ExpectedTarget (when set) and ExpectedSource (Source's tip)
+// must still hold, or nothing is pushed (Moved). Without Force the push
+// only lands if the remote ref still points where it was fetched (a lease),
+// so a concurrent push is never overwritten.
+type MergeTask struct {
+	Target         string   `json:"target"`
+	ExpectedTarget string   `json:"expected_target,omitempty"`
+	Source         string   `json:"source,omitempty"`
+	ExpectedSource string   `json:"expected_source,omitempty"`
+	Heads          []string `json:"heads"`
+	Method         string   `json:"method"` // merge | squash | fast_forward
+	Message        string   `json:"message"`
+	AuthorName     string   `json:"author_name"`
+	AuthorEmail    string   `json:"author_email"`
+	PushRef        string   `json:"push_ref"`
+	Force          bool     `json:"force,omitempty"`
+	// FetchRefs are fetched (best effort) when a head is missing, e.g. a
+	// pull request's head ref on a host that serves no commit by sha.
+	FetchRefs []string `json:"fetch_refs,omitempty"`
+}
+
+// MergeResult is a merge task's outcome. A conflict or a moved branch is an
+// answer, not an error: retrying would not change it.
+type MergeResult struct {
+	SHA       string   `json:"sha,omitempty"`
+	Base      string   `json:"base,omitempty"` // Target's tip the merge was made on
+	Conflicts []string `json:"conflicts,omitempty"`
+	Moved     string   `json:"moved,omitempty"` // why: which branch moved
+	NotFF     bool     `json:"not_fast_forward,omitempty"`
+}
+
+// TaskCompleteRequest reports a task's outcome: Error set means it failed.
+type TaskCompleteRequest struct {
+	RunnerID string       `json:"runner_id"`
+	Error    string       `json:"error,omitempty"`
+	Diff     *DiffResult  `json:"diff,omitempty"`
+	Merge    *MergeResult `json:"merge,omitempty"`
 }

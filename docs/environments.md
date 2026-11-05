@@ -26,6 +26,88 @@ When `deploy-prod` succeeds, a row is inserted into `deployments`
 (`repo, environment, sha, ref, pipeline_id, job_id, deployed_by, deployed_at,
 status=success`).
 
+### URL, version and digest
+
+A deployment also records **where** it is reachable and **what** was deployed,
+whatever the target — a Kubernetes cluster, a VM fleet, a serverless function,
+a static site. Forge doesn't need to know; the job says:
+
+```yaml
+jobs:
+  build:
+    stage: build
+    script:
+      - docker buildx build --push -t "$REGISTRY/shop:$CI_COMMIT_SHORT_SHA" --metadata-file meta.json .
+      - echo "DEPLOY_VERSION=1.4.$CI_PIPELINE_ID" >> build.env
+      - echo "DEPLOY_DIGEST=$(jq -r '."containerimage.digest"' meta.json)" >> build.env
+    artifacts:
+      reports:
+        dotenv: build.env          # KEY=VALUE, passed to the jobs that need this one
+  deploy-staging:
+    stage: deploy
+    needs: [build]
+    environment:
+      name: staging
+      url: https://staging.$APP_DOMAIN   # $VARS expanded when the deployment is recorded
+    script:
+      - ./deploy.sh "$REGISTRY/shop@$DEPLOY_DIGEST"   # deploy by digest, not by tag
+```
+
+| Field | From (first that is set) |
+|---|---|
+| `url` | the job's `DEPLOY_URL` (or `CI_ENVIRONMENT_URL`) dotenv variable, then `environment: url:` with variables expanded. Only `http(s)://` links are kept. |
+| `version` | `DEPLOY_VERSION`, else the short commit sha |
+| `digest` | `DEPLOY_DIGEST` — an image digest, artifact checksum, package version id… anything immutable |
+
+`DEPLOY_*` can come from the deploy job's own dotenv or be inherited from a
+job it needs (the build above). The environments page shows the version, a
+link to the URL, and the digest on each card and in the history.
+
+**Dotenv rules:** `KEY=VALUE` lines (`export` and quotes allowed, `#`
+comments), at most 100 variables of 4 KiB each; `CI_*` and `FORGE_*` are
+reserved and refused so a job can't spoof Forge's own variables. Variables
+flow to every job that `needs:` the reporting job (oldest first; a later
+job's value wins), before repo variables and the job's own `variables:`.
+
+## Promotion — ship the build you tested
+
+`POST /api/v1/environments/{repo}/{env}/promote` with
+`{"from_environment": "staging"}` (its current deployment) or
+`{"deployment_id": 123}` redeploys an earlier deployment's **build** to `env`
+— the **Promote →** button on each environment card does this. Forge:
+
+1. takes the source deployment's pipeline — its exact config, commit and ref;
+2. compiles it and keeps **only the jobs that deploy to `env`**;
+3. points their `needs:` on anything else (build, image push, tests) at the
+   source pipeline's **successful jobs**, so they download the same artifacts
+   and inherit the same dotenv — `DEPLOY_VERSION`, `DEPLOY_DIGEST`, image
+   references. Nothing is rebuilt.
+
+The promotion is an ordinary pipeline (`source: promotion`,
+`CI_PIPELINE_SOURCE=promotion` at run time) and goes through everything a
+deploy does: manual gates, approvals, branch rules, freezes, resource groups.
+Its jobs also see `CI_PROMOTION=true`, `CI_PROMOTED_FROM_ENVIRONMENT`,
+`CI_PROMOTED_FROM_DEPLOYMENT_ID` and `CI_PROMOTED_FROM_PIPELINE_ID`. Rules are
+evaluated as they were for the source pipeline, so a deploy job that existed
+then exists now. The resulting deployment records `promoted_from`, and
+promoting again (staging → production → dr) still reuses the **original**
+build.
+
+Errors are explicit: promoting to the same environment (use rollback), a
+config with no job for the target, or a deploy job that needs a job which
+didn't succeed in the source pipeline. Developers (`operate` on the repo) may
+promote; protected environments still need their approvals.
+
+## Cancelling superseded deploys
+
+Tick **Cancel superseded** on an environment (Admin → Environments &
+branches) and a deploy to it that is still **waiting** — queued, awaiting
+approval, behind a freeze or a resource group — is canceled once a deploy from
+a **newer pipeline** of the same repo has started or succeeded there. The job
+shows `superseded: pipeline #N has a newer deploy to production`, and its
+dependents are canceled with it. A deploy that is already running is never
+touched. Off by default; the starter registry turns it on for production.
+
 ### Where it's recorded, and why
 
 Recording happens **in `store.CompleteJob`, inside the same transaction as the
@@ -159,3 +241,64 @@ See `internal/store/migrations.sql`:
   `(repo, environment, id DESC)`.
 - `deploy_freezes (id, repo, environment, starts_at, ends_at, reason,
   created_at)`.
+
+## Org-wide views (many repos × dev / staging / prod)
+
+- **Environments** (`/environments`, `GET /api/v1/environment-board`): one
+  row per repo, one column per environment in promotion order (dev → staging
+  → prod; unknown names after, alphabetically). Each cell shows the live
+  deployment and, when the newest attempt differs, a badge: running, approval,
+  manual, failed or canceled; plus `frozen` during a deploy freeze. Filters:
+  `?q` (repo name), `?env` (only that column and repos active in it),
+  `?attention=1` (latest attempt failed, waiting or canceled — in `env` when
+  set). 50 repos per page; latest attempts look back 30 days.
+- **Jobs** (`/jobs`, `GET /api/v1/jobs`): every job across pipelines, newest
+  first, filtered on the server by `repo`, `ref`, `status`, `runner`,
+  `environment` and `name` (contains). Quick presets: Active, Waiting, Failed.
+- **Environment tabs** on the Pipelines, Jobs and Environments pages, and a
+  **List & filter** view inside a pipeline (`?group=list`) for pipelines with
+  many jobs.
+
+## Environments & branches (admin, per server)
+
+**Admin ▾ → Environments & branches** (`GET`/`PUT /api/v1/environment-registry`)
+defines this server's real environments. Each company running Forge sets up its
+own; nothing is shared between servers.
+
+| Field | Meaning |
+|---|---|
+| name | The real name, used everywhere in the UI (`production`) |
+| order | Column/tab order (promotion path: dev → staging → production) |
+| tier | `dev`, `staging`, `prod` or `other` — colour and meaning |
+| aliases | Other names pipelines may write for it (`prod`, `prd`) |
+| branches allowed | Glob patterns (`main`, `release/*`; `*` matches anything including `/`). Empty = any branch |
+| unlisted names | `allow` (use as written) or `deny` (job fails — catches typos like `prdo`) |
+
+How it is applied:
+
+- **New pipelines** (API, webhook, schedule, retry): each job's `environment:`
+  is mapped to the real name. If the pipeline's branch is not allowed for that
+  environment, the job is created as **failed without running**, with the
+  reason on the job page, the job lists and the board ("refused"). Dependents
+  then don't run either. Pipeline files cannot override this.
+- **Saving** renames aliases already stored in jobs, deployments, approval
+  rules, freezes and scoped variables to the real name, in one transaction. If a
+  repo has rows under both an alias and the real name (e.g. approval rules for
+  `prod` and `production`), the save is refused with the repo named; remove one
+  and save again.
+- Admin forms (approval rules, freezes, variable scopes) accept aliases and
+  store the real name.
+- **No environments listed = no policy**: names are used as written and any
+  branch may deploy anywhere — exactly the behaviour before this feature.
+
+### First-time setup checklist (each company)
+
+1. Admin ▾ → Environments & branches → *Start from dev / staging / production*.
+2. Adjust names to what your teams call them; put every spelling in use
+   under aliases (check the tabs on the Pipelines page for stray names).
+3. Set allowed branches — typically `production` and `staging`:
+   `main, release/*`; `dev`: empty (any branch).
+4. Save. Fix any conflict it reports, then save again.
+5. Once pipelines use registered names, switch *unlisted environments* to
+   **Refuse** to catch typos.
+6. Add approval rules for production (Repo → Settings) if not already set.

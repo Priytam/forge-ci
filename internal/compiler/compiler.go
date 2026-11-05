@@ -56,6 +56,7 @@ package compiler
 import (
 	"fmt"
 	"path"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -74,6 +75,13 @@ const (
 	SourcePush         = "push"
 	SourceSchedule     = "schedule"
 	SourceMergeRequest = "merge_request" // GitHub pull_request / Bitbucket pull-request
+	// SourcePromotion marks a pipeline that redeploys an earlier deployment's
+	// build to another environment. Its rules are evaluated with the source
+	// pipeline's source; at run time CI_PIPELINE_SOURCE is "promotion".
+	SourcePromotion = "promotion"
+	// SourceMergeQueue marks the merge queue's test pipeline: the change
+	// merged onto the latest target, on branch forge-queue/<target>.
+	SourceMergeQueue = "merge_queue"
 )
 
 const (
@@ -86,7 +94,7 @@ type jobSpec struct {
 	Image        string            `yaml:"image"`
 	Script       []string          `yaml:"script"`
 	Needs        []string          `yaml:"needs"`
-	Environment  string            `yaml:"environment"`
+	Environment  envSpec           `yaml:"environment"` // name, or {name, url}
 	Variables    map[string]string `yaml:"variables"`
 	Only         []string          `yaml:"only"`
 	Except       []string          `yaml:"except"`
@@ -95,13 +103,68 @@ type jobSpec struct {
 	Cache        cacheSpec         `yaml:"cache"`
 	Services     []serviceSpec     `yaml:"services"`
 	Timeout      string            `yaml:"timeout"` // Go duration, e.g. "30m", "2h"
-	Retry        *int              `yaml:"retry"`   // 0..10; nil = inherit default
+	Retry        retrySpec         `yaml:"retry"`   // 0..10, or {max, when}; unset = inherit default
 	Rules        []ruleSpec        `yaml:"rules"`
 	Extends      stringOrSlice     `yaml:"extends"`
 	Parallel     *parallelSpec     `yaml:"parallel"`
 	When         string            `yaml:"when"`          // on_success|manual|never|always (job-level; rules override)
 	AllowFailure *bool             `yaml:"allow_failure"` // failure does not fail dependents/pipeline
 	Network      string            `yaml:"network"`       // container network: bridge (default) | none | host | <named>
+	// ResourceGroup serialises jobs: at most one job per (repo, group) runs at
+	// a time. "$CI_ENVIRONMENT_NAME" resolves to the job's environment.
+	ResourceGroup string `yaml:"resource_group"`
+	// RunnerAffinity: prefer the runner that last ran this job successfully
+	// (its local caches are warm). Opt-in.
+	RunnerAffinity bool `yaml:"runner_affinity"`
+	// Coverage is a /regex/ whose first match in the job log (first capture
+	// group, else the whole match) is the job's coverage percentage.
+	Coverage string `yaml:"coverage"`
+	// Secrets are fetched by the runner from an external secret manager
+	// just before the script runs, using the job's OIDC token (or the
+	// runner's own cloud identity), and exposed as variables:
+	//
+	//	secrets:
+	//	  DB_PASSWORD: {vault: "ci/prod/db#password"}      # KV v2 path#field (@mount, default "secret")
+	//	  API_KEY:     {aws: "prod/api#key"}                # Secrets Manager name/ARN, optional #json-key
+	//	  SA_JSON:     {gcp: "projects/p/secrets/sa", file: true}
+	//	  CERT:        {azure: "https://v.vault.azure.net/secrets/cert"}
+	Secrets map[string]secretSpec `yaml:"secrets"`
+	// RegistryLogin lists OCI registries the runner logs the job into before
+	// it runs — cloud registries by the job's OIDC identity (ECR, Artifact
+	// Registry/GCR, ACR); any other registry from the DOCKER_AUTH_CONFIG
+	// variable. The resulting Docker config is used to pull the job image
+	// (docker executor) and exposed to the job as DOCKER_CONFIG.
+	RegistryLogin []string `yaml:"registry_login"`
+}
+
+// secretSpec names one external secret; exactly one provider field is set.
+type secretSpec struct {
+	Vault string `yaml:"vault"`
+	AWS   string `yaml:"aws"`
+	GCP   string `yaml:"gcp"`
+	Azure string `yaml:"azure"`
+	// File writes the value to a file in the job's run directory and sets
+	// the variable to its path (for multi-line material: keys, JSON creds).
+	File bool `yaml:"file"`
+}
+
+// envSpec is a job's environment: a bare name, or GitLab's long form with
+// the URL the deployment is reachable at (it may use $VARIABLES, including
+// ones the job writes to its dotenv report).
+//
+//	environment: production
+//	environment: {name: production, url: "https://$DEPLOY_HOST"}
+type envSpec struct {
+	Name string `yaml:"name"`
+	URL  string `yaml:"url"`
+}
+
+func (e *envSpec) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.ScalarNode {
+		return n.Decode(&e.Name)
+	}
+	type plain envSpec
+	return n.Decode((*plain)(e))
 }
 
 type artifactSpec struct {
@@ -114,6 +177,18 @@ type artifactSpec struct {
 // and parsed by the server into per-job summaries. Only JUnit is supported.
 type reportsSpec struct {
 	JUnit stringOrSlice `yaml:"junit"` // one or more workspace globs of JUnit XML
+	// Dotenv is a KEY=VALUE file the job writes. Its variables are passed to
+	// the jobs that need this one, and DEPLOY_URL / DEPLOY_VERSION /
+	// DEPLOY_DIGEST fill in the deployment record of an environment job.
+	Dotenv string `yaml:"dotenv"`
+	// CoverageReport is a coverage file; Cobertura XML (what most tools can
+	// write: coverage.py, gocover-cobertura, jacoco converters, istanbul).
+	CoverageReport *coverageReportSpec `yaml:"coverage_report"`
+}
+
+type coverageReportSpec struct {
+	CoverageFormat string `yaml:"coverage_format"` // cobertura
+	Path           string `yaml:"path"`
 }
 
 // cacheSpec models a per-job cache: block (GitLab-style):
@@ -224,8 +299,8 @@ type config struct {
 	FailFast   *bool              `yaml:"fail_fast"`   // nil = default false
 	Include    []includeSpec      `yaml:"include"`
 	Default    struct {
-		Timeout string `yaml:"timeout"` // pipeline-wide TTL for jobs without their own
-		Retry   *int   `yaml:"retry"`   // pipeline-wide retry for jobs without their own
+		Timeout string    `yaml:"timeout"` // pipeline-wide TTL for jobs without their own
+		Retry   retrySpec `yaml:"retry"`   // pipeline-wide retry for jobs without their own
 	} `yaml:"default"`
 }
 
@@ -360,6 +435,22 @@ type CompiledJob struct {
 	// falls back to RETENTION_DAYS). The server stamps artifacts.expires_at =
 	// now()+this at upload time.
 	ArtifactExpireSeconds int
+	// EnvironmentURL is environment: url: as written ($VARS expanded when the
+	// deployment is recorded).
+	EnvironmentURL string
+	// ReportDotenv is the workspace path of the job's dotenv report ("" = none).
+	ReportDotenv string
+	// Secrets the runner fetches before the script; RegistryLogins the
+	// registries it logs into.
+	Secrets        map[string]proto.SecretSpec
+	RegistryLogins []string
+	// RetryWhen lists the failure kinds Retry applies to: always,
+	// script_failure, runner_system_failure.
+	RetryWhen []string
+	// CoverageRegex extracts coverage from the log (Go regexp, "" = none);
+	// CoverageReportPath is a Cobertura file to read it from instead.
+	CoverageRegex      string
+	CoverageReportPath string
 	// ReportJUnit are workspace globs of JUnit XML the runner collects after a
 	// successful job; the server parses them into a per-job test summary.
 	ReportJUnit []string
@@ -372,6 +463,10 @@ type CompiledJob struct {
 	Retry         int      // additional attempts on failure (0..10); 0 = no retry
 	Manual        bool     // when: manual — starts gated, released by a manual "play"
 	AllowFailure  bool     // failure does not block dependents or fail the pipeline
+	// ResourceGroup: at most one job per (repo, ResourceGroup) runs at once.
+	ResourceGroup string
+	// RunnerAffinity: prefer the runner that last ran this job successfully.
+	RunnerAffinity bool
 	// Services are sidecar containers started alongside the job (docker/k8s only).
 	Services []proto.ServiceSpec
 	// Network is the container network for the job (docker executor). Empty
@@ -381,14 +476,16 @@ type CompiledJob struct {
 }
 
 // buildContext assembles the base variable context for rules if: expressions.
-// Forge cannot distinguish a tag ref from a branch ref at compile time (a
-// webhook carries only the ref string), so CI_COMMIT_BRANCH is set to the ref
-// and CI_COMMIT_TAG is left undefined — documented in docs/pipeline-dsl.md.
+// A ref is a branch (CI_COMMIT_BRANCH set) unless the trigger says it is a
+// tag by passing CI_COMMIT_TAG in extra; then CI_COMMIT_BRANCH is undefined,
+// as in GitLab. Every git host's push webhook does this.
 //
 // extra carries source-specific context (e.g. the CI_MERGE_REQUEST_* vars for a
 // merge_request pipeline). It is overlaid last so a caller can set/override any
 // key, and its entries are also injected into every emitted job's Env by Compile
 // so job scripts can read them.
+var resourceGroupRe = regexp.MustCompile(`^(?:[A-Za-z0-9_./-]|\$\{?CI_ENVIRONMENT_NAME\}?){1,100}$`)
+
 func buildContext(ref, source string, extra map[string]string) map[string]string {
 	ctx := map[string]string{
 		"CI_COMMIT_REF":      ref,
@@ -398,6 +495,11 @@ func buildContext(ref, source string, extra map[string]string) map[string]string
 	}
 	for k, v := range extra {
 		ctx[k] = v
+	}
+	if ctx["CI_COMMIT_TAG"] != "" {
+		if _, set := extra["CI_COMMIT_BRANCH"]; !set {
+			delete(ctx, "CI_COMMIT_BRANCH")
+		}
 	}
 	return ctx
 }
@@ -418,17 +520,38 @@ func buildContext(ref, source string, extra map[string]string) map[string]string
 // emitted job's Env so job scripts can read them. Existing callers pass no extra
 // map and are unaffected.
 func Compile(yml, ref, source string, tmpl TemplateFunc, extra ...map[string]string) ([]CompiledJob, error) {
-	var extraCtx map[string]string
+	return CompileWithChanges(yml, ref, source, tmpl, nil, extra...)
+}
+
+// CompileWithChanges is Compile with the pipeline's change set, so
+// rules: changes: can be evaluated (nil = unknown, every changes: matches).
+func CompileWithChanges(yml, ref, source string, tmpl TemplateFunc, changes *ChangeSet, extra ...map[string]string) ([]CompiledJob, error) {
+	opts := CompileOpts{Templates: tmpl, Changes: changes}
 	if len(extra) > 0 {
-		extraCtx = extra[0]
+		opts.Extra = extra[0]
 	}
+	return CompileWith(yml, ref, source, opts)
+}
+
+// CompileOpts carries everything a compile may need from outside.
+type CompileOpts struct {
+	Templates TemplateFunc      // repo templates by name (nil: built-ins only)
+	Includes  IncludeFunc       // project/remote/catalog includes (nil: not available)
+	Changes   *ChangeSet        // for rules: changes: (nil: unknown)
+	Extra     map[string]string // source-specific context (CI_MERGE_REQUEST_* etc.)
+}
+
+// CompileWith is the full-featured compile; Compile and CompileWithChanges
+// are shorthands for it.
+func CompileWith(yml, ref, source string, opts CompileOpts) ([]CompiledJob, error) {
+	tmpl, changes, extraCtx := opts.Templates, opts.Changes, opts.Extra
 	var cfg config
 	if err := yaml.Unmarshal([]byte(yml), &cfg); err != nil {
 		return nil, fmt.Errorf("invalid YAML: %w", err)
 	}
 
 	// 1. Compose included templates into the config.
-	cfg, err := resolveIncludes(cfg, tmpl)
+	cfg, err := resolveIncludes(cfg, tmpl, opts.Includes)
 	if err != nil {
 		return nil, err
 	}
@@ -491,7 +614,7 @@ func Compile(yml, ref, source string, tmpl TemplateFunc, extra ...map[string]str
 		d.spec = spec
 		if len(spec.Rules) > 0 {
 			// rules: supersede only/except entirely for this job.
-			outcome, err := evalRules(spec.Rules, ctx)
+			outcome, err := evalRules(spec.Rules, ctx, changes)
 			if err != nil {
 				return nil, fmt.Errorf("job %q: %w", name, err)
 			}
@@ -637,6 +760,10 @@ func Compile(yml, ref, source string, tmpl TemplateFunc, extra ...map[string]str
 		// Network: a job with services gets a dedicated per-job network so it can
 		// resolve service aliases, so the two settings cannot both apply. Reject
 		// rather than silently ignoring one of them.
+		resourceGroup := strings.TrimSpace(spec.ResourceGroup)
+		if resourceGroup != "" && !resourceGroupRe.MatchString(resourceGroup) {
+			return nil, fmt.Errorf("job %q: resource_group %q may only contain letters, digits, _ . - / and $CI_ENVIRONMENT_NAME", inst.orig, resourceGroup)
+		}
 		network, err := validateNetwork(fmt.Sprintf("job %q", inst.orig), spec.Network)
 		if err != nil {
 			return nil, err
@@ -652,15 +779,47 @@ func Compile(yml, ref, source string, tmpl TemplateFunc, extra ...map[string]str
 			return nil, err
 		}
 
-		// Retry precedence: job retry > YAML default.retry > 0 (no retry).
-		retry, err := validateRetry(fmt.Sprintf("job %q", inst.orig), spec.Retry)
+		secrets, err := compileSecrets(inst.orig, spec.Secrets)
 		if err != nil {
 			return nil, err
 		}
-		if spec.Retry == nil {
-			if retry, err = validateRetry("default", cfg.Default.Retry); err != nil {
+		for _, host := range spec.RegistryLogin {
+			if host == "" || strings.ContainsAny(host, " /@") {
+				return nil, fmt.Errorf("job %q: registry_login entries are registry host names (e.g. 123.dkr.ecr.eu-west-1.amazonaws.com), got %q", inst.orig, host)
+			}
+		}
+		coverageRegex, err := validateCoverageRegex(inst.orig, spec.Coverage)
+		if err != nil {
+			return nil, err
+		}
+		coveragePath := ""
+		if cr := spec.Artifacts.Reports.CoverageReport; cr != nil {
+			if f := strings.ToLower(cr.CoverageFormat); f != "" && f != "cobertura" {
+				return nil, fmt.Errorf("job %q: coverage_report format %q is not supported (use cobertura)", inst.orig, cr.CoverageFormat)
+			}
+			if cr.Path == "" || strings.HasPrefix(cr.Path, "/") || strings.HasPrefix(cr.Path, "..") {
+				return nil, fmt.Errorf("job %q: coverage_report needs a workspace-relative path", inst.orig)
+			}
+			coveragePath = cr.Path
+		}
+		if d := spec.Artifacts.Reports.Dotenv; d != "" && (strings.HasPrefix(d, "/") || strings.HasPrefix(d, "..")) {
+			return nil, fmt.Errorf("job %q: reports.dotenv needs a workspace-relative path", inst.orig)
+		}
+
+		// Retry precedence: job retry > YAML default.retry > 0 (no retry).
+		retry, err := validateRetry(fmt.Sprintf("job %q", inst.orig), spec.Retry.Max)
+		if err != nil {
+			return nil, err
+		}
+		retryWhen := spec.Retry.When
+		if spec.Retry.Max == nil {
+			if retry, err = validateRetry("default", cfg.Default.Retry.Max); err != nil {
 				return nil, err
 			}
+			retryWhen = cfg.Default.Retry.When
+		}
+		if retryWhen, err = validateRetryWhen(fmt.Sprintf("job %q", inst.orig), retryWhen); err != nil {
+			return nil, err
 		}
 
 		// Needs: explicit (with matrix fan-in) or implicit (nearest earlier
@@ -694,16 +853,17 @@ func Compile(yml, ref, source string, tmpl TemplateFunc, extra ...map[string]str
 		}
 
 		out = append(out, CompiledJob{
-			Name:          inst.name,
-			Stage:         spec.Stage,
-			StageIdx:      inst.stageIdx,
-			Image:         spec.Image,
-			Script:        strings.Join(spec.Script, "\n"),
-			Env:           inst.env,
-			Environment:   spec.Environment,
-			Needs:         needs,
-			Tags:          spec.Tags,
-			ArtifactPaths: spec.Artifacts.Paths,
+			Name:           inst.name,
+			Stage:          spec.Stage,
+			StageIdx:       inst.stageIdx,
+			Image:          spec.Image,
+			Script:         strings.Join(spec.Script, "\n"),
+			Env:            inst.env,
+			Environment:    spec.Environment.Name,
+			EnvironmentURL: spec.Environment.URL,
+			Needs:          needs,
+			Tags:           spec.Tags,
+			ArtifactPaths:  spec.Artifacts.Paths,
 
 			ArtifactExpireSeconds: expireSec,
 			ReportJUnit:           spec.Artifacts.Reports.JUnit,
@@ -713,10 +873,18 @@ func Compile(yml, ref, source string, tmpl TemplateFunc, extra ...map[string]str
 			CachePolicy:           cachePolicy,
 			TimeoutSec:            timeoutSec,
 			Retry:                 retry,
+			RetryWhen:             retryWhen,
 			Manual:                inst.manual,
 			AllowFailure:          inst.allowFailure,
 			Services:              services,
 			Network:               network,
+			ResourceGroup:         resourceGroup,
+			RunnerAffinity:        spec.RunnerAffinity,
+			ReportDotenv:          spec.Artifacts.Reports.Dotenv,
+			Secrets:               secrets,
+			RegistryLogins:        spec.RegistryLogin,
+			CoverageRegex:         coverageRegex,
+			CoverageReportPath:    coveragePath,
 		})
 	}
 	return out, nil

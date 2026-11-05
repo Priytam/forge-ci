@@ -55,7 +55,7 @@ func mergeSpec(parent, child jobSpec) jobSpec {
 	if child.Image != "" {
 		out.Image = child.Image
 	}
-	if child.Environment != "" {
+	if child.Environment.Name != "" {
 		out.Environment = child.Environment
 	}
 	if child.Timeout != "" {
@@ -67,7 +67,7 @@ func mergeSpec(parent, child jobSpec) jobSpec {
 	if child.Network != "" {
 		out.Network = child.Network
 	}
-	if child.Retry != nil {
+	if child.Retry.Max != nil {
 		out.Retry = child.Retry
 	}
 	if child.AllowFailure != nil {
@@ -102,6 +102,29 @@ func mergeSpec(parent, child jobSpec) jobSpec {
 	}
 	if child.Artifacts.Reports.JUnit != nil {
 		out.Artifacts.Reports.JUnit = child.Artifacts.Reports.JUnit
+	}
+	if child.Artifacts.Reports.Dotenv != "" {
+		out.Artifacts.Reports.Dotenv = child.Artifacts.Reports.Dotenv
+	}
+	if child.Artifacts.Reports.CoverageReport != nil {
+		out.Artifacts.Reports.CoverageReport = child.Artifacts.Reports.CoverageReport
+	}
+	if child.Coverage != "" {
+		out.Coverage = child.Coverage
+	}
+	if child.RegistryLogin != nil {
+		out.RegistryLogin = child.RegistryLogin
+	}
+	// Secrets: union, child wins per name.
+	if len(parent.Secrets) > 0 || len(child.Secrets) > 0 {
+		merged := map[string]secretSpec{}
+		for k, v := range parent.Secrets {
+			merged[k] = v
+		}
+		for k, v := range child.Secrets {
+			merged[k] = v
+		}
+		out.Secrets = merged
 	}
 	// Services: child replaces the whole list when it declares one (arrays are
 	// replaced, not element-merged — same rule as script/needs/tags).

@@ -15,6 +15,12 @@ interface ApprovalGateProps {
   approvals?: JobApproval[];
   /** votes the environment's rule requires */
   required?: number;
+  /** of those, at least requiredGroupApprovals from this approver group */
+  requiredGroup?: string;
+  requiredGroupApprovals?: number;
+  /** approved votes so far from the group, and who is in it */
+  groupApprovals?: number;
+  groupMembers?: string[];
   /** the job has already finished (rejected gates land here) */
   status?: string;
   onDone?: () => void;
@@ -34,6 +40,10 @@ export default function ApprovalGate({
   jobId,
   approvals = [],
   required = 0,
+  requiredGroup,
+  requiredGroupApprovals = 0,
+  groupApprovals = 0,
+  groupMembers = [],
   status,
   onDone,
 }: ApprovalGateProps) {
@@ -73,6 +83,15 @@ export default function ApprovalGate({
   const need = Math.max(required, 1);
   const remaining = Math.max(need - approved.length, 0);
   const myVote = me ? approvals.find((a) => a.approver === me.email) : undefined;
+  // Group requirement: how many group votes are still missing, who could
+  // give one, and whether the viewer's own vote would be one of them.
+  const groupNeeded = requiredGroup ? Math.max(requiredGroupApprovals - groupApprovals, 0) : 0;
+  const voted = new Set(approvals.map((a) => a.approver.toLowerCase()));
+  const groupWaitingOn = groupMembers.filter((m) => !voted.has(m.toLowerCase()));
+  const meInGroup = !!me && groupMembers.some((m) => m.toLowerCase() === me.email.toLowerCase());
+  // The viewer's vote can't release the job when only group votes are
+  // missing and they aren't in the group.
+  const myVoteWontRelease = !!me && !myVote && groupNeeded > 0 && !meInGroup && remaining <= groupNeeded;
 
   const vote = async (verdict: "approved" | "rejected") => {
     // Signed-in sessions vote as themselves (the server enforces the session
@@ -112,7 +131,9 @@ export default function ApprovalGate({
     );
   }
 
-  const settled = approved.length >= need;
+  // With a group requirement the count alone isn't enough: the server keeps
+  // the job blocked until enough of the votes come from the group.
+  const settled = approved.length >= need && status !== "blocked";
 
   return (
     <div className="approval" onClick={(e) => e.stopPropagation()}>
@@ -136,6 +157,21 @@ export default function ApprovalGate({
           </span>
         </span>
       </div>
+
+      {requiredGroup && requiredGroupApprovals > 0 && (
+        <div className="approval-group-note muted">
+          {Math.min(groupApprovals, requiredGroupApprovals)} of {requiredGroupApprovals} from <strong>{requiredGroup}</strong>
+          {groupNeeded > 0 && groupWaitingOn.length > 0 && (
+            <> — waiting on {groupWaitingOn.map((m) => displayName(m)).join(", ")}</>
+          )}
+          {groupNeeded > 0 && groupWaitingOn.length === 0 && <> — nobody left in the group can vote</>}
+        </div>
+      )}
+      {myVoteWontRelease && (
+        <div className="approval-group-note muted">
+          Your vote counts, but {groupNeeded} more {groupNeeded === 1 ? "is" : "are"} needed from <strong>{requiredGroup}</strong> before this can run.
+        </div>
+      )}
 
       {approvals.length > 0 && (
         <div className="approval-votes">

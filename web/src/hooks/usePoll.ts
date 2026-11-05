@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { revalidation } from "../api";
 
 export interface PollState<T> {
   data: T | null;
@@ -37,6 +38,16 @@ export function usePoll<T>(
           setData(result);
           setError(null);
           setLoading(false);
+        }
+        // Served from the stale-while-revalidate cache: show it now, then
+        // swap in the fresh copy the moment it arrives.
+        const fresh = revalidation(result);
+        if (fresh && !cancelled) {
+          await fresh;
+          if (!cancelled) {
+            const next = await fnRef.current();
+            if (!cancelled) setData(next);
+          }
         }
       } catch (err) {
         if (!cancelled) {

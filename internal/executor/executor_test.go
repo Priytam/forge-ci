@@ -149,3 +149,29 @@ func TestJobNetworkHonoursExplicitValue(t *testing.T) {
 		}
 	}
 }
+
+// TestDockerMountsRunDirReadOnly: the per-job run directory (refreshable
+// token file) is mounted read-only at RunDirMount, only when the runner made one.
+func TestDockerMountsRunDirReadOnly(t *testing.T) {
+	job := &proto.RunnerJob{ID: 3, Script: "true", RunDir: "/tmp/forge-run-abc"}
+	args := strings.Join(dockerRunArgs(job, "/tmp/ws", "alpine:3", "forge-job-3", "bridge"), " ")
+	if !strings.Contains(args, "-v /tmp/forge-run-abc:/var/run/forge:ro") {
+		t.Errorf("run dir not mounted read-only: %s", args)
+	}
+	job.RunDir = ""
+	if args := strings.Join(dockerRunArgs(job, "/tmp/ws", "alpine:3", "forge-job-3", "bridge"), " "); strings.Contains(args, "/var/run/forge") {
+		t.Errorf("mounted a run dir that does not exist: %s", args)
+	}
+}
+
+func TestDebugTraceFlags(t *testing.T) {
+	job := &proto.RunnerJob{Script: "make"}
+	if f := shellFlags(job); f != "-ce" {
+		t.Errorf("default flags = %s", f)
+	}
+	job.Env = map[string]string{"CI_DEBUG_TRACE": "true"}
+	args := dockerRunArgs(job, "/tmp/ws", "alpine", "n", "bridge")
+	if args[len(args)-2] != "-cex" {
+		t.Errorf("debug docker args = %v", args)
+	}
+}

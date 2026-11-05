@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -76,6 +77,28 @@ func privilegedServicesFromEnv() bool {
 	return v == "true" || v == "1" || v == "yes"
 }
 
+// RunDirMount is where a job's run directory (job.RunDir) appears inside a
+// container (docker and kubernetes executors).
+const RunDirMount = "/var/run/forge"
+
+// RunPath returns the path at which the job's script sees file name from the
+// job's run directory: the host path for the shell executor, the mount path
+// for container executors.
+func RunPath(e Executor, job *proto.RunnerJob, name string) string {
+	if e.Name() == "shell" {
+		return filepath.Join(job.RunDir, name)
+	}
+	return RunDirMount + "/" + name
+}
+
+// RunFileUpdater is implemented by executors whose job does not share the
+// runner's filesystem (kubernetes). The runner calls it after rewriting a
+// file in job.RunDir so the running job sees the new content. Shell and
+// docker need nothing: the job reads the host file (docker bind-mounts it).
+type RunFileUpdater interface {
+	UpdateRunFile(ctx context.Context, job *proto.RunnerJob, name string, data []byte) error
+}
+
 func ciEnv(job *proto.RunnerJob) []string {
 	env := []string{
 		"CI=true",
@@ -89,6 +112,20 @@ func ciEnv(job *proto.RunnerJob) []string {
 	return env
 }
 
+// shellFlags is how every executor runs a job script: -e (stop at the first
+// failing command), plus -x (echo each command) when the job runs with
+// CI_DEBUG_TRACE=true — a debug rerun. Masked values are still redacted from
+// the log, including the re-quoted forms traces print (see
+// store.withTraceForms); a value the script derives from a secret may show.
+func shellFlags(job *proto.RunnerJob) string {
+	if debugTrace(job) {
+		return "-cex"
+	}
+	return "-ce"
+}
+
+func debugTrace(job *proto.RunnerJob) bool { return job.Env["CI_DEBUG_TRACE"] == "true" }
+
 type shellExecutor struct{}
 
 func (shellExecutor) Name() string { return "shell" }
@@ -100,7 +137,7 @@ func (shellExecutor) Start(ctx context.Context, job *proto.RunnerJob, workdir st
 		return nil, nil, fmt.Errorf("shell executor cannot run service containers: "+
 			"this job declares %d service(s); route it to a docker or kubernetes runner (add matching runner tags)", len(job.Services))
 	}
-	cmd := exec.CommandContext(ctx, "sh", "-ce", job.Script)
+	cmd := exec.CommandContext(ctx, "sh", shellFlags(job), job.Script)
 	cmd.Dir = workdir
 	cmd.Env = append(os.Environ(), ciEnv(job)...)
 	return start(cmd)
@@ -127,14 +164,27 @@ func (dockerExecutor) Name() string { return "docker" }
 func dockerRunArgs(job *proto.RunnerJob, workdir, image, name, network string, extraEnv ...string) []string {
 	args := []string{"run", "--rm", "--name", name, "--network", network,
 		"-v", workdir + ":/workspace", "-w", "/workspace"}
+	if job.RunDir != "" {
+		args = append(args, "-v", job.RunDir+":"+RunDirMount+":ro")
+	}
 	for _, kv := range ciEnv(job) {
 		args = append(args, "-e", kv)
 	}
 	for _, kv := range extraEnv {
 		args = append(args, "-e", kv)
 	}
-	args = append(args, "--entrypoint", "sh", image, "-ce", job.Script)
+	args = append(args, "--entrypoint", "sh", image, shellFlags(job), job.Script)
 	return args
+}
+
+// dockerCmd builds a docker CLI command for job. When the runner prepared a
+// Docker config for the job (registry_login / DOCKER_AUTH_CONFIG), the CLI
+// uses it, so the job image and service images pull from private registries.
+func dockerCmd(ctx context.Context, job *proto.RunnerJob, args ...string) *exec.Cmd {
+	if job.DockerConfigDir != "" {
+		args = append([]string{"--config", job.DockerConfigDir}, args...)
+	}
+	return exec.CommandContext(ctx, "docker", args...)
 }
 
 func (d dockerExecutor) Start(ctx context.Context, job *proto.RunnerJob, workdir string) (io.ReadCloser, func() int, error) {
@@ -149,7 +199,7 @@ func (d dockerExecutor) Start(ctx context.Context, job *proto.RunnerJob, workdir
 		// The workspace is bind-mounted so artifacts land on the host for
 		// collection after the container exits.
 		args := dockerRunArgs(job, workdir, image, name, jobNetwork(job))
-		pr, wait, err := start(exec.CommandContext(ctx, "docker", args...))
+		pr, wait, err := start(dockerCmd(ctx, job, args...))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -217,7 +267,7 @@ func startDockerWithServices(ctx context.Context, job *proto.RunnerJob, workdir,
 		}
 		args = append(args, svc.Image)
 		args = append(args, svc.Cmd...) // optional command override
-		if out, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput(); err != nil {
+		if out, err := dockerCmd(ctx, job, args...).CombinedOutput(); err != nil {
 			cleanup()
 			return nil, nil, fmt.Errorf("start service %q (%s): %s", svc.Alias, svc.Image, strings.TrimSpace(string(out)))
 		}
@@ -244,7 +294,7 @@ func startDockerWithServices(ctx context.Context, job *proto.RunnerJob, workdir,
 	args := dockerRunArgs(job, workdir, image, name, network,
 		"FORGE_SERVICE_ALIASES="+strings.Join(aliases, ","))
 
-	pr, wait, err := start(exec.CommandContext(ctx, "docker", args...))
+	pr, wait, err := start(dockerCmd(ctx, job, args...))
 	if err != nil {
 		cleanup()
 		return nil, nil, err

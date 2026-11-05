@@ -1,3 +1,4 @@
+import Skeleton from "./ui/Skeleton";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
@@ -17,6 +18,8 @@ import {
 } from "../api";
 import { usePoll } from "../hooks/usePoll";
 import PipelineTable from "./PipelineTable";
+import EnvTabs from "./EnvTabs";
+import { STATUS_LABEL } from "./StatusBadge";
 
 const PAGE = 50;
 
@@ -229,43 +232,12 @@ export default function PipelineBrowser({ fixedRepo }: { fixedRepo?: string }) {
 
   return (
     <div>
-      {!fixedRepo && (
-        <div className="filter-bar">
-          <label className="field">
-            <span>Saved view</span>
-            <select value={viewId || ""} onChange={(e) => openView(Number(e.target.value))}>
-              <option value="">— none —</option>
-              {views.map((v) => (
-                <option key={v.id} value={v.id}>
-                  {v.name}
-                  {v.shared ? " (shared)" : ""}
-                  {!mine(v) ? ` — ${v.owner || "anonymous"}` : ""}
-                </option>
-              ))}
-            </select>
-          </label>
-          <button type="button" className="btn" onClick={() => void saveAsNew()}>
-            Save as view…
-          </button>
-          {current && mine(current) && (
-            <>
-              {dirty && (
-                <button type="button" className="btn btn-primary" onClick={() => void updateCurrent()}>
-                  Update “{current.name}”
-                </button>
-              )}
-              <button type="button" className="btn" onClick={() => void toggleShare()}>
-                {current.shared ? "Make private" : "Share with org"}
-              </button>
-              <button type="button" className="btn" onClick={() => void removeCurrent()}>
-                Delete view
-              </button>
-            </>
-          )}
-          {viewError && <span className="approval-error">{viewError}</span>}
-        </div>
-      )}
-
+      <EnvTabs
+        envs={facets?.environments ?? []}
+        value={urlFilter.environment ?? ""}
+        onChange={(environment) => patch({ environment })}
+      />
+      <div className="card filter-panel">
       <div className="filter-bar">
         {!fixedRepo && (
           <RepoPicker
@@ -304,27 +276,13 @@ export default function PipelineBrowser({ fixedRepo }: { fixedRepo?: string }) {
             </option>
           ))}
         </select>
-        <select
-          value={urlFilter.environment ?? ""}
-          onChange={(e) => patch({ environment: e.target.value })}
-          aria-label="Environment"
-        >
-          <option value="">All environments</option>
-          {urlFilter.environment && !facets?.environments.includes(urlFilter.environment) && (
-            <option value={urlFilter.environment}>{urlFilter.environment}</option>
-          )}
-          {facets?.environments.map((r) => (
-            <option key={r} value={r}>
-              {r}
-            </option>
-          ))}
-        </select>
-        <div className="segmented" role="group" aria-label="Status">
+        <div className="state-chips" role="group" aria-label="Status">
           {PIPELINE_STATUSES.map((st) => (
             <button
               key={st}
               type="button"
-              className={statuses.includes(st) ? "seg-btn seg-active" : "seg-btn"}
+              className={`fchip fdot-${st}${statuses.includes(st) ? " fchip-on" : ""}`}
+              aria-pressed={statuses.includes(st)}
               onClick={() =>
                 patch({
                   statuses: statuses.includes(st)
@@ -333,25 +291,63 @@ export default function PipelineBrowser({ fixedRepo }: { fixedRepo?: string }) {
                 })
               }
             >
-              {st}
+              {STATUS_LABEL[st] ?? st}
             </button>
           ))}
         </div>
         {anyFilter && (
-          <button type="button" className="btn" onClick={() => setFilter({})}>
+          <button type="button" className="btn btn-ghost" onClick={() => setFilter({})}>
             Clear filters
           </button>
         )}
+      {!fixedRepo && (
+        <div className="filter-views-inline">
+          <select
+            aria-label="Saved view"
+            value={viewId || ""}
+            onChange={(e) => openView(Number(e.target.value))}
+          >
+            <option value="">{views.length ? "Saved views…" : "No saved views"}</option>
+            {views.map((v) => (
+              <option key={v.id} value={v.id}>
+                {v.name}
+                {v.shared ? " (shared)" : ""}
+                {!mine(v) ? ` — ${v.owner || "anonymous"}` : ""}
+              </option>
+            ))}
+          </select>
+          <button type="button" className="btn" onClick={() => void saveAsNew()}>
+            Save view
+          </button>
+          {current && mine(current) && (
+            <>
+              {dirty && (
+                <button type="button" className="btn btn-primary" onClick={() => void updateCurrent()}>
+                  Update “{current.name}”
+                </button>
+              )}
+              <button type="button" className="btn" onClick={() => void toggleShare()}>
+                {current.shared ? "Make private" : "Share with org"}
+              </button>
+              <button type="button" className="btn" onClick={() => void removeCurrent()}>
+                Delete view
+              </button>
+            </>
+          )}
+          {viewError && <span className="approval-error">{viewError}</span>}
+        </div>
+      )}
+      </div>
       </div>
 
       {error && <div className="error-banner">Failed to load pipelines: {error}</div>}
-      {loading && !data && <div className="muted">Loading pipelines…</div>}
+      {loading && !data && <Skeleton />}
       {data && data.items.length === 0 && (
         <div className="empty card">
           {anyFilter ? "No pipelines match these filters." : "No pipelines yet."}
         </div>
       )}
-      {data && data.items.length > 0 && <PipelineTable pipelines={data.items} />}
+      {data && data.items.length > 0 && <PipelineTable pipelines={data.items} showRepo={!fixedRepo} />}
       {data && total > 0 && (
         <div className="filter-pager">
           <span className="muted">

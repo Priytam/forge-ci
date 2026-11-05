@@ -22,7 +22,6 @@ import (
 const (
 	sessionCookie = "forge_session"
 	stateCookie   = "forge_oauth_state"
-	sessionTTL    = 12 * time.Hour
 )
 
 // oauthProvider describes one supported identity provider. Endpoints follow
@@ -85,6 +84,7 @@ func (s *Server) registerAuthRoutes() {
 	m.HandleFunc("GET /api/v1/auth/login/{provider}", s.authLogin)
 	m.HandleFunc("GET /api/v1/auth/callback/{provider}", s.authCallback)
 	m.HandleFunc("GET /api/v1/auth/me", s.authMe)
+	m.HandleFunc("POST /api/v1/auth/refresh", s.authRefresh)
 	m.HandleFunc("POST /api/v1/auth/logout", s.authLogout)
 	// Admin config.
 	m.HandleFunc("GET /api/v1/sso", s.listSSO)
@@ -100,13 +100,18 @@ func authExempt(path string) bool {
 	switch {
 	case strings.HasPrefix(path, "/api/v1/runner/"),
 		strings.HasPrefix(path, "/api/v1/webhooks/"),
+		// Agents authenticate with their target's token (live.go).
+		strings.HasPrefix(path, "/api/v1/live/agent/"),
 		strings.HasPrefix(path, "/api/v1/auth/"),
+		// Act-by-link approvals carry their own signed token (email links).
+		path == "/api/v1/approvals/link",
 		strings.HasPrefix(path, "/api/v1/downloads/"),
 		// OIDC discovery + JWKS must be reachable by AWS/GCP (no session) even
 		// when SSO is enforced, so cloud providers can validate job ID tokens.
 		path == "/.well-known/openid-configuration",
 		path == "/.well-known/jwks.json",
 		path == "/api/v1/healthz",
+		path == "/api/v1/status",
 		path == "/api/v1/metrics":
 		return true
 	}
@@ -181,16 +186,64 @@ func (s *Server) authProviders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	enabled := []string{}
-	for _, p := range all {
-		if p.Enabled {
-			enabled = append(enabled, p.Provider)
-		}
+	type info struct {
+		Name  string `json:"name"`
+		Label string `json:"label"`
+		Kind  string `json:"kind"` // redirect | password
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"providers": enabled, "enforced": len(enabled) > 0})
+	infos := []info{}
+	for _, p := range all {
+		if !p.Enabled {
+			continue
+		}
+		enabled = append(enabled, p.Provider)
+		i := info{Name: p.Provider, Label: p.Settings["display_name"], Kind: "redirect"}
+		if p.Provider == "ldap" {
+			i.Kind = "password"
+		}
+		if i.Label == "" {
+			i.Label = map[string]string{"google": "Google", "microsoft": "Microsoft", "github": "GitHub",
+				"oidc": "Single sign-on", "ldap": "Directory account"}[p.Provider]
+		}
+		infos = append(infos, i)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"providers": enabled, "provider_info": infos, "enforced": len(enabled) > 0})
+}
+
+const nextCookie = "forge_next"
+
+// rememberNext stores where to send the user after sign-in: a path on this
+// site only (never a full URL, so a crafted link can't bounce them elsewhere).
+func rememberNext(w http.ResponseWriter, r *http.Request) {
+	next := r.URL.Query().Get("next")
+	if !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") || len(next) > 2000 {
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: nextCookie, Value: next, Path: "/api/v1/auth", MaxAge: 600, HttpOnly: true,
+		SameSite: http.SameSiteLaxMode, Secure: strings.HasPrefix(externalURL(), "https://")})
+}
+
+// afterLoginURL is the frontend page to land on: the remembered path, else home.
+func afterLoginURL(w http.ResponseWriter, r *http.Request) string {
+	if c, err := r.Cookie(nextCookie); err == nil && strings.HasPrefix(c.Value, "/") && !strings.HasPrefix(c.Value, "//") {
+		http.SetCookie(w, &http.Cookie{Name: nextCookie, Value: "", Path: "/api/v1/auth", MaxAge: -1})
+		return frontendURL() + c.Value
+	}
+	return frontendURL()
 }
 
 func (s *Server) authLogin(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("provider")
+	rememberNext(w, r)
+	if name == "oidc" {
+		cfg, err := s.store.GetEnabledSSOProvider(r.Context(), name)
+		if err != nil {
+			writeErr(w, http.StatusNotFound, "provider not enabled")
+			return
+		}
+		s.oidcLogin(w, r, cfg)
+		return
+	}
 	meta, ok := oauthProviders[name]
 	if !ok {
 		writeErr(w, http.StatusNotFound, "unknown provider")
@@ -229,6 +282,15 @@ func (s *Server) authLogin(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) authCallback(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("provider")
+	if name == "oidc" {
+		cfg, err := s.store.GetEnabledSSOProvider(r.Context(), name)
+		if err != nil {
+			writeErr(w, http.StatusNotFound, "provider not enabled")
+			return
+		}
+		s.oidcCallback(w, r, cfg)
+		return
+	}
 	meta, ok := oauthProviders[name]
 	if !ok {
 		writeErr(w, http.StatusNotFound, "unknown provider")
@@ -262,23 +324,43 @@ func (s *Server) authCallback(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadGateway, "could not read user profile")
 		return
 	}
-	if cfg.AllowedDomain != "" && !strings.HasSuffix(strings.ToLower(email), "@"+strings.ToLower(cfg.AllowedDomain)) {
-		writeErr(w, http.StatusForbidden, "email domain not allowed for this workspace")
-		return
-	}
-
-	sess, err := s.store.CreateSession(r.Context(), email, displayName, name, sessionTTL)
-	if err != nil {
+	// These providers report no groups; recording none clears stale ones.
+	if err := s.finishLogin(r.Context(), w, name, email, displayName, nil, cfg.AllowedDomain); err != nil {
+		if errors.Is(err, errForbiddenDomain) {
+			writeErr(w, http.StatusForbidden, err.Error())
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, "failed to create session")
 		return
 	}
+	http.Redirect(w, r, afterLoginURL(w, r), http.StatusFound)
+}
+
+// authRefresh extends the current session by the configured lifetime, for
+// the "session expires soon — stay signed in" prompt.
+func (s *Server) authRefresh(w http.ResponseWriter, r *http.Request) {
+	c, err := r.Cookie(sessionCookie)
+	if err != nil || c.Value == "" {
+		writeErr(w, http.StatusUnauthorized, "not signed in")
+		return
+	}
+	sess := s.currentSession(r)
+	if sess == nil || sess.Provider == apiTokenProvider || sess.Provider == serviceAccountProvider {
+		writeErr(w, http.StatusUnauthorized, "not a browser session")
+		return
+	}
+	ttl := s.sessionLifetime(r.Context())
+	sess, err = s.store.ExtendSession(r.Context(), c.Value, ttl)
+	if err != nil {
+		writeErr(w, http.StatusUnauthorized, "session has expired")
+		return
+	}
 	http.SetCookie(w, &http.Cookie{
-		Name: sessionCookie, Value: sess.Token, Path: "/",
-		MaxAge: int(sessionTTL.Seconds()), HttpOnly: true, SameSite: http.SameSiteLaxMode,
+		Name: sessionCookie, Value: c.Value, Path: "/",
+		MaxAge: int(ttl.Seconds()), HttpOnly: true, SameSite: http.SameSiteLaxMode,
 		Secure: strings.HasPrefix(externalURL(), "https://"),
 	})
-	slog.Info("sso login", "provider", name, "email", email)
-	http.Redirect(w, r, frontendURL(), http.StatusFound)
+	writeJSON(w, http.StatusOK, map[string]any{"expires_at": sess.Expires})
 }
 
 func (s *Server) authMe(w http.ResponseWriter, r *http.Request) {
@@ -320,7 +402,7 @@ func (s *Server) listSSO(w http.ResponseWriter, r *http.Request) {
 	}
 	// Include redirect URIs so the UI can show exactly what to paste into
 	// each provider console.
-	uris := map[string]string{}
+	uris := map[string]string{"oidc": redirectURI("oidc")}
 	for name := range oauthProviders {
 		uris[name] = redirectURI(name)
 	}
@@ -336,12 +418,8 @@ func (s *Server) upsertSSO(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if _, ok := oauthProviders[p.Provider]; !ok {
-		writeErr(w, http.StatusBadRequest, "provider must be google, microsoft or github")
-		return
-	}
-	if p.Enabled && p.ClientID == "" {
-		writeErr(w, http.StatusBadRequest, "client_id is required to enable a provider")
+	if err := validateSSO(&p); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if err := s.store.UpsertSSOProvider(r.Context(), p); err != nil {
@@ -355,8 +433,55 @@ func (s *Server) upsertSSO(w http.ResponseWriter, r *http.Request) {
 		"enabled":        p.Enabled,
 		"client_id_set":  p.ClientID != "",
 		"allowed_domain": p.AllowedDomain,
+		"settings":       p.Settings, // non-secret by construction
 	})
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// validateSSO checks a provider config before it is saved.
+func validateSSO(p *store.SSOProvider) error {
+	if p.Settings == nil {
+		p.Settings = map[string]string{}
+	}
+	for k, v := range p.Settings {
+		p.Settings[k] = strings.TrimSpace(v)
+	}
+	switch p.Provider {
+	case "google", "microsoft", "github":
+		if p.Enabled && p.ClientID == "" {
+			return errors.New("client_id is required to enable a provider")
+		}
+	case "oidc":
+		if !p.Enabled {
+			return nil
+		}
+		if p.ClientID == "" {
+			return errors.New("client_id is required to enable a provider")
+		}
+		if err := oidcIssuerOK(p.Settings["issuer"]); err != nil {
+			return fmt.Errorf("issuer: %w", err)
+		}
+	case "ldap":
+		if !p.Enabled {
+			return nil
+		}
+		u, err := url.Parse(p.Settings["url"])
+		if err != nil || (u.Scheme != "ldap" && u.Scheme != "ldaps") || u.Host == "" {
+			return errors.New("url must be ldap://host:389 or ldaps://host:636")
+		}
+		if u.Scheme == "ldap" && p.Settings["start_tls"] != "true" && os.Getenv("FORGE_LDAP_ALLOW_PLAINTEXT") != "true" {
+			return errors.New("plain ldap:// would send passwords unencrypted: use ldaps://, turn on StartTLS, or set FORGE_LDAP_ALLOW_PLAINTEXT=true for a lab directory")
+		}
+		if p.Settings["base_dn"] == "" {
+			return errors.New("base_dn is required")
+		}
+		if f := p.Settings["user_filter"]; f != "" && !strings.Contains(f, "{username}") {
+			return errors.New("user_filter must contain {username}")
+		}
+	default:
+		return errors.New("provider must be google, microsoft, github, oidc or ldap")
+	}
+	return nil
 }
 
 // ---- oauth plumbing ----

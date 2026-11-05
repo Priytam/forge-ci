@@ -18,10 +18,16 @@ import {
   type JUnitReport,
 } from "../api";
 import { usePoll } from "../hooks/usePoll";
-import StatusBadge from "../components/StatusBadge";
 import ApprovalGate from "../components/ApprovalGate";
 import PlayButton from "../components/PlayButton";
 import CancelJobButton from "../components/CancelJobButton";
+import RetryJobButton from "../components/RetryJobButton";
+import LogTools from "../components/LogTools";
+import RepoHeader from "../components/RepoHeader";
+import { StatusBar } from "../components/review/ui";
+import { KindIcon, liveLink } from "../components/live/ui";
+import type { Tone } from "../components/ui/Pill";
+import type { IconName } from "../components/Icon";
 
 /**
  * Live job log: an SSE EventSource on /logs/stream?offset=0 that appends
@@ -157,6 +163,31 @@ function useJobLog(
   return { text, streaming, error };
 }
 
+/** A job's outcome in words, for its status bar. */
+function jobOutcome(
+  job: { status: string; exit_code: number | null; allow_failure?: boolean; manual?: boolean },
+  dur: string | null
+): { tone: Tone; icon: IconName; title: string } {
+  switch (job.status) {
+    case "success":
+      return { tone: "success", icon: "ok", title: `Passed${dur ? ` in ${dur}` : ""}` };
+    case "failed":
+      return {
+        tone: job.allow_failure ? "warning" : "danger",
+        icon: "blocked",
+        title: `Failed${job.exit_code !== null ? ` with exit code ${job.exit_code}` : ""}${job.allow_failure ? " (allowed to fail)" : ""}`,
+      };
+    case "running":
+      return { tone: "accent", icon: "activity", title: "Running…" };
+    case "blocked":
+      return { tone: "warning", icon: "pause", title: job.manual ? "Waiting for someone to start it" : "Waiting for approval" };
+    case "canceled":
+      return { tone: "neutral", icon: "closed", title: "Canceled" };
+    default:
+      return { tone: "neutral", icon: "clock", title: "Queued — waiting for a runner" };
+  }
+}
+
 export default function JobLog() {
   const { id } = useParams<{ id: string }>();
   const [searchParams] = useSearchParams();
@@ -173,7 +204,11 @@ export default function JobLog() {
 
   const job: Job | null = useMemo(() => {
     if (!detail) return null;
-    return detail.jobs.find((j) => String(j.id) === jobId) ?? null;
+    return (
+      detail.jobs.find((j) => String(j.id) === jobId) ??
+      detail.previous_jobs?.find((j) => String(j.id) === jobId) ??
+      null
+    );
   }, [detail, jobId]);
 
   const jobStatus = job?.status ?? null;
@@ -238,18 +273,12 @@ export default function JobLog() {
 
   return (
     <div>
-      <div className="breadcrumbs">
-        <Link to="/">Repos</Link> <span className="crumb-sep">/</span>{" "}
-        {pipelineId ? (
-          <Link to={`/pipelines/${pipelineId}`} className="mono">
-            #{pipelineId}
-          </Link>
-        ) : (
-          <span className="muted">unknown pipeline</span>
-        )}{" "}
-        <span className="crumb-sep">/</span>{" "}
-        <span className="mono">job {jobId}</span>
-      </div>
+      {repo && <RepoHeader repo={repo} tab="pipelines" />}
+      {pipelineId && (
+        <Link to={`/pipelines/${pipelineId}`} className="back-link">
+          ← Pipeline #{pipelineId}
+        </Link>
+      )}
 
       {pipelineError && (
         <div className="error-banner">Failed to load job metadata: {pipelineError}</div>
@@ -261,24 +290,64 @@ export default function JobLog() {
       )}
 
       {job && (
-        <div className="card pipeline-head">
+        <div className="pipeline-head pipeline-head-v2">
           <div className="pipeline-head-main">
-            <h1>{job.name}</h1>
+            <h1 className="cr-title">
+              {job.name} <span className="cr-num">job {job.id}</span>
+            </h1>
             <div className="pipeline-meta">
               <span className="stage-tag">stage: {job.stage}</span>
               {dur && <span className="muted">{dur}</span>}
               {job.environment && <span className="env-tag">{job.environment}</span>}
+              {job.resource_group && (
+                <span className="env-tag" title="At most one job in this group runs at a time">
+                  group: {job.resource_group}
+                </span>
+              )}
+              {job.retry_of && (
+                <Link to={`/jobs/${job.retry_of}?pipeline=${job.pipeline_id}`} className="muted">
+                  retry of job {job.retry_of}
+                </Link>
+              )}
               {job.exit_code !== null && (
                 <span className="mono muted">exit {job.exit_code}</span>
               )}
             </div>
           </div>
           <div className="pipeline-head-side">
-            <StatusBadge status={job.status} />
             {!isTerminalStatus(job.status) && (
               <CancelJobButton jobId={job.id} repo={repo ?? ""} onDone={refreshPipeline} />
             )}
+            {(job.status === "failed" || job.status === "canceled") && (
+              <RetryJobButton jobId={job.id} pipelineId={job.pipeline_id} repo={repo ?? ""} />
+            )}
           </div>
+        </div>
+      )}
+
+      {job && <StatusBar {...jobOutcome(job, dur)} detail={
+        job.runner_id ? (
+          <>
+            on runner{" "}
+            <Link to={`/jobs?runner=${encodeURIComponent(job.runner_id)}`} className="mono">
+              {job.runner_id}
+            </Link>{" "}
+            · stage {job.stage}
+          </>
+        ) : (
+          `stage ${job.stage}`
+        )
+      }>
+        {job.environment && job.status === "success" && (
+          <Link className="btn lv-open-live" to={liveLink(job.environment, repo ?? undefined)}>
+            <KindIcon kind="App" size={14} /> Open Live view
+          </Link>
+        )}
+      </StatusBar>}
+      {job?.status_reason && (
+        <div className="error-banner">
+          This job did not run: {job.status_reason}. An admin sets which branches
+          may deploy where under Admin ▾ → Environments &amp; branches.
         </div>
       )}
 
@@ -291,6 +360,10 @@ export default function JobLog() {
               jobId={job.id}
               approvals={job.approvals}
               required={job.required_approvals}
+                            requiredGroup={job.required_group}
+                            requiredGroupApprovals={job.required_group_approvals}
+                groupApprovals={job.group_approvals}
+                groupMembers={job.group_members}
               status={job.status}
               onDone={refreshPipeline}
             />
@@ -378,8 +451,11 @@ export default function JobLog() {
         <span className="artifacts-title">Log</span>
         {streaming && <span className="log-live">● live</span>}
       </div>
+      {job && (
+        <LogTools jobId={job.id} text={logs} failed={job.status === "failed" && !job.status_reason} />
+      )}
       <pre ref={termRef} className="terminal" onScroll={onTermScroll}>
-        {logs || "Waiting for logs…"}
+        {logs || (job?.status_reason ? "No log — this job never ran." : "Waiting for logs…")}
       </pre>
     </div>
   );

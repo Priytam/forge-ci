@@ -1,4 +1,8 @@
-import { BrowserRouter, Link, Route, Routes } from "react-router-dom";
+import type { ReactNode } from "react";
+import SettingsLayout from "./components/SettingsLayout";
+import AdminApiTokens from "./pages/AdminApiTokens";
+import { SETTINGS_HOME } from "./components/nav";
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import Repos from "./pages/Repos";
 import PipelineList from "./pages/PipelineList";
 import PipelineDetail from "./pages/PipelineDetail";
@@ -11,68 +15,101 @@ import Recipes from "./pages/Recipes";
 import AddRepo from "./pages/AddRepo";
 import Login from "./pages/Login";
 import AdminSso from "./pages/AdminSso";
+import AdminPlatformAdmins from "./pages/AdminPlatformAdmins";
 import AdminAudit from "./pages/AdminAudit";
 import AdminRunnerTokens from "./pages/AdminRunnerTokens";
 import AllPipelines from "./pages/AllPipelines";
 import ApiTokens from "./pages/ApiTokens";
+import Jobs from "./pages/Jobs";
+import EnvironmentBoard from "./pages/EnvironmentBoard";
+import AdminEnvironments from "./pages/AdminEnvironments";
+import AdminNotifications from "./pages/AdminNotifications";
+import AdminApproverGroups from "./pages/AdminApproverGroups";
+import AdminServiceAccounts from "./pages/AdminServiceAccounts";
+import TemplateCatalog from "./pages/TemplateCatalog";
+import AdminAbout from "./pages/AdminAbout";
 import Environments from "./pages/Environments";
 import TestHistory from "./pages/TestHistory";
-import AuthMenu from "./components/AuthMenu";
-import AdminNav from "./components/AdminNav";
+import Changes from "./pages/Changes";
+import RepoChanges from "./pages/RepoChanges";
+import RepoQueue from "./pages/RepoQueue";
+import RepoMergeRules from "./pages/RepoMergeRules";
+import ChangeDetail from "./pages/ChangeDetail";
+import AdminMergeRules from "./pages/AdminMergeRules";
+import Account from "./pages/Account";
+import Applications from "./pages/Applications";
+import RepoApplications from "./pages/RepoApplications";
+import ApplicationDetail from "./pages/ApplicationDetail";
+import Fleet from "./pages/Fleet";
+import LiveTemplates from "./pages/LiveTemplates";
+import AdminLive from "./pages/AdminLive";
+import Shell from "./components/Shell";
+import { ToastProvider } from "./components/ui/Toast";
+
+/** Sign-in renders bare; every other page sits inside the app shell. */
+function Frame({ children }: { children: ReactNode }) {
+  const { pathname } = useLocation();
+  if (pathname.startsWith("/login")) return <main className="content content-bare">{children}</main>;
+  return (
+    <ToastProvider>
+      <Shell>{children}</Shell>
+    </ToastProvider>
+  );
+}
 
 export default function App() {
   return (
     <BrowserRouter>
-      <header className="app-header">
-        <div className="app-header-inner">
-          <Link to="/" className="brand">
-            <span className="brand-mark">⚙</span> Forge CI
-          </Link>
-          <nav className="header-nav">
-            <Link to="/pipelines" className="header-link">
-              Pipelines
-            </Link>
-            <Link to="/runners" className="header-link">
-              Runners
-            </Link>
-            <Link to="/recipes" className="header-link">
-              Recipes
-            </Link>
-            <Link to="/docs" className="header-link">
-              Docs
-            </Link>
-            <AdminNav />
-            <Link to="/new" className="btn header-action">
-              Run pipeline
-            </Link>
-            <AuthMenu />
-          </nav>
-        </div>
-      </header>
-      <main className="content">
+      <Frame>
         <Routes>
           <Route path="/" element={<Repos />} />
           <Route path="/repos/new" element={<AddRepo />} />
           <Route path="/repos/:repo" element={<PipelineList />} />
           <Route path="/repos/:repo/settings" element={<RepoSettings />} />
           <Route path="/repos/:repo/environments" element={<Environments />} />
+          <Route path="/repos/:repo/applications" element={<RepoApplications />} />
           <Route path="/repos/:repo/tests" element={<TestHistory />} />
+          <Route path="/repos/:repo/changes" element={<RepoChanges />} />
+          <Route path="/repos/:repo/queue" element={<RepoQueue />} />
+          <Route path="/repos/:repo/merge-rules" element={<RepoMergeRules />} />
           <Route path="/runners" element={<Runners />} />
           <Route path="/docs" element={<Docs />} />
           <Route path="/docs/:guide" element={<Docs />} />
+          <Route path="/templates" element={<TemplateCatalog />} />
           <Route path="/recipes" element={<Recipes />} />
           <Route path="/recipes/:slug" element={<Recipes />} />
           <Route path="/login" element={<Login />} />
-          <Route path="/admin/sso" element={<AdminSso />} />
-          <Route path="/admin/audit" element={<AdminAudit />} />
-          <Route path="/admin/runner-tokens" element={<AdminRunnerTokens />} />
+          <Route path="/admin" element={<SettingsLayout />}>
+            <Route index element={<Navigate to={SETTINGS_HOME} replace />} />
+            <Route path="sso" element={<AdminSso />} />
+            <Route path="admins" element={<AdminPlatformAdmins />} />
+            <Route path="environments" element={<AdminEnvironments />} />
+            <Route path="notifications" element={<AdminNotifications />} />
+            <Route path="approver-groups" element={<AdminApproverGroups />} />
+            <Route path="merge-rules" element={<AdminMergeRules />} />
+            <Route path="service-accounts" element={<AdminServiceAccounts />} />
+            <Route path="audit" element={<AdminAudit />} />
+            <Route path="about" element={<AdminAbout />} />
+            <Route path="runner-tokens" element={<AdminRunnerTokens />} />
+            <Route path="api-tokens" element={<AdminApiTokens />} />
+            <Route path="live" element={<AdminLive />} />
+          </Route>
+          <Route path="/changes" element={<Changes />} />
+          <Route path="/changes/:id" element={<ChangeDetail />} />
           <Route path="/pipelines" element={<AllPipelines />} />
+          <Route path="/jobs" element={<Jobs />} />
+          <Route path="/environments" element={<EnvironmentBoard />} />
+          <Route path="/applications" element={<Applications />} />
+          <Route path="/applications/fleet" element={<Fleet />} />
+          <Route path="/applications/templates" element={<LiveTemplates />} />
+          <Route path="/applications/:id" element={<ApplicationDetail />} />
           <Route path="/tokens" element={<ApiTokens />} />
+          <Route path="/account" element={<Account />} />
           <Route path="/pipelines/:id" element={<PipelineDetail />} />
           <Route path="/jobs/:id" element={<JobLog />} />
           <Route path="/new" element={<NewPipeline />} />
         </Routes>
-      </main>
+      </Frame>
     </BrowserRouter>
   );
 }

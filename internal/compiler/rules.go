@@ -33,11 +33,11 @@ var validWhen = map[string]bool{
 // evalRules walks a job's rules in order and returns the outcome of the first
 // matching rule. If no rule matches, the job is excluded (GitLab semantics).
 //
-// changes: and exists: are DOCUMENTED no-ops in Forge: the compiler runs
-// without a repo checkout or a file diff (webhooks carry only repo/ref/sha), so
-// there is no honest way to evaluate them. They are parsed and validated but
-// always treated as satisfied (true), never faked. See docs/pipeline-dsl.md.
-func evalRules(rules []ruleSpec, ctx map[string]string) (ruleOutcome, error) {
+// changes: is satisfied when any file in the pipeline's change set matches
+// one of its globs; with an unknown change set (nil) it is satisfied, so jobs
+// run rather than being skipped on a guess. exists: remains a documented
+// no-op (the compiler has no checkout) and is always satisfied.
+func evalRules(rules []ruleSpec, ctx map[string]string, changes *ChangeSet) (ruleOutcome, error) {
 	for i, rule := range rules {
 		if rule.When != "" && !validWhen[rule.When] {
 			return ruleOutcome{}, fmt.Errorf("rules[%d]: invalid when %q (want on_success|manual|always|never)", i, rule.When)
@@ -50,7 +50,10 @@ func evalRules(rules []ruleSpec, ctx map[string]string) (ruleOutcome, error) {
 			}
 			match = ok
 		}
-		// changes/exists: satisfied (no-op) — documented limitation.
+		if match && len(rule.Changes) > 0 {
+			match = changes.matchesChanges(rule.Changes)
+		}
+		// exists: satisfied (no-op) — documented limitation.
 		if !match {
 			continue
 		}

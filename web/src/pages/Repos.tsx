@@ -1,3 +1,4 @@
+import Skeleton from "../components/ui/Skeleton";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import {
@@ -21,13 +22,15 @@ const PAGE = 24;
 export function ProviderChip({ provider }: { provider: string | null }) {
   if (!provider) return null;
   const label =
-    provider === "github"
-      ? "GitHub"
-      : provider === "bitbucket"
-        ? "Bitbucket"
-        : provider === "codecommit"
-          ? "CodeCommit"
-          : "Git";
+    (
+      {
+        github: "GitHub",
+        gitlab: "GitLab",
+        bitbucket: "Bitbucket",
+        gitea: "Gitea",
+        codecommit: "CodeCommit",
+      } as Record<string, string>
+    )[provider] ?? "Git";
   return <span className={`provider-chip provider-${provider}`}>{label}</span>;
 }
 
@@ -242,7 +245,7 @@ export default function Repos() {
       )}
 
       {error && <div className="error-banner">Failed to load repos: {error}</div>}
-      {loading && !data && <div className="muted">Loading repositories…</div>}
+      {loading && !data && <Skeleton />}
 
       {repos && repos.length === 0 && !searching && page === 0 && (
         <div className="empty card">

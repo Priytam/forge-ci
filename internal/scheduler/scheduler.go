@@ -17,6 +17,7 @@ import (
 	"github.com/priytamjeepandey/forge-ci/internal/blob"
 	"github.com/priytamjeepandey/forge-ci/internal/cron"
 	"github.com/priytamjeepandey/forge-ci/internal/logstore"
+	"github.com/priytamjeepandey/forge-ci/internal/notify"
 	"github.com/priytamjeepandey/forge-ci/internal/store"
 	"github.com/priytamjeepandey/forge-ci/internal/vcs"
 )
@@ -27,6 +28,8 @@ type Scheduler struct {
 	logs          *logstore.Service
 	tick          time.Duration
 	staleAfter    time.Duration
+	lastRollup    time.Time
+	lastSnapshot  time.Time     // capacity snapshot, once a minute
 	gcEvery       time.Duration // retention GC cadence
 	archiveEvery  time.Duration // log-archive safety-net sweep cadence
 	scheduleEvery time.Duration // cron-schedule fire-check cadence
@@ -38,6 +41,10 @@ type Scheduler struct {
 	statusSem     chan struct{}       // bounds concurrent in-flight posts
 	inflightMu    sync.Mutex          // guards inflight
 	inflight      map[string]struct{} // (pipeline:status) currently being posted this process
+
+	// Approval notifications (notify.go).
+	sender      *notify.Sender
+	notifyEvery time.Duration
 }
 
 func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Scheduler {
@@ -55,6 +62,10 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Scheduler {
 		statusEnabled: os.Getenv("COMMIT_STATUS") != "off",
 		statusSem:     make(chan struct{}, 4),
 		inflight:      map[string]struct{}{},
+		sender: &notify.Sender{OnResult: func(ch string, err error) {
+			_ = s.RecordDeliveryResult(context.Background(), ch, err)
+		}},
+		notifyEvery: notifyEvery,
 	}
 }
 
@@ -103,6 +114,7 @@ func (sc *Scheduler) Run(ctx context.Context) {
 	// its next_run_at (e.g. while the server was down) fires promptly rather than
 	// waiting a full scheduleEvery interval.
 	firstSchedules := time.After(5 * time.Second)
+	go sc.notifyLoop(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -313,6 +325,34 @@ func (sc *Scheduler) step(ctx context.Context) {
 	}{
 		{"cancel_dead", sc.store.CancelDeadJobs},
 		{"fail_fast_cancel", sc.store.FailFastCancel},
+		{"cancel_superseded_deploys", sc.store.CancelSupersededDeploys},
+		{"stats_rollup", func(ctx context.Context) (int64, error) {
+			// Hourly rollups every 10 minutes (idempotent; backfills a week).
+			if time.Since(sc.lastRollup) < 10*time.Minute {
+				return 0, nil
+			}
+			sc.lastRollup = time.Now()
+			n, err := sc.store.RollupHour(ctx, 7*24*time.Hour)
+			if err == nil {
+				_, _ = sc.store.PruneWebhookLog(ctx, 30*24*time.Hour)
+				_ = sc.store.PruneRollups(ctx, 400*24*time.Hour)
+				_ = sc.store.PruneCapacitySnapshots(ctx)
+			}
+			return int64(n), err
+		}},
+		{"capacity_snapshot", func(ctx context.Context) (int64, error) {
+			// One row a minute, idempotent across servers.
+			if time.Since(sc.lastSnapshot) < time.Minute {
+				return 0, nil
+			}
+			sc.lastSnapshot = time.Now()
+			_, err := sc.store.RecordCapacitySnapshot(ctx)
+			return 0, err
+		}},
+		{"runner_rollout", func(ctx context.Context) (int64, error) {
+			_, err := sc.store.AdvanceRollout(ctx, sc.staleAfter)
+			return 0, err
+		}},
 		{"promote_ready", sc.store.PromoteReadyJobs},
 		{"expire_blocked", sc.store.ExpireBlockedJobs},
 		{"fail_overdue", sc.store.FailOverdueJobs},
@@ -391,7 +431,7 @@ func (sc *Scheduler) deliverStatus(ctx context.Context, c store.StatusCandidate)
 		sc.deliverCodeCommitComment(ctx, c)
 		return
 	}
-	provider, token, ok, err := sc.store.RepoStatusTarget(ctx, c.Repo)
+	provider, token, cloneURL, ok, err := sc.store.RepoStatusTarget(ctx, c.Repo)
 	if err != nil {
 		slog.Error("commit-status: resolve repo token", "err", err, "repo", c.Repo)
 		sc.releaseStatus(ctx, c) // treat as transient; retry later
@@ -399,19 +439,24 @@ func (sc *Scheduler) deliverStatus(ctx context.Context, c store.StatusCandidate)
 	}
 	// Belt-and-braces: the candidate query already excludes unpostable repos,
 	// but the registry could have changed between the query and here.
-	if !ok || token == "" || (provider != "github" && provider != "bitbucket") {
+	if !ok || token == "" {
 		slog.Debug("commit-status: repo not postable, skipping", "repo", c.Repo, "provider", provider)
 		return
 	}
 
 	err = sc.poster.Post(ctx, vcs.PostRequest{
 		Provider:  provider,
+		CloneURL:  cloneURL,
 		Repo:      c.Repo,
 		SHA:       c.SHA,
 		Token:     token,
 		Status:    c.Status,
 		TargetURL: pipelineURL(c.PipelineID),
 	})
+	if errors.Is(err, vcs.ErrNoStatusAPI) {
+		slog.Debug("commit-status: provider has no status API", "repo", c.Repo, "provider", provider)
+		return
+	}
 	if err == nil {
 		slog.Info("commit-status posted", "repo", c.Repo, "sha", shortSHA(c.SHA),
 			"status", c.Status, "provider", provider)
@@ -419,8 +464,8 @@ func (sc *Scheduler) deliverStatus(ctx context.Context, c store.StatusCandidate)
 	}
 	var pe *vcs.PostError
 	if errors.As(err, &pe) && pe.Permanent {
-		slog.Error("commit-status: giving up — check the repo's token scope "+
-			"(GitHub repo:status / Bitbucket repositories:write), repo name and sha",
+		slog.Error("commit-status: giving up — check that the repo's token may write "+
+			"commit statuses on its host, and the repo name and sha",
 			"repo", c.Repo, "sha", shortSHA(c.SHA), "status", c.Status,
 			"provider", provider, "http_status", pe.StatusCode, "attempts", pe.Attempts)
 		return // keep the claim: don't re-hammer a misconfigured repo

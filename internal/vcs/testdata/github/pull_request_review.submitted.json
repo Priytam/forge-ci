@@ -1,0 +1,23 @@
+{
+  "action": "submitted",
+  "review": {
+    "id": 2401234567,
+    "user": {"login": "ashwin-travafa"},
+    "body": "LGTM",
+    "commit_id": "1a2b3c4d5e6f708192a3b4c5d6e7f80910111213",
+    "submitted_at": "2026-10-21T14:55:00Z",
+    "state": "approved",
+    "html_url": "https://github.com/Letztrip/cos/pull/42#pullrequestreview-2401234567"
+  },
+  "pull_request": {
+    "number": 42,
+    "state": "open",
+    "title": "Seat-level lock for group checkout",
+    "user": {"login": "harish-travafa"},
+    "head": {"ref": "feat/seat-lock", "sha": "1a2b3c4d5e6f708192a3b4c5d6e7f80910111213"},
+    "base": {"ref": "dev", "sha": "aabbccddeeff00112233445566778899aabbccdd"},
+    "updated_at": "2026-10-21T14:55:01Z"
+  },
+  "repository": {"full_name": "Letztrip/cos"},
+  "sender": {"login": "ashwin-travafa"}
+}

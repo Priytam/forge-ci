@@ -1,8 +1,26 @@
 # Forge CI
 
-A GitLab-style CI/CD engine: YAML pipelines compiled to a job DAG, a
-Postgres-backed scheduler, pull-based runners with pluggable executors, an
-approval gate for protected environments, and a React dashboard.
+A self-hosted CI/CD engine that works with **any git host, any cloud and any
+kind of machine**: YAML pipelines compiled to a job DAG, a Postgres-backed
+scheduler, pull-based runners with pluggable executors, approval gates and
+deploy controls for protected environments, and a web dashboard.
+
+Forge is deliberately generic. Every integration is a pluggable provider; the
+ones listed are examples, not requirements:
+
+| Area | Works with |
+|---|---|
+| Git hosts | GitHub (cloud + Enterprise), GitLab (cloud + self-hosted), Bitbucket, Gitea / Forgejo, AWS CodeCommit, **any git server** over https/ssh (plain git) |
+| Where jobs run | `shell` (any machine: bare metal, VM, laptop), `docker` (any Docker host), `kubernetes` (any cluster, one pod per job) |
+| Cloud credentials for jobs | keyless per-job OIDC tokens, refreshed for long builds — federates with AWS, GCP, Azure, HashiCorp Vault or anything that trusts an OIDC issuer |
+| Artifacts, caches, logs | local disk, any S3-compatible object store (AWS S3, MinIO, Ceph, Cloudflare R2, GCS interoperability, …) or Azure Blob Storage |
+| Registries | any OCI registry (images, BuildKit layer cache) |
+| Sign-in | Google, Microsoft Entra ID, GitHub OAuth |
+| Notifications | Slack incoming webhooks, email (SMTP) |
+
+The server, runners and Postgres run anywhere — one VM, Docker Compose, or
+Kubernetes (Helm chart and Terraform modules included; AWS and GCP are just
+the two worked examples).
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
@@ -19,7 +37,7 @@ Monorepo with three deployables:
 | Deployable | Path | What it is |
 |---|---|---|
 | `forge-server` | `cmd/server` | Control plane: REST API, YAML→DAG compiler, scheduler, approvals |
-| `forge-runner` | `cmd/runner` | Pull-based build agent; `shell` and `docker` executors |
+| `forge-runner` | `cmd/runner` | Pull-based build agent; `shell`, `docker` and `kubernetes` executors |
 | web | `web/` | React dashboard (pipeline list, stage view, live logs, approve/reject) |
 
 ## Architecture
@@ -34,7 +52,7 @@ Monorepo with three deployables:
      runner protocol (HTTP long-poll)
  ◄── acquire (FOR UPDATE SKIP LOCKED) ── forge-runner ×N
  ──► logs (streamed chunks) / heartbeat / complete       │
-                                                shell | docker executor
+                                      shell | docker | kubernetes executor
 ```
 
 Job state machine:
@@ -343,13 +361,17 @@ the dev experience):
 | `RUNNER_AUTH` | `off` \| `on` — require a bearer token on the runner protocol + artifact upload | `off` |
 | `RUNNER_TOKEN` | (runner) token sent to an `RUNNER_AUTH=on` server | — |
 | `FORGE_SECRET_KEY` | base64 32-byte AES-256-GCM key; encrypts variables, VCS tokens and SSO secrets at rest | — (passthrough) |
-| `ADMIN_EMAILS` | comma-separated platform-admin emails (enforced once SSO is on) | — |
+| `ADMIN_EMAILS` | comma-separated platform-admin emails (enforced once SSO is on); more admins can be added in Admin → Platform admins | — |
 | `EXTERNAL_URL` | server's public origin (SSO redirect + CSRF allow-list; commit-status `target_url` fallback; **OIDC token issuer + JWKS origin**) | `http://localhost:8080` |
 | `OIDC_PRIVATE_KEY` | RSA PEM (PKCS#1/PKCS#8) signing the per-job OIDC ID tokens; when unset Forge generates one on first start and persists it encrypted (stable JWKS across restarts) — see [docs/oidc.md](docs/oidc.md) | — (generated) |
 | `OIDC_AUDIENCE` | `aud` claim of minted OIDC tokens (set per cloud, e.g. `sts.amazonaws.com` for AWS) | `forge-ci` |
 | `FRONTEND_URL` | dashboard origin (post-login redirect + CSRF allow-list; commit-status `target_url` base) | `http://localhost:5173` |
 | `COMMIT_STATUS` | `on` \| `off` — write pipeline status back to the origin VCS (GitHub commit status / Bitbucket build status). Only acts on connected repos authenticated by a token (or a GitHub App) with commit-status scope; `off` disables globally | `on` |
-| `GITHUB_API_BASE` | override the GitHub API host — used for **commit-status write-back** and **GitHub App installation-token minting**. For testing against a stub; leave unset in production | `https://api.github.com` |
+| `GITHUB_LINK_CLIENT_ID` / `GITHUB_LINK_CLIENT_SECRET` | GitHub OAuth app people link their accounts with, so Forge comments/reviews/merges as them ([docs/code-review.md](docs/code-review.md#linking-github-accounts-admin-setup)); unset = the GitHub sign-in app | — |
+| `CODECOMMIT_FORGE_ARN` | The AWS identity Forge calls CodeCommit as; code review leaves its own merge-gate approval out of the reviews ([docs/code-review.md](docs/code-review.md#aws-codecommit)); unset = asked of STS once | — |
+| `MIRROR_AFFINITY_WAIT` | how long a repo's diff waits for the runner holding its git mirror before any runner takes it ([docs/runners.md](docs/runners.md#git-mirrors-for-code-review-diffs-runner-tasks)) | `10s` |
+| `CODE_REVIEW` | `on` \| `off` — code review: webhook ingest, change refreshes, the conditional reconcile, merge-gate evaluation and queued provider writes ([docs/code-review.md](docs/code-review.md)); `off` stops all of it | `on` |
+| `GITHUB_API_BASE` | override the GitHub API host — used for **commit-status write-back**, **code review** and **GitHub App installation-token minting**. For testing against a stub; leave unset in production | `https://api.github.com` |
 | `REDIS_URL` | Redis for the high-volume log tier (live buffer + pub/sub fan-out), e.g. `redis://localhost:6379/0` | — |
 | `LOG_BACKEND` | `redis` \| `postgres`; empty auto-selects redis when `REDIS_URL` is set+reachable, else postgres | — (auto) |
 | `MAX_JOB_LOG_BYTES` | per-job cumulative log cap; excess truncated with a notice | `10485760` (10 MiB) |
@@ -424,7 +446,13 @@ provides the fallback CI. Full walkthrough: [docs/self-hosted-ci.md](docs/self-h
 - [AWS CodeCommit (EventBridge triggers, IAM SigV4 clone, PR comments)](docs/codecommit.md)
 - [Registering runners (VM/systemd, Docker, Kubernetes)](docs/runners.md)
 - [Kubernetes executor: deployment, access & RBAC (incl. separate-cluster)](docs/kubernetes-deployment.md)
-- [Artifact storage (local, MinIO, S3, GCS)](docs/artifact-storage.md)
+- [Artifact storage (local, S3-compatible, Azure Blob)](docs/artifact-storage.md)
+- [External secrets and registry login (Vault, AWS, GCP, Azure)](docs/secrets.md)
+- [Runner autoscaling (Kubernetes, Docker host, any cloud via exec)](docs/autoscaling.md)
+- [Runner operations: drain, upgrade, lost jobs, maintenance mode](docs/runner-operations.md)
+- [Observability: history, time ranges, webhook health](docs/observability.md)
+- [Code review: inbox, diffs from runner git mirrors, comments synced both ways, merge gate enforced on the host, approve & merge from Forge; near-zero API footprint](docs/code-review.md)
+- [Notifications: Slack, Teams, webhooks, email; approve by link](docs/notifications.md)
 - [High-volume log architecture (Redis live buffer, blob archive, SSE)](docs/log-ingestion-design.md)
 - [Roles, membership & approval rules](docs/rbac-approvals.md)
 - [SSO setup: Google, Microsoft, GitHub](docs/sso.md)

@@ -9,6 +9,7 @@ import {
   type RegisteredRepo,
   type RepoConfig,
 } from "../api";
+import LintPanel from "../components/LintPanel";
 
 const OTHER = "__other__";
 
@@ -155,11 +156,6 @@ export default function NewPipeline() {
 
   return (
     <div>
-      <div className="breadcrumbs">
-        <Link to="/">Repos</Link> <span className="crumb-sep">/</span>{" "}
-        <span>run</span>
-      </div>
-
       <div className="page-head">
         <h1>Run pipeline</h1>
       </div>
@@ -275,7 +271,7 @@ export default function NewPipeline() {
               <>
                 Loaded from this repo's registered config. Edits below apply
                 to this run only — change the permanent config in{" "}
-                <Link to={`/repos/${encodeURIComponent(repo)}/settings`}>
+                <Link to={`/repos/${encodeURIComponent(repo)}/settings?section=pipeline-config`}>
                   Settings → Pipeline config
                 </Link>
                 .
@@ -285,7 +281,7 @@ export default function NewPipeline() {
                 No registered config for this repo — using an example.
                 Register one in{" "}
                 {repoChoice !== OTHER ? (
-                  <Link to={`/repos/${encodeURIComponent(repo)}/settings`}>
+                  <Link to={`/repos/${encodeURIComponent(repo)}/settings?section=pipeline-config`}>
                     Settings → Pipeline config
                   </Link>
                 ) : (
@@ -296,6 +292,8 @@ export default function NewPipeline() {
             )}
           </span>
         </label>
+
+        <LintPanel config={config} repo={repo} defaultRef={ref} key={ref} fixedRef />
 
         {error && <div className="error-banner">{error}</div>}
 

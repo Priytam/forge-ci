@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -225,8 +226,24 @@ func (s *Store) MaskedValuesForJob(ctx context.Context, jobID int64) ([]string, 
 			if err != nil {
 				return nil, err
 			}
-			out = append(out, plain)
+			out = append(out, withTraceForms(plain)...)
 		}
 	}
 	return out, rows.Err()
+}
+
+// withTraceForms returns a masked value plus the forms a shell's `set -x`
+// trace prints it in. Traces single-quote each argument, so a value
+// containing ' comes out re-quoted: bash writes it'\”s, busybox ash (Alpine)
+// writes it'"'"'s (dash prints it as is). Masking only the literal value would
+// leak those on a debug rerun (CI_DEBUG_TRACE), so all three are masked.
+func withTraceForms(v string) []string {
+	if !strings.Contains(v, "'") {
+		return []string{v}
+	}
+	return []string{
+		v,
+		strings.ReplaceAll(v, "'", `'\''`),
+		strings.ReplaceAll(v, "'", `'"'"'`),
+	}
 }

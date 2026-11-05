@@ -1,3 +1,4 @@
+import DocsTabs from "../components/DocsTabs";
 import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { GUIDES, GUIDE_GROUPS } from "../docs/guides";
@@ -35,6 +36,8 @@ export default function Docs() {
   const q = filter.trim().toLowerCase();
 
   return (
+    <>
+    <DocsTabs />
     <div className="docs-layout">
       <aside className="docs-sidebar">
         <input
@@ -82,5 +85,6 @@ export default function Docs() {
         )}
       </article>
     </div>
+    </>
   );
 }

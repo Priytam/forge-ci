@@ -1,12 +1,6 @@
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useState,
-  type FormEvent,
-  type ReactNode,
-} from "react";
-import { Link, useParams } from "react-router-dom";
+import Skeleton from "../components/ui/Skeleton";
+import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import {
   addMember,
   artifactDownloadUrl,
@@ -26,6 +20,10 @@ import {
   getRepoTemplate,
   listMembers,
   listProtectedEnvironments,
+  deleteProtectedEnvironment,
+  getWebhookLog,
+  type WebhookEntry,
+  type WebhookHealth,
   listRepoTemplates,
   listRunners,
   listSchedules,
@@ -40,8 +38,12 @@ import {
   upsertProtectedEnvironment,
   type Schedule,
   type Variable,
+  listApproverGroups,
+  type ApproverGroup,
 } from "../api";
+import LintPanel from "../components/LintPanel";
 import { usePoll } from "../hooks/usePoll";
+import RepoHeader from "../components/RepoHeader";
 
 const MASKED_PLACEHOLDER = "********************";
 const ROLES = ["admin", "owner", "developer"];
@@ -55,19 +57,15 @@ function Section({
   description: ReactNode;
   children: ReactNode;
 }) {
-  const [open, setOpen] = useState(false);
   return (
-    <section className="card settings-section">
-      <div className="settings-head">
+    <section className="card settings-section settings-open">
+      <div className="settings-head settings-head-static">
         <div className="settings-head-text">
           <h2>{title}</h2>
           <div className="muted settings-desc">{description}</div>
         </div>
-        <button type="button" className="btn" onClick={() => setOpen((o) => !o)}>
-          {open ? "Collapse" : "Expand"}
-        </button>
       </div>
-      {open && <div className="settings-body">{children}</div>}
+      <div className="settings-body">{children}</div>
     </section>
   );
 }
@@ -511,6 +509,72 @@ function ArtifactsSection({ repo }: { repo: string }) {
   );
 }
 
+/* ---------------- Webhooks ---------------- */
+
+function WebhooksSection({ repo }: { repo: string }) {
+  const [health, setHealth] = useState<WebhookHealth | null>(null);
+  const [entries, setEntries] = useState<WebhookEntry[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    void getWebhookLog(repo)
+      .then((r) => {
+        setHealth(r.health);
+        setEntries(r.entries);
+      })
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+  }, [repo]);
+  if (error) return <div className="error-banner">{error}</div>;
+  if (!health) return <Skeleton />;
+  const failing = health.rejected + health.errors;
+  return (
+    <div>
+      <p className="muted">
+        Last 24h: {health.accepted} accepted · {health.rejected} rejected signature · {health.errors} errors · {health.duplicates} duplicates
+        {health.sources > 0 && <> · from {health.sources} source{health.sources === 1 ? "" : "s"}</>}
+      </p>
+      {failing > 0 && (
+        <div className="error-banner">
+          {health.sources > 1 ? `This repo sends from ${health.sources} hooks; ` : ""}
+          {health.rejected > 0
+            ? `${health.rejected} deliver${health.rejected === 1 ? "y" : "ies"} failed the signature check${health.failing_sources?.length ? ` (from ${health.failing_sources.join(", ")})` : ""} — a hook with a stale or missing secret. Fix or delete it on the git host.`
+            : `${health.errors} deliver${health.errors === 1 ? "y" : "ies"} were rejected; see the reasons below.`}
+        </div>
+      )}
+      {entries.length === 0 ? (
+        <div className="muted">No deliveries logged yet.</div>
+      ) : (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>When</th>
+                <th>Event</th>
+                <th>Result</th>
+                <th>From</th>
+                <th>Pipeline</th>
+              </tr>
+            </thead>
+            <tbody>
+              {entries.map((e) => (
+                <tr key={e.id}>
+                  <td className="muted">{relativeTime(e.received_at)}</td>
+                  <td className="mono">{e.provider}{e.event ? ` · ${e.event}` : ""}</td>
+                  <td>
+                    <span className={`badge ${e.status < 300 ? "badge-success" : e.status === 202 ? "badge-created" : "badge-failed"}`}>{e.status}</span>
+                    {e.reason && <span className="muted"> {e.reason}</span>}
+                  </td>
+                  <td className="mono muted">{e.source_ip || "—"}</td>
+                  <td>{e.pipeline_id ? <Link to={`/pipelines/${e.pipeline_id}`}>#{e.pipeline_id}</Link> : <span className="muted">—</span>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ---------------- Members & approval rules ---------------- */
 
 function MembersSection({ repo }: { repo: string }) {
@@ -545,6 +609,19 @@ function MembersSection({ repo }: { repo: string }) {
     }
   };
 
+  const onDeleteRule = async (id: number, name: string, global: boolean) => {
+    const what = global
+      ? `Delete the GLOBAL approval rule for ${name}? Every repo without its own rule stops requiring approval for ${name}.`
+      : `Delete this repo's approval rule for ${name}? The global rule for ${name}, if any, applies instead.`;
+    if (!window.confirm(what)) return;
+    try {
+      await deleteProtectedEnvironment(id);
+      refreshEnvs();
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : String(err));
+    }
+  };
+
   const onDeleteMember = async (id: number, name: string) => {
     if (!window.confirm(`Remove member "${name}"?`)) return;
     setMemberError(null);
@@ -565,6 +642,14 @@ function MembersSection({ repo }: { repo: string }) {
     "owner",
   ]);
   const [allowSelf, setAllowSelf] = useState(false);
+  const [ruleGroup, setRuleGroup] = useState("");
+  const [ruleGroupMin, setRuleGroupMin] = useState(1);
+  const [groups, setGroups] = useState<ApproverGroup[]>([]);
+  useEffect(() => {
+    void listApproverGroups()
+      .then(setGroups)
+      .catch(() => setGroups([]));
+  }, []);
   const [ruleError, setRuleError] = useState<string | null>(null);
   const [ruleSaved, setRuleSaved] = useState(false);
 
@@ -585,6 +670,8 @@ function MembersSection({ repo }: { repo: string }) {
         approval_timeout_hours: timeoutHours,
         approver_roles: approverRoles,
         allow_self_approval: allowSelf,
+        required_group: ruleGroup,
+        required_group_approvals: ruleGroup ? ruleGroupMin : 0,
       });
       setRuleSaved(true);
       refreshEnvs();
@@ -673,6 +760,8 @@ function MembersSection({ repo }: { repo: string }) {
                 <th>Timeout (h)</th>
                 <th>Approver roles</th>
                 <th>Self-approval</th>
+                <th>From group</th>
+                <th></th>
               </tr>
             </thead>
             <tbody>
@@ -682,6 +771,11 @@ function MembersSection({ repo }: { repo: string }) {
                     <span className="mono">{env.name}</span>{" "}
                     {env.repo === "" && (
                       <span className="global-chip">global default</span>
+                    )}
+                    {env.inactive && (
+                      <span className="badge badge-failed" title="No registered environment (or alias) has this name, so no job can match it. Delete it, or register the environment.">
+                        inactive
+                      </span>
                     )}
                   </td>
                   <td>{env.required_approvals}</td>
@@ -697,6 +791,24 @@ function MembersSection({ repo }: { repo: string }) {
                   </td>
                   <td>
                     <BoolMark on={env.allow_self_approval} />
+                  </td>
+                  <td>
+                    {env.required_group ? (
+                      <span>
+                        ≥{env.required_group_approvals} from <span className="mono">{env.required_group}</span>
+                      </span>
+                    ) : (
+                      <span className="muted">—</span>
+                    )}
+                  </td>
+                  <td style={{ textAlign: "right" }}>
+                    <button
+                      type="button"
+                      className="btn btn-danger-quiet"
+                      onClick={() => void onDeleteRule(env.id, env.name, env.repo === "")}
+                    >
+                      Delete
+                    </button>
                   </td>
                 </tr>
               ))}
@@ -727,6 +839,28 @@ function MembersSection({ repo }: { repo: string }) {
               value={requiredApprovals}
               onChange={(e) => setRequiredApprovals(Number(e.target.value))}
             />
+          </label>
+          <label className="field">
+            <span>…at least this many from group</span>
+            <span className="inline-pair">
+              <input
+                type="number"
+                min={1}
+                max={requiredApprovals}
+                value={ruleGroupMin}
+                disabled={!ruleGroup}
+                onChange={(e) => setRuleGroupMin(Number(e.target.value))}
+                style={{ width: 64 }}
+              />
+              <select value={ruleGroup} onChange={(e) => setRuleGroup(e.target.value)}>
+                <option value="">(no group requirement)</option>
+                {groups.map((g) => (
+                  <option key={g.name} value={g.name}>
+                    {g.name} ({g.members.length})
+                  </option>
+                ))}
+              </select>
+            </span>
           </label>
           <label className="field">
             <span>Approval timeout (hours)</span>
@@ -917,6 +1051,8 @@ function ConfigSection({ repo }: { repo: string }) {
         spellCheck={false}
         placeholder="stages: [build, test, deploy]&#10;jobs:&#10;  ..."
       />
+
+      <LintPanel config={text} repo={repo} />
 
       {actionError && <div className="error-banner">{actionError}</div>}
       {pushedVersion !== null && (
@@ -1335,126 +1471,175 @@ function SchedulesSection({ repo }: { repo: string }) {
 
 /* ---------------- Page ---------------- */
 
+const REPO_SECTIONS: { id: string; label: string }[] = [
+  { id: "variables", label: "Variables" },
+  { id: "runner-tags", label: "Runner tags" },
+  { id: "artifacts", label: "Artifacts" },
+  { id: "webhooks", label: "Webhooks" },
+  { id: "members", label: "Members & approval rules" },
+  { id: "pipeline-config", label: "Pipeline config" },
+  { id: "config-templates", label: "Config templates" },
+  { id: "schedules", label: "Schedules" },
+];
+
 export default function RepoSettings() {
   const params = useParams<{ repo: string }>();
   const repo = decodeRepoParam(params.repo ?? "");
 
+  const [sp] = useSearchParams();
+  const want = sp.get("section");
+  const active = REPO_SECTIONS.some((x) => x.id === want) ? (want as string) : REPO_SECTIONS[0].id;
+
   return (
     <div>
-      <div className="breadcrumbs">
-        <Link to="/">Repos</Link> <span className="crumb-sep">/</span>{" "}
-        <Link to={`/repos/${encodeURIComponent(repo)}`}>{repo}</Link>{" "}
-        <span className="crumb-sep">/</span> <span>settings</span>
+      <RepoHeader repo={repo} tab="settings" />
+      <nav className="subtabs" aria-label="Repository settings">
+        {REPO_SECTIONS.map((x) => (
+          <Link
+            key={x.id}
+            to={`?section=${x.id}`}
+            replace
+            className={x.id === active ? "subtab active" : "subtab"}
+            aria-current={x.id === active ? "page" : undefined}
+          >
+            {x.label}
+          </Link>
+        ))}
+      </nav>
+      <div className="repo-settings-body">
+        {active === "variables" && (
+        <Section
+          title="Variables"
+          description={
+            <>
+              Key/value pairs injected into job environments. Protected
+              variables are only exposed to protected refs; masked values are
+              hidden in job logs.{" "}
+              <Link to="/docs/variables-secrets" className="guide-link">
+                Guide →
+              </Link>
+            </>
+          }
+        >
+          <VariablesSection repo={repo} />
+        </Section>
+        )}
+
+        {active === "runner-tags" && (
+        <Section
+          title="Runner tags"
+          description={
+            <>
+              Jobs in this repo run only on runners advertising ALL of these
+              tags, unless a job sets its own <code>tags:</code> in YAML. Leave
+              empty to run on any runner.{" "}
+              <Link to="/docs/runner-groups" className="guide-link">
+                Guide →
+              </Link>
+            </>
+          }
+        >
+          <RunnerTagsSection repo={repo} />
+        </Section>
+        )}
+
+        {active === "artifacts" && (
+        <Section
+          title="Artifacts"
+          description={
+            <>
+              Files uploaded by finished jobs for this repo. Downloads stream a
+              .tar.gz.{" "}
+              <Link to="/docs/artifacts" className="guide-link">
+                Guide →
+              </Link>
+            </>
+          }
+        >
+          <ArtifactsSection repo={repo} />
+        </Section>
+        )}
+
+        {active === "webhooks" && (
+        <Section
+          title="Webhooks"
+          description={
+            <>
+              Every delivery the git host sent for this repo, accepted or not — so a
+              hook with a stale secret shows up here, not only in server logs.
+            </>
+          }
+        >
+          <WebhooksSection repo={repo} />
+        </Section>
+        )}
+
+        {active === "members" && (
+        <Section
+          title="Members & approval rules"
+          description={
+            <>
+              Who belongs to this repo and which roles can approve blocked
+              deployments to protected environments.{" "}
+              <Link to="/docs/approvals" className="guide-link">
+                Guide →
+              </Link>
+            </>
+          }
+        >
+          <MembersSection repo={repo} />
+        </Section>
+        )}
+
+        {active === "pipeline-config" && (
+        <Section
+          title="Pipeline config (CI YAML)"
+          description={
+            <>
+              This YAML runs when GitHub/Bitbucket push webhooks arrive (Forge
+              does not host the repo). Webhook URLs:{" "}
+              <code>/api/v1/webhooks/github</code> and{" "}
+              <code>/api/v1/webhooks/bitbucket</code>.{" "}
+              <Link to="/docs/add-a-repo" className="guide-link">
+                Guide →
+              </Link>
+            </>
+          }
+        >
+          <ConfigSection repo={repo} />
+        </Section>
+        )}
+
+        {active === "config-templates" && (
+        <Section
+          title="Config templates"
+          description={
+            <>
+              Reusable YAML fragments that a pipeline config pulls in with{" "}
+              <code>include:</code>.
+            </>
+          }
+        >
+          <TemplatesSection repo={repo} />
+        </Section>
+        )}
+
+        {active === "schedules" && (
+        <Section
+          title="Schedules"
+          description={
+            <>
+              Cron-triggered pipeline runs for this repo. Each run uses the repo's
+              registered pipeline config and sets{" "}
+              <code>CI_PIPELINE_SOURCE=schedule</code>. Cron is 5-field, evaluated
+              in UTC.
+            </>
+          }
+        >
+          <SchedulesSection repo={repo} />
+        </Section>
+        )}
       </div>
-
-      <div className="page-head">
-        <h1>CI/CD Settings</h1>
-      </div>
-
-      <Section
-        title="Variables"
-        description={
-          <>
-            Key/value pairs injected into job environments. Protected
-            variables are only exposed to protected refs; masked values are
-            hidden in job logs.{" "}
-            <Link to="/docs/variables-secrets" className="guide-link">
-              Guide →
-            </Link>
-          </>
-        }
-      >
-        <VariablesSection repo={repo} />
-      </Section>
-
-      <Section
-        title="Runner tags"
-        description={
-          <>
-            Jobs in this repo run only on runners advertising ALL of these
-            tags, unless a job sets its own <code>tags:</code> in YAML. Leave
-            empty to run on any runner.{" "}
-            <Link to="/docs/runner-groups" className="guide-link">
-              Guide →
-            </Link>
-          </>
-        }
-      >
-        <RunnerTagsSection repo={repo} />
-      </Section>
-
-      <Section
-        title="Artifacts"
-        description={
-          <>
-            Files uploaded by finished jobs for this repo. Downloads stream a
-            .tar.gz.{" "}
-            <Link to="/docs/artifacts" className="guide-link">
-              Guide →
-            </Link>
-          </>
-        }
-      >
-        <ArtifactsSection repo={repo} />
-      </Section>
-
-      <Section
-        title="Members & approval rules"
-        description={
-          <>
-            Who belongs to this repo and which roles can approve blocked
-            deployments to protected environments.{" "}
-            <Link to="/docs/approvals" className="guide-link">
-              Guide →
-            </Link>
-          </>
-        }
-      >
-        <MembersSection repo={repo} />
-      </Section>
-
-      <Section
-        title="Pipeline config (CI YAML)"
-        description={
-          <>
-            This YAML runs when GitHub/Bitbucket push webhooks arrive (Forge
-            does not host the repo). Webhook URLs:{" "}
-            <code>/api/v1/webhooks/github</code> and{" "}
-            <code>/api/v1/webhooks/bitbucket</code>.{" "}
-            <Link to="/docs/add-a-repo" className="guide-link">
-              Guide →
-            </Link>
-          </>
-        }
-      >
-        <ConfigSection repo={repo} />
-      </Section>
-
-      <Section
-        title="Config templates"
-        description={
-          <>
-            Reusable YAML fragments that a pipeline config pulls in with{" "}
-            <code>include:</code>.
-          </>
-        }
-      >
-        <TemplatesSection repo={repo} />
-      </Section>
-
-      <Section
-        title="Schedules"
-        description={
-          <>
-            Cron-triggered pipeline runs for this repo. Each run uses the repo's
-            registered pipeline config and sets{" "}
-            <code>CI_PIPELINE_SOURCE=schedule</code>. Cron is 5-field, evaluated
-            in UTC.
-          </>
-        }
-      >
-        <SchedulesSection repo={repo} />
-      </Section>
     </div>
   );
 }

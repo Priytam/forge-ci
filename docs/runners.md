@@ -14,6 +14,8 @@ Flags / env vars:
 | `--id` | `RUNNER_ID` | stable unique name (defaults to host-pid) |
 | `--tags` | `RUNNER_TAGS` | comma-separated capabilities, e.g. `gpu,linux` |
 | `--token` | `RUNNER_TOKEN` | runner auth token (required when the server runs `RUNNER_AUTH=on`) |
+| `--concurrency` | `RUNNER_CONCURRENCY` | jobs run in parallel; the Runners page counts capacity in these slots |
+| `--pool` | `RUNNER_POOL` | autoscaled pool the runner belongs to (shown and grouped on the Runners page); docker pools set it, set it in your Deployment/VM template for others |
 
 ## Runner authentication
 
@@ -158,6 +160,7 @@ Deployment:
            - {name: SERVER_URL, value: "http://forge-server.ci.svc:8080"}
            - {name: EXECUTOR, value: "shell"}
            - {name: RUNNER_TAGS, value: "k8s,linux"}
+           - {name: RUNNER_POOL, value: "k8s-pool"}   # optional: the pool, if autoscaled
            - name: RUNNER_ID
              valueFrom: {fieldRef: {fieldPath: metadata.name}}
    ```
@@ -231,3 +234,130 @@ Cancelling a running job (`POST /api/v1/jobs/{id}/cancel` or a whole pipeline)
 is delivered to the runner through the heartbeat response: the next heartbeat
 (≤10s) returns `{cancel:true}`, the runner kills the job's process group /
 container / pod exactly like a timeout, and reports the job as `canceled`.
+
+## Queue depth, load and autoscaling
+
+The **Runners** page shows the queue, grouped by the runner tags jobs need:
+how many jobs wait, how long the oldest has waited, and how many eligible
+runners are online and busy ("none — jobs can't start" means no online runner
+has those tags). Each runner shows what it is running now and how busy it was
+over the last 24 hours. Same data: `GET /api/v1/runner-load`.
+
+`GET /api/v1/metrics` (Prometheus text, no auth) exports:
+
+| Metric | Labels | Meaning |
+|---|---|---|
+| `forge_queue_pending_jobs` | `tags` (sorted, comma-joined) | jobs waiting for a runner with those tags |
+| `forge_queue_oldest_wait_seconds` | `tags` | age of the oldest waiting job |
+| `forge_jobs_pending`, `forge_jobs_running` | — | totals |
+| `forge_runners_online`, `forge_runners_busy` | — | online unpaused runners, and those running a job |
+
+Scale runner Deployments on them, for example with KEDA's Prometheus scaler:
+
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata: {name: forge-runners-linux}
+spec:
+  scaleTargetRef: {name: forge-runners}
+  minReplicaCount: 1
+  maxReplicaCount: 20
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring:9090
+        query: sum(forge_queue_pending_jobs{tags=~"(^|.*,)linux(,.*|$)"})
+        threshold: "2"
+```
+
+A runner that is stopped mid-scale-down drains: it finishes (or requeues) its
+current job before exiting (see *Graceful shutdown* above).
+
+Or let Forge scale the runners itself: **autoscaled pools** resize a
+Kubernetes Deployment, containers on a Docker host, or anything a command
+can (cloud VM groups, Terraform) from the queue — see
+[autoscaling.md](autoscaling.md).
+
+## History: load, queue latency, job duration
+
+The Runners page charts busy slots, jobs started, queue-wait p50/p95 and
+job-duration p50/p95 over 24h / 7 days / 30 days, per runner or overall,
+with click-through to the jobs behind a point — see
+[observability.md](observability.md).
+
+Capacity and queue depth are snapshotted once a minute (kept 62 days), so
+the Capacity and Queue tiles and the Utilisation chart show them over the
+range and against the previous period; utilisation uses the recorded
+available slot-time once snapshots cover the range. A runner not seen for
+`RUNNER_STALE_AFTER` (server env, default `24h`) is stale: left out of
+capacity and tag counts, and an admin can remove it.
+
+## Drain, upgrade, lost jobs, maintenance mode
+
+See [runner-operations.md](runner-operations.md): draining a runner from
+the Runners page, runner versions and self-update (one runner or a rolling
+"upgrade all"), what happens to a job whose runner vanishes
+(`retry: {when: [runner_system_failure]}`), and maintenance mode for server
+upgrades.
+
+## Persistent BuildKit cache and cache affinity
+
+### Cache affinity (`runner_affinity: true`)
+
+```yaml
+build-image:
+  stage: build
+  tags: [docker-builder]
+  runner_affinity: true
+  script: [./build.sh]
+```
+
+After a job with `runner_affinity: true` succeeds, Forge remembers which
+runner ran it (per repo + job name). The next run of that job **prefers that
+runner**: other runners leave it in the queue while the preferred runner is
+online, unpaused and has the job's tags, for up to `RUNNER_AFFINITY_WAIT`
+(server env, default `1m`, Go duration). After that — or immediately when
+the preferred runner is offline or paused — any eligible runner takes it, and
+affinity moves to whichever runner succeeds. Jobs without the key are never
+held.
+
+It pays off where the runner keeps state between jobs: **shell runners**
+(language caches in the runner user's home, a local Docker daemon used by the
+job) and dedicated build hosts. With the docker/kubernetes executors each job
+starts in a fresh container, so prefer the registry cache
+(docs/docker-layer-cache.md) there.
+
+### Git mirrors for code-review diffs (runner tasks)
+
+Besides jobs, a runner takes small **tasks** in-process — outside its job
+slots and its executor: computing the diffs Forge shows on change pages
+([code-review.md](code-review.md#diffs)). For that it keeps one **blobless
+partial mirror** per repo on its own disk and fetches into it only when a
+diff names a commit it lacks (the git protocol, never a host API); file
+contents arrive lazily, only for the files a diff touches. A repo's diffs go
+to the runner that holds its mirror (affinity key `mirror:<repo>`) and to any
+runner after `MIRROR_AFFINITY_WAIT` (server, default 10s) or when that runner
+is offline; a lost mirror is rebuilt anywhere in seconds.
+
+| Runner env | Purpose | Default |
+|---|---|---|
+| `RUNNER_MIRROR_DIR` | where mirrors live | the user cache dir (`~/.cache/forge-runner/mirrors` on Linux) |
+| `RUNNER_TASKS` | `off` to never take tasks | on |
+
+Needs git 2.27+ on the runner host (`git version`); a runner without it logs
+that it will not compute diffs and takes jobs as before. The clone credential
+is minted per task, set on the mirror's remote only while the task runs and
+redacted from every error. Paused and draining runners take no tasks.
+
+Merges — Forge-native changes on plain git servers, and the merge queue's
+test merges — are runner tasks too: the runner merges in the same mirror with
+`git merge-tree` and pushes with a lease. They need **git 2.38+**; an older
+runner keeps computing diffs and logs that it will not merge.
+
+### Persistent per-runner BuildKit cache — not built yet
+
+A long-lived BuildKit daemon per runner (shared across jobs) would make
+container builds on docker/kubernetes runners hit a warm local cache. It is
+**deliberately not shipped**: done naively it is a cross-repo security hole.
+See docs/design/persistent-buildkit-cache.md for the design and the open
+decisions.

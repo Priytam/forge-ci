@@ -3,6 +3,7 @@ import { nodejsApp } from "./entries/nodejs-app";
 import { goService } from "./entries/go-service";
 import { javaGradle } from "./entries/java-gradle";
 import { dockerBuildScanPush } from "./entries/docker-build-scan-push";
+import { dockerLayerCache } from "./entries/docker-layer-cache";
 import { deployAwsEc2 } from "./entries/deploy-aws-ec2";
 import { gitopsKubernetes } from "./entries/gitops-kubernetes";
 import { terraformIac } from "./entries/terraform-iac";
@@ -25,6 +26,7 @@ export const RECIPES: Recipe[] = [
   goService,
   javaGradle,
   dockerBuildScanPush,
+  dockerLayerCache,
   deployAwsEc2,
   gitopsKubernetes,
   terraformIac,

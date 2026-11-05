@@ -651,6 +651,42 @@ WantedBy=multi-user.target`}
   );
 }
 
+function RunnerAutoscaling() {
+  return (
+    <>
+      <p>
+        Let Forge grow and shrink your runners with the queue. A <strong>pool</strong> is a set of
+        identical runners (same tags) that a provider can resize; configure pools on{" "}
+        <Link to="/runners">Runners → Autoscaled pools</Link> (admin).
+      </p>
+      <DocTable
+        head={["Provider", "Resizes", "Settings"]}
+        rows={[
+          ["kubernetes", "a Deployment or StatefulSet of runners", <code>{'{"namespace": "ci", "deployment": "forge-runners"}'}</code>],
+          ["docker", "runner containers on a Docker host", <code>{'{"image": "…/forge-runner:1.9", "runner_token": "…", "docker_sock": "true"}'}</code>],
+          ["exec", "anything a command can: cloud VM groups, Terraform", <code>{'{"count_cmd": "…", "scale_cmd": "… $FORGE_DESIRED"}'}</code>],
+        ]}
+      />
+      <Steps>
+        <li>
+          Demand = jobs waiting for the pool's tags + jobs running on its runners. Desired ={" "}
+          <code>ceil(demand / jobs per runner)</code>, between min and max.
+        </li>
+        <li>Scale-up is immediate.</li>
+        <li>
+          Scale-down waits until the pool has been idle for the configured window, then removes one
+          runner per pass. A stopped runner drains: it finishes or requeues its job first.
+        </li>
+      </Steps>
+      <Note title="Prefer an external autoscaler?">
+        The queue metrics (<code>forge_queue_pending_jobs</code>) drive KEDA or any HPA just as well.
+        Pools are for when you'd rather Forge did it, on any infrastructure. Reference:{" "}
+        <code>docs/autoscaling.md</code>.
+      </Note>
+    </>
+  );
+}
+
 function RunnerGroups() {
   return (
     <>
@@ -716,6 +752,71 @@ function RunnerGroups() {
 }
 
 /* ================= Pipelines ================= */
+
+function ReusingConfig() {
+  return (
+    <>
+      <p>
+        Keep shared pipeline steps in one place and include them everywhere. An{" "}
+        <code>include:</code> entry names one source; its YAML is merged under your config, and your
+        config wins on any conflict.
+      </p>
+      <DocTable
+        head={["Source", "Write", "Use it for"]}
+        rows={[
+          [<>Repo template</>, <code>template: go-common</code>, "fragments only this repo uses"],
+          [
+            <Link to="/templates">Template catalog</Link>,
+            <code>template: deploy/kubernetes@1.4.0</code>,
+            "org-wide templates with immutable versions",
+          ],
+          [
+            "Another repo",
+            <code>project: acme/ci-templates · ref: v2 · file: lint.yml</code>,
+            "templates kept in git, on any git host",
+          ],
+          ["A URL", <code>remote: https://… · integrity: sha256-…</code>, "templates published elsewhere"],
+        ]}
+      />
+      <h3>Inputs</h3>
+      <p>
+        A template can declare inputs in a <code>spec:</code> header and use them as{" "}
+        <code>{"$[[ inputs.name ]]"}</code>. Callers pass values with <code>inputs:</code>; a missing
+        required input or a value outside <code>options</code> fails the compile with the input's name.
+      </p>
+      <CodeBlock
+        code={`# the template (catalog: deploy/kubernetes@1.4.0)
+spec:
+  inputs:
+    environment: {default: staging, options: [staging, production]}
+    cluster: {}          # required
+---
+jobs:
+  deploy:
+    stage: deploy
+    environment: $[[ inputs.environment ]]
+    script: [./deploy.sh --cluster $[[ inputs.cluster ]]]
+
+# your .forge-ci.yml
+stages: [build, deploy]
+include:
+  - template: deploy/kubernetes@1.4.0
+    inputs: {cluster: eu-west, environment: production}`}
+      />
+      <Note tone="warn" title="Pin what deploys">
+        Use a catalog version (<code>@1.4.0</code>), a tag or a commit sha for <code>ref:</code>, and{" "}
+        <code>integrity:</code> on remote includes, so a change somewhere else can't silently change
+        what your pipeline runs.
+      </Note>
+      <p>
+        <code>project:</code> includes work within one owner/namespace by default (an admin can share a
+        template repo more widely with <code>FORGE_INCLUDE_SHARED_PROJECTS</code>). Remote includes
+        are https-only and can't reach internal addresses. Full reference:{" "}
+        <code>docs/pipeline-dsl.md</code> § include.
+      </p>
+    </>
+  );
+}
 
 function WritingYaml() {
   return (
@@ -1115,12 +1216,37 @@ function VariablesSecrets() {
         redaction. Anything that base64-encodes or otherwise transforms a
         secret before printing defeats masking entirely.
       </Note>
-      <Note tone="warn" title="Plaintext at rest">
-        Variable values are currently stored plaintext in the database
-        (envelope encryption / Vault integration is on the roadmap). Treat DB
-        access as secret access; do not put long-lived, high-blast-radius
-        credentials in variables yet.
+      <Note tone="info" title="At rest">
+        Variable values are envelope-encrypted in the database when the server
+        runs with <code>FORGE_SECRET_KEY</code> (see the README). Without the
+        key they are stored plaintext — set it before storing real credentials.
       </Note>
+      <h3>Secrets from a secret manager</h3>
+      <p>
+        Instead of copying a secret into Forge, a job can fetch it when it runs,
+        with its own identity (the job's OIDC token), from HashiCorp Vault, AWS
+        Secrets Manager, Google Secret Manager or Azure Key Vault:
+      </p>
+      <CodeBlock
+        code={`deploy:
+  stage: deploy
+  secrets:
+    DB_PASSWORD: {vault: "ci/prod/db#password"}
+    API_KEY:     {aws: "prod/api#key"}
+    SA_JSON:     {gcp: "projects/my-proj/secrets/deployer", file: true}   # path in the variable
+    CERT:        {azure: "https://acme-ci.vault.azure.net/secrets/deploy-cert"}
+  registry_login: [123456789012.dkr.ecr.eu-west-1.amazonaws.com]   # no docker login needed
+  script: [./deploy.sh]`}
+      />
+      <p>
+        Values are fetched before the script, masked in the log, and never
+        stored by Forge. <code>registry_login</code> mints a Docker login for
+        ECR, Artifact Registry or ACR the same way (any other registry: the{" "}
+        <code>DOCKER_AUTH_CONFIG</code> variable). Settings such as{" "}
+        <code>VAULT_ADDR</code> or <code>AWS_ROLE_ARN</code> are plain repo
+        variables; the trust setup is in <code>docs/oidc.md</code> and the
+        full reference in <code>docs/secrets.md</code>.
+      </p>
     </>
   );
 }
@@ -1287,6 +1413,104 @@ function SsoMicrosoft() {
         Client secrets in Entra ID expire — note the expiry date when you
         create one and rotate before then, or logins will start failing.
       </Note>
+    </>
+  );
+}
+
+function SsoOidc() {
+  return (
+    <>
+      <p>
+        Sign in with any OpenID Connect identity provider — Okta, Keycloak, Auth0, Entra ID, Authentik, Dex,
+        Zitadel, Google Workspace. Configure it on{" "}
+        <Link to="/admin/sso">Admin → Sign-in &amp; identity</Link>.
+      </p>
+      <Steps>
+        <li>
+          In the IdP, create a confidential <strong>web application</strong> (authorization code). Redirect URI:{" "}
+          <code>https://&lt;forge-host&gt;/api/v1/auth/callback/oidc</code> (shown on the form).
+        </li>
+        <li>
+          Enter the <strong>issuer URL</strong> (Forge reads <code>/.well-known/openid-configuration</code>), client ID
+          and secret, and a button label.
+        </li>
+        <li>
+          For groups: add the IdP's group scope to <strong>Scopes</strong> and set <strong>Groups claim</strong> if it
+          isn't <code>groups</code> (Keycloak realm roles: <code>realm_access.roles</code>).
+        </li>
+        <li>Enable, sign in from a private window, then map groups to roles.</li>
+      </Steps>
+      <DocTable
+        head={["IdP", "Issuer"]}
+        rows={[
+          ["Okta", <code>https://&lt;org&gt;.okta.com/oauth2/default</code>],
+          ["Keycloak", <code>https://&lt;host&gt;/realms/&lt;realm&gt;</code>],
+          ["Auth0", <code>https://&lt;tenant&gt;.auth0.com/</code>],
+          ["Entra ID", <code>https://login.microsoftonline.com/&lt;tenant-id&gt;/v2.0</code>],
+          ["Authentik", <code>https://&lt;host&gt;/application/o/&lt;slug&gt;/</code>],
+        ]}
+      />
+      <Note title="SAML-only IdP?">
+        Put it behind an OIDC bridge (Keycloak, Dex, Authentik) and use this provider; group attributes come
+        through as a groups claim.
+      </Note>
+    </>
+  );
+}
+
+function SsoLdap() {
+  return (
+    <>
+      <p>
+        Let people sign in with their directory account (OpenLDAP, Active Directory, FreeIPA, JumpCloud LDAP…).
+        Configure it on <Link to="/admin/sso">Admin → Sign-in &amp; identity → LDAP</Link>.
+      </p>
+      <Steps>
+        <li>
+          Server URL <code>ldaps://host:636</code>, or <code>ldap://host:389</code> with <strong>StartTLS</strong>.
+          Plain LDAP is refused — passwords would cross the network in the clear.
+        </li>
+        <li>A read-only service account (bind DN + password) and the user search base.</li>
+        <li>
+          The user filter, default{" "}
+          <code>{"(|(uid={username})(sAMAccountName={username})(mail={username}))"}</code>.
+        </li>
+        <li>
+          Groups: <code>memberOf</code> on the user (AD, OpenLDAP memberof overlay), or a group search base for
+          directories that list members on the group.
+        </li>
+        <li>Enable — the login page shows a username/password form.</li>
+      </Steps>
+      <Note tone="warn" title="Failed sign-ins">
+        Every credential problem shows the same message, empty passwords are refused, and five failures in five
+        minutes lock sign-in for that username or address for a while.
+      </Note>
+    </>
+  );
+}
+
+function SsoGroups() {
+  return (
+    <>
+      <p>
+        Map identity-provider groups to Forge roles on{" "}
+        <Link to="/admin/sso">Admin → Sign-in &amp; identity</Link>, so access follows your directory instead
+        of hand-kept member lists.
+      </p>
+      <DocTable
+        head={["Mapping", "Effect"]}
+        rows={[
+          [<code>platform-admins → platform admin</code>, "admin pages and settings, like ADMIN_EMAILS"],
+          [<code>shop-devs → developer on acme/*</code>, "run, retry and cancel on every acme/ repo"],
+          [<code>release-managers → owner on *</code>, "approve deploys where the rule allows owners"],
+        ]}
+      />
+      <p>
+        Patterns: <code>*</code> every repo, <code>acme/*</code> one namespace level, <code>acme/**</code> any
+        depth, or a single repo. Groups are refreshed at every sign-in — leaving a group removes its roles from
+        the next sign-in; deleting a mapping applies at once. Group roles count everywhere a repo membership
+        does, including approvals and approval notifications.
+      </p>
     </>
   );
 }
@@ -1673,10 +1897,22 @@ export const GUIDES: Guide[] = [
     render: RunnerGroups,
   },
   {
+    slug: "runner-autoscaling",
+    group: "Runners",
+    title: "Autoscaling runners",
+    render: RunnerAutoscaling,
+  },
+  {
     slug: "writing-yaml",
     group: "Pipelines",
     title: "Writing pipeline YAML",
     render: WritingYaml,
+  },
+  {
+    slug: "reusing-config",
+    group: "Pipelines",
+    title: "Reusing pipeline config",
+    render: ReusingConfig,
   },
   {
     slug: "artifacts",
@@ -1719,5 +1955,23 @@ export const GUIDES: Guide[] = [
     group: "Security",
     title: "SSO: GitHub",
     render: SsoGithub,
+  },
+  {
+    slug: "sso-oidc",
+    group: "Security",
+    title: "Sign-in: any OpenID Connect IdP",
+    render: SsoOidc,
+  },
+  {
+    slug: "sso-ldap",
+    group: "Security",
+    title: "Sign-in: LDAP / Active Directory",
+    render: SsoLdap,
+  },
+  {
+    slug: "sso-groups",
+    group: "Security",
+    title: "Groups → roles",
+    render: SsoGroups,
   },
 ];

@@ -19,7 +19,6 @@ package api
 
 import (
 	"encoding/json"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -51,6 +50,7 @@ type ccPush struct {
 	Ref    string // branch/tag short name (refs/heads/ and refs/tags/ stripped)
 	SHA    string // the commit the reference now points at
 	Author string // IAM principal that pushed, when the event carries one
+	Tag    bool   // a tag (not a branch) moved
 }
 
 // codeCommitEventID returns the EventBridge envelope id used to dedup
@@ -135,6 +135,7 @@ func parseCodeCommitPush(body []byte) (ccPush, error) {
 		Ref:    shortRefName(detail.ReferenceName),
 		SHA:    sha,
 		Author: arnPrincipal(detail.CallerUserARN),
+		Tag:    detail.ReferenceType == "tag" || strings.HasPrefix(detail.ReferenceName, "refs/tags/"),
 	}, nil
 }
 
@@ -176,17 +177,17 @@ func parseCodeCommitPR(body []byte) (prTrigger, prSource, error) {
 	}
 	iid, _ := strconv.Atoi(detail.PullRequestID) // non-numeric ids degrade to 0
 	return prTrigger{
-		Repo:         repo,
-		IID:          iid,
-		Title:        detail.Title,
-		SourceBranch: shortRefName(detail.SourceReference),
-		TargetBranch: shortRefName(detail.DestinationReference),
-		HeadSHA:      detail.SourceCommit,
-		Author:       arnPrincipal(detail.Author),
-	}, prSource{
-		IID:     detail.PullRequestID,
-		BaseSHA: detail.DestinationCommit,
-	}, nil
+			Repo:         repo,
+			IID:          iid,
+			Title:        detail.Title,
+			SourceBranch: shortRefName(detail.SourceReference),
+			TargetBranch: shortRefName(detail.DestinationReference),
+			HeadSHA:      detail.SourceCommit,
+			Author:       arnPrincipal(detail.Author),
+		}, prSource{
+			IID:     detail.PullRequestID,
+			BaseSHA: detail.DestinationCommit,
+		}, nil
 }
 
 // shortRefName strips the refs/heads/ or refs/tags/ prefix CodeCommit uses in
@@ -232,11 +233,13 @@ func arnPrincipal(arn string) string {
 // a header, so the payload is classified before dispatch. Unknown events are
 // acknowledged (202) and ignored.
 func (s *Server) codecommitWebhook(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "unreadable body")
+	body, ok := s.readWebhookBody(w, r)
+	if !ok {
 		return
 	}
+	// Code review: merge request, review and comment events update the change
+	// whether or not they also start a pipeline.
+	s.ingestChanges(r, "codecommit", body)
 	switch codeCommitEventKind(body) {
 	case ccKindPush:
 		s.codecommitPush(w, r, body)
@@ -278,6 +281,7 @@ func (s *Server) codecommitPush(w http.ResponseWriter, r *http.Request, body []b
 	*created = s.triggerFromWebhook(w, r, webhookRun{
 		Repo: push.Repo, Ref: push.Ref, SHA: push.SHA,
 		Actor: push.Author, Source: compiler.SourceWebhook,
+		ExtraCtx: tagContext(push.Tag, push.Ref),
 	})
 }
 

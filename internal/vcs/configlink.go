@@ -11,7 +11,6 @@ package vcs
 // own host rather than the public one. Only the public fallbacks are hardcoded.
 
 import (
-	"fmt"
 	"net/url"
 	"strings"
 )
@@ -42,42 +41,9 @@ func ConfigFileURL(req ConfigLinkRequest) (string, bool) {
 	}
 	path = strings.TrimPrefix(path, "/")
 
-	switch req.Provider {
-	case "github":
-		// /<owner>/<name>/blob/<sha>/<path>
-		host := webHost(req.CloneURL, "github.com")
-		return fmt.Sprintf("https://%s/%s/blob/%s/%s",
-			host, repo, url.PathEscape(sha), pathEscape(path)), true
-
-	case "bitbucket":
-		// /<workspace>/<slug>/src/<sha>/<path>
-		host := webHost(req.CloneURL, "bitbucket.org")
-		return fmt.Sprintf("https://%s/%s/src/%s/%s",
-			host, repo, url.PathEscape(sha), pathEscape(path)), true
-
-	case "codecommit":
-		// CodeCommit has no public file URL — the file browser lives in the AWS
-		// console, which is region-scoped, so without a region there is no link.
-		region := strings.TrimSpace(req.Region)
-		if region == "" {
-			if cc, ok := ParseCodeCommitURL(req.CloneURL); ok {
-				region = cc.Region
-			}
-		}
-		if region == "" {
-			return "", false
-		}
-		// The console's browse path separates the ref from the file path with
-		// a literal "--" segment.
-		return fmt.Sprintf(
-			"https://%s.console.aws.amazon.com/codesuite/codecommit/repositories/%s/browse/%s/--/%s?region=%s",
-			url.PathEscape(region), url.PathEscape(repo), url.PathEscape(sha),
-			pathEscape(path), url.QueryEscape(region)), true
-
-	default:
-		// provider "other" (or unset): Forge knows no web UI shape for it.
-		return "", false
-	}
+	return Lookup(req.Provider).FileURL(RepoRef{
+		Provider: req.Provider, Repo: repo, CloneURL: req.CloneURL, Region: req.Region,
+	}, sha, path)
 }
 
 // webHost returns the host to build a web URL against: the registered clone

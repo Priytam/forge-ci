@@ -5,23 +5,27 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/priytamjeepandey/forge-ci/internal/blob"
 	"github.com/priytamjeepandey/forge-ci/internal/compiler"
+	"github.com/priytamjeepandey/forge-ci/internal/live/hub"
 	"github.com/priytamjeepandey/forge-ci/internal/logstore"
+	"github.com/priytamjeepandey/forge-ci/internal/oidc"
 	"github.com/priytamjeepandey/forge-ci/internal/proto"
 	"github.com/priytamjeepandey/forge-ci/internal/store"
+	"github.com/priytamjeepandey/forge-ci/internal/vcs"
 )
 
 const (
-	acquireLongPoll = 25 * time.Second
-	maxLogChunk     = 1 << 20 // 1 MiB per POST
+	maxLogChunk = 1 << 20 // 1 MiB per POST
 
 	defaultMaxJobLogBytes  = 10 << 20  // MAX_JOB_LOG_BYTES  (10 MiB)
 	defaultMaxArtifactByte = 500 << 20 // MAX_ARTIFACT_BYTES (500 MiB)
@@ -32,17 +36,23 @@ const (
 )
 
 type Server struct {
-	store  *store.Store
-	blobs  blob.Store
-	logs   *logstore.Service // high-volume log tier (redis live buffer + blob archive, or postgres)
-	mux    *http.ServeMux
-	sso    ssoCache
-	policy policyCache // personal API token policy (api_tokens.go)
+	store   *store.Store
+	blobs   blob.Store
+	logs    *logstore.Service // high-volume log tier (redis live buffer + blob archive, or postgres)
+	mux     *http.ServeMux
+	sso     ssoCache
+	policy  policyCache // personal API token policy (api_tokens.go)
+	changes changeHub   // live change notifications for SSE pages (code_review.go)
+	live    *hub.Hub    // Forge Live: agent batches in, app trees and patches out (live.go)
+
+	diffCache *byteLRU     // recently served diff blobs (diffs.go)
+	diffOpens *latencyRing // how long diff opens took on this instance
 
 	runnerAuth       string // RUNNER_AUTH: "on" | "off"
 	maxJobLogBytes   int64  // MAX_JOB_LOG_BYTES
 	maxArtifactBytes int64  // MAX_ARTIFACT_BYTES
 	maxCacheBytes    int64  // MAX_CACHE_BYTES
+	maxWebhookBytes  int64  // WEBHOOK_MAX_BYTES
 }
 
 func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
@@ -55,6 +65,10 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 		maxJobLogBytes:   envBytes("MAX_JOB_LOG_BYTES", defaultMaxJobLogBytes),
 		maxArtifactBytes: envBytes("MAX_ARTIFACT_BYTES", defaultMaxArtifactByte),
 		maxCacheBytes:    envBytes("MAX_CACHE_BYTES", defaultMaxCacheByte),
+		maxWebhookBytes:  envBytes("WEBHOOK_MAX_BYTES", defaultMaxWebhookBytes),
+		diffCache:        newByteLRU(diffCacheBytes),
+		diffOpens:        newLatencyRing(1000),
+		live:             hub.New(s, blobs, int(envBytes("LIVE_TREE_CACHE_BYTES", 256<<20))),
 	}
 	srv.initRunnerAuth()
 	m := srv.mux
@@ -67,23 +81,30 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 	m.HandleFunc("POST /api/v1/pipelines/{id}/retry", srv.retryPipeline)
 	m.HandleFunc("GET /api/v1/repos", srv.listRepos)
 	m.HandleFunc("GET /api/v1/stats", srv.dashboardStats)
+	m.HandleFunc("GET /api/v1/jobs/{id}", srv.getJob)
 	m.HandleFunc("GET /api/v1/jobs/{id}/logs", srv.getLogs)
 	m.HandleFunc("GET /api/v1/jobs/{id}/logs/stream", srv.streamLogs)
+	m.HandleFunc("GET /api/v1/jobs/{id}/logs/summary", srv.logSummary)
+	m.HandleFunc("GET /api/v1/jobs/{id}/logs/search", srv.logSearch)
 	m.HandleFunc("POST /api/v1/jobs/{id}/approvals", srv.approve)
 	m.HandleFunc("GET /api/v1/jobs/{id}/approval-permission", srv.approvalPermission)
 	m.HandleFunc("POST /api/v1/jobs/{id}/cancel", srv.cancelJob)
 	m.HandleFunc("POST /api/v1/jobs/{id}/play", srv.playJob)
+	m.HandleFunc("POST /api/v1/jobs/{id}/retry", srv.retryJob)
 	m.HandleFunc("GET /api/v1/permissions", srv.permissions)
+	m.HandleFunc("POST /api/v1/lint", srv.lint)
 	m.HandleFunc("GET /api/v1/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
 	m.HandleFunc("GET /api/v1/metrics", srv.metrics)
+	m.HandleFunc("GET /api/v1/runner-load", srv.runnerLoad)
 
 	// Runner protocol.
 	m.HandleFunc("POST /api/v1/runner/acquire", srv.acquire)
 	m.HandleFunc("POST /api/v1/runner/jobs/{id}/logs", srv.pushLogs)
 	m.HandleFunc("POST /api/v1/runner/jobs/{id}/heartbeat", srv.heartbeat)
 	m.HandleFunc("POST /api/v1/runner/jobs/{id}/complete", srv.complete)
+	m.HandleFunc("POST /api/v1/runner/jobs/{id}/oidc-token", srv.refreshOIDCToken)
 
 	srv.registerSettingsRoutes()
 	srv.registerEnvironmentRoutes()
@@ -93,10 +114,25 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 	srv.registerRunnerTokenRoutes()
 	srv.registerAPITokenRoutes()
 	srv.registerPipelineViewRoutes()
+	srv.registerOrgViewRoutes()
+	srv.registerNotificationRoutes()
+	srv.registerServiceAccountRoutes()
+	srv.registerPlatformAdminRoutes()
 	srv.registerAuditRoutes()
 	srv.registerOIDCRoutes()
 	srv.registerTestHistoryRoutes()
 	srv.registerDownloadRoutes()
+	srv.registerCatalogRoutes()
+	srv.registerIdentityRoutes()
+	srv.registerNotifyRouteRoutes()
+	srv.registerRunnerPoolRoutes()
+	srv.registerRunnerOpRoutes()
+	srv.registerStatusRoutes()
+	srv.registerHistoryRoutes()
+	srv.registerRunnerLiveRoutes()
+	srv.registerCodeReviewRoutes()
+	srv.registerRunnerTaskRoutes()
+	srv.registerLiveRoutes()
 
 	return srv
 }
@@ -171,7 +207,7 @@ func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
 		}
 		req.SHA = sha
 	}
-	jobs, err := compiler.Compile(req.Config, req.Ref, compiler.SourceAPI, s.store.TemplateResolver(r.Context(), req.Repo))
+	jobs, err := compiler.CompileWith(req.Config, req.Ref, compiler.SourceAPI, s.store.CompileOpts(r.Context(), req.Repo))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -195,6 +231,7 @@ func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "failed to create pipeline")
 		return
 	}
+	s.nudgeNativeChanges(r.Context(), req.Repo, req.Ref)
 	writeJSON(w, http.StatusCreated, map[string]any{"pipeline": p})
 }
 
@@ -227,7 +264,12 @@ func (s *Server) listRepos(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) dashboardStats(w http.ResponseWriter, r *http.Request) {
-	stats, err := s.store.DashboardStats(r.Context())
+	rg, err := parseRangeQuery(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	stats, err := s.store.DashboardStatsRange(r.Context(), rg)
 	if err != nil {
 		slog.Error("stats", "err", err)
 		writeErr(w, http.StatusInternalServerError, "failed to compute stats")
@@ -306,7 +348,12 @@ func (s *Server) getPipeline(w http.ResponseWriter, r *http.Request) {
 	} else {
 		p.ConfigURL = link
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"pipeline": p, "jobs": jobs})
+	previous, err := s.store.SupersededJobs(r.Context(), id)
+	if err != nil {
+		slog.Error("superseded jobs", "err", err)
+		previous = nil
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"pipeline": p, "jobs": jobs, "previous_jobs": previous})
 }
 
 // getLogs serves a job's log two ways, chosen by the presence of ?offset:
@@ -355,11 +402,127 @@ func (s *Server) getLogs(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// logSummary returns the first error-looking line of a job's log (with a few
+// lines of context) and the log's last lines — what you want first when a
+// job fails. Heuristic; see logstore.Summarize.
+func (s *Server) logSummary(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+	text, err := s.logs.FullText(r.Context(), id)
+	if err != nil {
+		slog.Error("log summary", "err", err)
+		writeErr(w, http.StatusInternalServerError, "failed to load logs")
+		return
+	}
+	writeJSON(w, http.StatusOK, logstore.Summarize(text))
+}
+
+// logSearch returns the lines of a job's log containing ?q (case-insensitive,
+// at most 500 matches) with their 1-based line numbers.
+func (s *Server) logSearch(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+	q := strings.ToLower(r.URL.Query().Get("q"))
+	if q == "" {
+		writeErr(w, http.StatusBadRequest, "q is required")
+		return
+	}
+	text, err := s.logs.FullText(r.Context(), id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to load logs")
+		return
+	}
+	type match struct {
+		Line int    `json:"line"`
+		Text string `json:"text"`
+	}
+	out := []match{}
+	for i, l := range strings.Split(text, "\n") {
+		if strings.Contains(strings.ToLower(l), q) {
+			out = append(out, match{Line: i + 1, Text: l})
+			if len(out) == 500 {
+				break
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"matches": out, "truncated": len(out) == 500})
+}
+
 // metrics exposes the log-tier counters in Prometheus text format. It is a GET
 // (CSRF-exempt) and auth-exempt (see authExempt) so a scraper needs no session.
-func (s *Server) metrics(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-	_, _ = io.WriteString(w, s.logs.Metrics().Render(s.logs.Backend()))
+	if s.logs != nil {
+		_, _ = io.WriteString(w, s.logs.Metrics().Render(s.logs.Backend()))
+	}
+	if load, err := s.store.GetRunnerLoad(r.Context(), time.Now().Add(-24*time.Hour), time.Now()); err == nil {
+		_, _ = io.WriteString(w, renderQueueMetrics(load))
+	} else {
+		slog.Error("metrics: runner load", "err", err)
+	}
+	if lat, err := s.store.RecentLatency(r.Context(), time.Hour); err == nil {
+		_, _ = io.WriteString(w, renderLatencyMetrics(lat))
+	}
+	if cr, err := s.loadCodeReviewStats(vcs.ReadPath(r.Context())); err == nil {
+		_, _ = io.WriteString(w, renderCodeReviewMetrics(cr))
+	} else {
+		slog.Error("metrics: code review", "err", err)
+	}
+}
+
+// renderQueueMetrics exposes queue depth per required tag set and runner
+// counts — what an autoscaler (KEDA / HPA on external metrics) scales on.
+func renderQueueMetrics(l *store.RunnerLoad) string {
+	var b strings.Builder
+	b.WriteString("# HELP forge_queue_pending_jobs Jobs waiting for a runner, by required runner tags.\n")
+	b.WriteString("# TYPE forge_queue_pending_jobs gauge\n")
+	for _, q := range l.Queues {
+		fmt.Fprintf(&b, "forge_queue_pending_jobs{tags=%q} %d\n", strings.Join(q.Tags, ","), q.Pending)
+	}
+	b.WriteString("# HELP forge_queue_oldest_wait_seconds Age of the oldest queued job, by required runner tags.\n")
+	b.WriteString("# TYPE forge_queue_oldest_wait_seconds gauge\n")
+	for _, q := range l.Queues {
+		fmt.Fprintf(&b, "forge_queue_oldest_wait_seconds{tags=%q} %d\n", strings.Join(q.Tags, ","), q.OldestWaitSeconds)
+	}
+	online, busy := 0, 0
+	for _, r := range l.Runners {
+		if r.Online && !r.Paused {
+			online++
+			if r.Running > 0 {
+				busy++
+			}
+		}
+	}
+	fmt.Fprintf(&b, "# HELP forge_jobs_pending Jobs waiting for a runner.\n# TYPE forge_jobs_pending gauge\nforge_jobs_pending %d\n", l.Pending)
+	fmt.Fprintf(&b, "# HELP forge_jobs_running Jobs running now.\n# TYPE forge_jobs_running gauge\nforge_jobs_running %d\n", l.Running)
+	fmt.Fprintf(&b, "# HELP forge_runners_online Online, unpaused runners.\n# TYPE forge_runners_online gauge\nforge_runners_online %d\n", online)
+	fmt.Fprintf(&b, "# HELP forge_runners_busy Online runners running at least one job.\n# TYPE forge_runners_busy gauge\nforge_runners_busy %d\n", busy)
+	return b.String()
+}
+
+// runnerLoad serves the runner load page: queue depth per required tag set
+// (with how many eligible runners are online/busy) and what each runner is
+// doing, with per-runner jobs and busy time over ?range= (24h|7d|30d|custom
+// &from&to, as the history), so the table follows the page's range picker.
+func (s *Server) runnerLoad(w http.ResponseWriter, r *http.Request) {
+	rg, err := parseRangeQuery(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	load, err := s.store.GetRunnerLoad(r.Context(), rg.From, rg.To)
+	if err != nil {
+		slog.Error("runner load", "err", err)
+		writeErr(w, http.StatusInternalServerError, "failed to load runner load")
+		return
+	}
+	writeJSON(w, http.StatusOK, load)
 }
 
 // approverFor resolves who is voting on a request. With a session (SSO cookie
@@ -373,7 +536,7 @@ func (s *Server) approverFor(r *http.Request, bodyName string) (who store.Approv
 	if sess := s.currentSession(r); sess != nil {
 		return store.Approver{
 			Name:          sess.Email,
-			PlatformAdmin: adminEmails()[strings.ToLower(sess.Email)],
+			PlatformAdmin: s.sessionIsAdmin(r.Context(), sess),
 		}, false, true
 	}
 	if s.ssoEnforced(r.Context()) {
@@ -535,7 +698,7 @@ func (s *Server) retryPipeline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jobs, err := compiler.Compile(src.Config, src.Ref, compiler.SourceAPI, s.store.TemplateResolver(r.Context(), src.Repo))
+	jobs, err := compiler.CompileWith(src.Config, src.Ref, compiler.SourceAPI, s.store.CompileOpts(r.Context(), src.Repo))
 	if err != nil {
 		writeErr(w, http.StatusUnprocessableEntity, "stored config no longer compiles: "+err.Error())
 		return
@@ -646,6 +809,53 @@ func (s *Server) playJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"job": job})
 }
 
+// retryJob re-runs one failed or canceled job — and the downstream jobs that
+// did not succeed — inside the same pipeline (see store.RetryJob). Same
+// permission as retrying a whole pipeline.
+func (s *Server) retryJob(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+	repo, err := s.store.JobRepo(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "job not found")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to load job")
+		return
+	}
+	if !s.requireOperate(w, r, repo) {
+		return
+	}
+	var body struct {
+		Debug bool `json:"debug"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body) // optional body
+	debug := body.Debug || r.URL.Query().Get("debug") == "true"
+	res, err := s.store.RetryJobWith(r.Context(), id, store.RetryOpts{Debug: debug})
+	switch {
+	case errors.Is(err, store.ErrNotRetryable):
+		writeErr(w, http.StatusConflict, err.Error())
+		return
+	case errors.Is(err, store.ErrRetryRefused):
+		writeErr(w, http.StatusForbidden, err.Error())
+		return
+	case err != nil:
+		slog.Error("retry job", "job", id, "err", err)
+		writeErr(w, http.StatusInternalServerError, "failed to retry job")
+		return
+	}
+	s.audit(r, "job.retry", strconv.FormatInt(id, 10), repo, "ok", map[string]any{
+		"pipeline_id": res.PipelineID, "new_job_id": res.Retried[id], "jobs_requeued": len(res.Retried), "debug": debug,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"pipeline_id": res.PipelineID, "job_id": res.Retried[id], "retried": len(res.Retried),
+	})
+}
+
 // ---- runner handlers ----
 
 // acquire long-polls for up to 25s waiting for a pending job; 204 when none.
@@ -658,7 +868,7 @@ func (s *Server) acquire(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "runner_id is required")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), acquireLongPoll)
+	ctx, cancel := context.WithTimeout(r.Context(), acquireLongPoll())
 	defer cancel()
 	for {
 		job, err := s.store.AcquireJob(ctx, req)
@@ -677,10 +887,29 @@ func (s *Server) acquire(w http.ResponseWriter, r *http.Request) {
 		}
 		select {
 		case <-ctx.Done():
-			w.WriteHeader(http.StatusNoContent)
+			s.noJob(w, r, req)
 			return
 		case <-time.After(time.Second):
 		}
+	}
+	s.noJob(w, r, req)
+}
+
+// noJob answers an acquire that found nothing, telling the runner what the
+// server wants from it: X-Forge-Runner-Action "update" (self-update when
+// idle) or "drain", X-Forge-Server-Version, and X-Forge-Maintenance.
+func (s *Server) noJob(w http.ResponseWriter, r *http.Request, req proto.AcquireRequest) {
+	w.Header().Set("X-Forge-Server-Version", bundledRunnerVersion())
+	if st, err := s.store.RunnerState(r.Context(), req.RunnerID); err == nil {
+		switch {
+		case st.UpdateRequested:
+			w.Header().Set("X-Forge-Runner-Action", "update")
+		case st.Draining:
+			w.Header().Set("X-Forge-Runner-Action", "drain")
+		}
+	}
+	if mm, err := s.store.Maintenance(r.Context()); err == nil && mm.On {
+		w.Header().Set("X-Forge-Maintenance", "on")
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -838,6 +1067,39 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, proto.HeartbeatResponse{Cancel: cancel})
 }
 
+// refreshOIDCToken re-mints the per-job OIDC token for a job that is still
+// running. The runner calls it every few minutes and rewrites the job's
+// token file, so cloud credentials built on that file (GCP Workload Identity
+// cred-config, AWS_WEB_IDENTITY_TOKEN_FILE) keep refreshing past the token's
+// 15-minute lifetime.
+func (s *Server) refreshOIDCToken(w http.ResponseWriter, r *http.Request) {
+	if !s.requireRunnerAuth(w, r) {
+		return
+	}
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+	tok, err := s.store.RefreshJobOIDCToken(r.Context(), id)
+	if errors.Is(err, store.ErrJobNotRunning) {
+		writeErr(w, http.StatusConflict, "job is not running")
+		return
+	}
+	if err != nil {
+		slog.Error("refresh oidc token", "job", id, "err", err)
+		writeErr(w, http.StatusInternalServerError, "failed to mint token")
+		return
+	}
+	if tok == "" {
+		writeErr(w, http.StatusServiceUnavailable, "OIDC signing is not configured on this server")
+		return
+	}
+	writeJSON(w, http.StatusOK, proto.OIDCTokenResponse{
+		Token: tok, ExpiresAt: time.Now().Add(oidc.TokenTTL),
+	})
+}
+
 func (s *Server) complete(w http.ResponseWriter, r *http.Request) {
 	if !s.requireRunnerAuth(w, r) {
 		return
@@ -882,10 +1144,62 @@ func (s *Server) complete(w http.ResponseWriter, r *http.Request) {
 	// backend only; no-op for postgres). Best-effort — the scheduler safety-net
 	// sweep re-archives anything missed.
 	if final == "success" || final == "failed" || final == "canceled" {
+		// coverage: /regex/ — read from the finished (masked) log.
+		if text, err := s.logs.FullText(r.Context(), id); err == nil {
+			if err := s.store.CoverageFromLog(r.Context(), id, text); err != nil {
+				slog.Warn("coverage from log", "err", err, "job", id)
+			}
+		}
 		if err := s.logs.Archive(r.Context(), id); err != nil {
 			slog.Error("archive log", "err", err, "job", id)
 		}
 	}
 	slog.Info("job completed", "job", id, "reported", req.Status, "final", final, "exit_code", req.ExitCode)
 	w.WriteHeader(http.StatusOK)
+}
+
+// getJob returns one job with its approval gate (votes, requirement, group
+// progress) — the same shape the pipeline view carries per job.
+func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+	job, err := s.store.GetJob(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "job not found")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to load job")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"job": job})
+}
+
+// acquireLongPoll is how long an acquire waits for a job before answering
+// 204 (ACQUIRE_LONG_POLL, default 25s; tests set it low).
+func acquireLongPoll() time.Duration {
+	if d, err := time.ParseDuration(os.Getenv("ACQUIRE_LONG_POLL")); err == nil && d > 0 {
+		return d
+	}
+	return 25 * time.Second
+}
+
+// renderLatencyMetrics exports the last hour's queue wait and job duration
+// percentiles, and busy slots per runner — the "do we need more runners" and
+// "did builds get slower" signals, for alerting.
+func renderLatencyMetrics(l *store.Latency) string {
+	var b strings.Builder
+	b.WriteString("# HELP forge_job_queue_wait_seconds Time from queued to started over the last hour.\n# TYPE forge_job_queue_wait_seconds gauge\n")
+	fmt.Fprintf(&b, "forge_job_queue_wait_seconds{quantile=\"0.5\"} %.1f\nforge_job_queue_wait_seconds{quantile=\"0.95\"} %.1f\n", l.WaitP50, l.WaitP95)
+	b.WriteString("# HELP forge_job_duration_seconds Job run time over the last hour.\n# TYPE forge_job_duration_seconds gauge\n")
+	fmt.Fprintf(&b, "forge_job_duration_seconds{quantile=\"0.5\"} %.1f\nforge_job_duration_seconds{quantile=\"0.95\"} %.1f\n", l.DurationP50, l.DurationP95)
+	fmt.Fprintf(&b, "# HELP forge_jobs_started_last_hour Jobs started in the last hour.\n# TYPE forge_jobs_started_last_hour gauge\nforge_jobs_started_last_hour %d\n", l.JobsStarted)
+	b.WriteString("# HELP forge_runner_busy_slots Average busy slots per runner over the last hour.\n# TYPE forge_runner_busy_slots gauge\n")
+	for _, r := range l.Runners {
+		fmt.Fprintf(&b, "forge_runner_busy_slots{runner=%q} %.2f\n", r.RunnerID, r.BusySlots)
+	}
+	return b.String()
 }

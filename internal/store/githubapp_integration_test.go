@@ -170,7 +170,7 @@ func TestAppRepoResolvesMintedToken(t *testing.T) {
 	}
 
 	// RepoStatusTarget resolves the same (cached) minted token — no second mint.
-	provider, statusTok, ok, err := st.RepoStatusTarget(ctx, repo)
+	provider, statusTok, _, ok, err := st.RepoStatusTarget(ctx, repo)
 	if err != nil || !ok {
 		t.Fatalf("RepoStatusTarget: ok=%v err=%v", ok, err)
 	}
@@ -243,7 +243,7 @@ func TestPATRepoUnaffected(t *testing.T) {
 		t.Errorf("clone URL missing PAT: %q", cloneURL)
 	}
 
-	provider, statusTok, ok, err := st.RepoStatusTarget(ctx, repo)
+	provider, statusTok, _, ok, err := st.RepoStatusTarget(ctx, repo)
 	if err != nil || !ok {
 		t.Fatalf("RepoStatusTarget: ok=%v err=%v", ok, err)
 	}

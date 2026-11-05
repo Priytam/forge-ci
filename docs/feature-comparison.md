@@ -15,11 +15,11 @@ Legend: ✅ shipped · 🟡 partial · ❌ not yet (roadmap).
 |---|---|---|---|
 | YAML pipeline (stages, jobs, script, image) | ✅ | ✅ | |
 | DAG via `needs` | ✅ | ✅ | explicit must point to earlier stage |
-| Ref-conditional jobs (`only/except`, `rules:`) | ✅ rules engine | ✅ `only/except` globs + `rules:` engine | `rules: if/when` with a safe expr evaluator; `changes/exists` are documented no-ops (no checkout at compile time) — see docs/pipeline-dsl.md |
+| Ref-conditional jobs (`only/except`, `rules:`) | ✅ rules engine | ✅ `only/except` globs + `rules:` engine | `rules: if/when/changes` with a safe expr evaluator; `changes:` compares against the last green pipeline on the branch (or the merge base); `exists:` is a documented no-op — see docs/pipeline-dsl.md |
 | `variables` at job level | ✅ | ✅ | |
 | Artifacts (`paths`) | ✅ + expiry, reports | ✅ `paths` + `expire_in` + `reports.junit` | per-artifact TTL (server-side GC, independent of `RETENTION_DAYS`); JUnit XML parsed into a per-job pass/fail summary at `GET /jobs/{id}/report` — see docs/pipeline-dsl.md |
 | Caching (keyed, per-lockfile) | ✅ | ✅ | `cache: {key, paths, policy}`, literal or content-addressed `key.files`, shared across pipelines — see docs/pipeline-dsl.md |
-| Templates: `include`, `extends`, anchors | ✅ | 🟡 `include` (per-repo templates) + `extends` | anchors N/A; remote/URL includes out of scope (no network fetch) — see docs/pipeline-dsl.md |
+| Templates: `include`, `extends`, anchors | ✅ | ✅ `include` from repo templates, the versioned template catalog (`name@version`), another repo (`project:`/`ref:`/`file:`, any git host) and `remote:` https URLs (SSRF-guarded, `integrity:` pin), with typed `spec: inputs:`; `extends` | YAML anchors work as plain YAML — see docs/pipeline-dsl.md |
 | Matrix builds (`parallel:`) | ✅ | ✅ | `parallel: N` and `parallel: {matrix}` with `needs` fan-in |
 | Manual jobs (`when: manual`) | ✅ | ✅ | `rules`/job `when: manual` → gated `blocked`; `POST /jobs/{id}/play` releases; composes with env approval |
 | Allowed failures (`allow_failure`) | ✅ | ✅ | job-level or per-rule; dependents proceed, pipeline not failed |
@@ -48,12 +48,19 @@ Legend: ✅ shipped · 🟡 partial · ❌ not yet (roadmap).
 | Feature | GitLab CI | Forge | Notes |
 |---|---|---|---|
 | CI variables: protected / masked / env-scoped | ✅ | ✅ | same three axes |
-| Secrets storage | encrypted at rest, Vault integration | ✅ (envelope AES-GCM) | FORGE_SECRET_KEY envelope-encrypts variables/tokens/SSO/App keys at rest (`enc:v1:`); KMS/Vault backend + key rotation still roadmap |
+| Secrets storage | encrypted at rest, Vault integration | ✅ (envelope AES-GCM) | FORGE_SECRET_KEY envelope-encrypts variables/tokens/SSO/App keys at rest (`enc:v1:`); key rotation still roadmap |
+| External secret managers (`secrets:`) | ✅ Vault, AWS, GCP, Azure (Premium) | ✅ | runner fetches with the job's OIDC identity: Vault KV v2, AWS Secrets Manager, GCP Secret Manager, Azure Key Vault; masked; `file:` for key material — see [secrets.md](secrets.md) |
+| Registry login without stored passwords | ✅ (own registry) | ✅ | `registry_login:` mints ECR / Artifact Registry / ACR logins from the job identity; `DOCKER_AUTH_CONFIG` for any other registry; used to pull the job image and inside the job |
+| Artifact/cache/log storage backends | object storage | ✅ | local, any S3-compatible (AWS, GCS, MinIO, Ceph, R2), Azure Blob — see [artifact-storage.md](artifact-storage.md) |
+| Notifications | Slack, email, webhooks, Teams (integrations) | ✅ | pluggable notifiers: Slack, Microsoft Teams, signed JSON webhook, email; routes per event/repo; approve/reject from the email with signed links — see [notifications.md](notifications.md) |
 | Protected environments + approvers | ✅ (Premium) | ✅ | roles: admin/owner/developer |
 | Separation of duties (no self-approval) | ✅ | ✅ | pinned to `triggered_by` |
 | Approval audit trail | ✅ | ✅ | append-only `job_approvals` |
 | Built-in security scan templates (SAST/dependency/container/secrets) | ✅ (CI templates) | ✅ | one-line `include: [{template: security/sast}]` — semgrep/trivy/gitleaks, `allow_failure` by default; built-ins resolve as a fallback after per-repo templates — see docs/pipeline-dsl.md |
-| AuthN (SSO/OIDC) + real RBAC identity | ✅ | ✅ | SSO (Google/Microsoft/GitHub) enforces session identity; RBAC maps to it — see docs/sso.md |
+| AuthN (SSO/OIDC) + real RBAC identity | ✅ | ✅ | any OpenID Connect IdP (Okta, Keycloak, Auth0, Entra, Authentik, Dex…), LDAP/AD, Google/Microsoft/GitHub — see docs/sso.md |
+| IdP group → role sync | ✅ (SAML/OIDC group sync, Premium) | ✅ | groups refreshed each sign-in; platform admin or roles on repo patterns; used for approvals too |
+| SAML SSO | ✅ | 🟡 | via an OIDC bridge today; native SP designed in docs/design/saml.md |
+| Configurable session lifetime | ✅ | ✅ | 1h–30d, admin setting or SESSION_TTL |
 | OIDC / keyless cloud auth (AWS STS, GCP WIF) | ✅ (ID tokens) | ✅ | short-lived per-job ID token (`FORGE_OIDC_TOKEN`/`CI_JOB_JWT`), public discovery+JWKS, no static cloud keys — see [oidc.md](oidc.md) |
 | Audit log (all setting changes) | ✅ | ✅ | append-only `audit_log` of every mutating admin action + denials; `GET /api/v1/audit-log` — see docs/sso.md |
 
@@ -76,7 +83,14 @@ Legend: ✅ shipped · 🟡 partial · ❌ not yet (roadmap).
 | Pipeline graph: stage & job-dependency grouping, pill cards, curved edges | ✅ | ✅ | |
 | Live log viewer | ✅ | ✅ | |
 | Settings → CI/CD sections (variables, runners, artifacts, members) | ✅ | ✅ | |
-| Environments/deployments board | ✅ | ✅ | board + history + drift + rollback + freezes — API shipped ([docs/environments.md](environments.md)); web view is a later pass |
+| Runner drain / rolling upgrade / lost-job handling | 🟡 | ✅ | drain & resume per runner, version + "outdated", self-update and rolling "upgrade all"; lost jobs fail with a reason or retry via `retry: {when: [runner_system_failure]}`; maintenance mode — see [runner-operations.md](runner-operations.md) |
+| History & time ranges | ✅ (analytics, Premium) | ✅ | 24h / 7d / 30d everywhere with previous-period comparison; per-runner load, queue-wait and duration p50/p95 with drill-down; hourly rollups; webhook delivery health per repo — see [observability.md](observability.md) |
+| Runner autoscaling | ✅ (docker-machine / k8s executor / fleeting) | ✅ | autoscaled pools with pluggable providers: Kubernetes Deployment, Docker host, exec (any cloud via CLI/Terraform); queue-driven, drain-aware scale-down — see [autoscaling.md](autoscaling.md); or KEDA on the queue metrics |
+| Environments/deployments board | ✅ | ✅ | board + history + drift + rollback + freezes, deploy URL/version/digest per deployment ([docs/environments.md](environments.md)) |
+| Promote a build between environments | 🟡 (manual pattern) | ✅ | one click/API call redeploys the source deployment's exact commit, artifacts and digest; only the target's deploy jobs run; gates apply ([environments.md](environments.md#promotion--ship-the-build-you-tested)) |
+| Prevent outdated deployments | ✅ | ✅ | per environment `cancel_superseded` |
+| `artifacts:reports:dotenv` | ✅ | ✅ | variables flow to needing jobs; `DEPLOY_*` fill the deployment record |
+| Test coverage (regex + Cobertura) | ✅ | ✅ | per job, pipeline mean, repo trend on the Tests page |
 
 ## ArgoCD-inspired direction (CD depth)
 

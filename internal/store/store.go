@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/priytamjeepandey/forge-ci/internal/buildinfo"
 	"github.com/priytamjeepandey/forge-ci/internal/compiler"
 	"github.com/priytamjeepandey/forge-ci/internal/githubapp"
 	"github.com/priytamjeepandey/forge-ci/internal/oidc"
@@ -47,9 +48,11 @@ type Store struct {
 	fetcher    *vcs.Fetcher      // fetches in-repo .forge-ci.yml at the event sha (config-from-repo)
 
 	// Execution-timeout policy (env-configured, see New).
+	affinityWait      time.Duration // RUNNER_AFFINITY_WAIT: how long a job waits for its preferred runner
 	defaultJobTimeout time.Duration // DEFAULT_JOB_TIMEOUT, jobs without timeout:
 	maxJobTimeout     time.Duration // MAX_JOB_TIMEOUT, hard cap on job values
 	queueTimeout      time.Duration // QUEUE_TIMEOUT, max time in pending
+	runnerStaleAfter  time.Duration // RUNNER_STALE_AFTER: unseen this long → stale (not in capacity, removable)
 }
 
 func envDuration(key string, fallback time.Duration) time.Duration {
@@ -91,6 +94,9 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 	return nil
 }
 
+// Migrate re-runs the (idempotent) migrations — what every server start does.
+func (s *Store) Migrate(ctx context.Context) error { return runMigrations(ctx, s.pool) }
+
 func New(ctx context.Context, dsn string) (*Store, error) {
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
@@ -112,8 +118,10 @@ func New(ctx context.Context, dsn string) (*Store, error) {
 		appMinter:         githubapp.New(),
 		fetcher:           vcs.NewFetcher(),
 		defaultJobTimeout: envDuration("DEFAULT_JOB_TIMEOUT", time.Hour),
+		affinityWait:      envDuration("RUNNER_AFFINITY_WAIT", time.Minute),
 		maxJobTimeout:     envDuration("MAX_JOB_TIMEOUT", 4*time.Hour),
 		queueTimeout:      envDuration("QUEUE_TIMEOUT", 24*time.Hour),
+		runnerStaleAfter:  envDuration("RUNNER_STALE_AFTER", defaultStaleAfter),
 	}
 	if err := s.initSecrets(ctx); err != nil {
 		return nil, err
@@ -123,6 +131,12 @@ func New(ctx context.Context, dsn string) (*Store, error) {
 		return nil, fmt.Errorf("oidc signing key: %w", err)
 	}
 	s.oidcSigner = signer
+	s.recordSchemaStatus(ctx, buildinfo.Version)
+	if n, err := s.FoldProtectedEnvRules(ctx); err != nil {
+		slog.Warn("approval rules: fold aliases", "err", err)
+	} else if n > 0 {
+		slog.Info("approval rules: folded alias/case-variant rules into registered names", "rules", n)
+	}
 	return s, nil
 }
 
@@ -248,6 +262,13 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 	if err != nil {
 		return nil, err
 	}
+	// Environment policy: canonical names (aliases → registered name) and
+	// branch rules, enforced here because every trigger (API, webhook,
+	// schedule, retry) creates pipelines through this function.
+	envPolicy, err := s.GetEnvPolicy(ctx)
+	if err != nil {
+		return nil, err
+	}
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -270,7 +291,12 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 		source = "api"
 	}
 
+	var promotedFrom *int64
+	if req.PromotedFrom > 0 {
+		promotedFrom = &req.PromotedFrom
+	}
 	var p proto.Pipeline
+	p.PromotedFrom = promotedFrom
 	p.Repo, p.Ref, p.SHA = req.Repo, req.Ref, req.SHA
 	p.Status = "created"
 	p.ConfigVersion = configVersion
@@ -280,10 +306,10 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 	p.CommitAuthor = req.CommitAuthor
 	p.CommitMessage = capCommitMessage(req.CommitMessage)
 	err = tx.QueryRow(ctx,
-		`INSERT INTO pipelines (repo, ref, sha, config_yaml, triggered_by, config_version, fail_fast, config_source, source, mr_iid, mr_base_sha, commit_author, commit_message)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id, created_at`,
+		`INSERT INTO pipelines (repo, ref, sha, config_yaml, triggered_by, config_version, fail_fast, config_source, source, mr_iid, mr_base_sha, commit_author, commit_message, promoted_from)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id, created_at`,
 		req.Repo, req.Ref, req.SHA, req.Config, req.TriggeredBy, configVersion, failFast, configSource, source,
-		req.MRIID, req.MRBaseSHA, req.CommitAuthor, capCommitMessage(req.CommitMessage)).Scan(&p.ID, &p.CreatedAt)
+		req.MRIID, req.MRBaseSHA, req.CommitAuthor, capCommitMessage(req.CommitMessage), promotedFrom).Scan(&p.ID, &p.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -296,6 +322,18 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 		cachePaths, _ := json.Marshal(j.CachePaths)
 		cacheKeyFiles, _ := json.Marshal(j.CacheKeyFiles)
 		services, _ := json.Marshal(j.Services)
+		secretsJSON, _ := json.Marshal(j.Secrets)
+		if j.Secrets == nil {
+			secretsJSON = []byte("{}")
+		}
+		registryLogins := j.RegistryLogins
+		if registryLogins == nil {
+			registryLogins = []string{}
+		}
+		retryWhen := j.RetryWhen
+		if len(retryWhen) == 0 {
+			retryWhen = []string{"always"}
+		}
 		tags := j.Tags
 		if len(tags) == 0 {
 			tags = defaultTags
@@ -308,23 +346,36 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 		if j.Image != "" {
 			image = &j.Image
 		}
-		if j.Environment != "" {
-			environment = &j.Environment
+		canonicalEnv, denied := envPolicy.CheckJob(j.Environment, req.Ref)
+		if canonicalEnv != "" {
+			environment = &canonicalEnv
+		}
+		resourceGroup := expandResourceGroup(j.ResourceGroup, canonicalEnv)
+		affinityKey := ""
+		if j.RunnerAffinity {
+			affinityKey = req.Repo + "#" + j.Name
 		}
 		// Manual jobs start gated in the 'blocked' state (with the manual flag so
 		// the scheduler and approval endpoint distinguish them from an
 		// environment-approval block); a play releases them back to 'created'.
 		status := "created"
-		var blockedAt any
+		var blockedAt, finishedAt any
 		if j.Manual {
 			status = "blocked"
 			blockedAt = time.Now()
 		}
+		// A job the environment policy forbids never runs: it fails at once,
+		// with the reason shown on the job.
+		if denied != "" {
+			status, blockedAt, finishedAt = "failed", nil, time.Now()
+		}
 		var id int64
 		err = tx.QueryRow(ctx,
-			`INSERT INTO jobs (pipeline_id, name, stage, stage_idx, image, script, env, environment, tags, artifact_paths, artifact_expire_seconds, report_junit, cache_paths, cache_key, cache_key_files, cache_policy, services, network, timeout_seconds, max_attempts, status, manual, allow_failure, blocked_at)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24) RETURNING id`,
-			p.ID, j.Name, j.Stage, j.StageIdx, image, j.Script, env, environment, tags, artifacts, j.ArtifactExpireSeconds, reportJUnit, cachePaths, j.CacheKey, cacheKeyFiles, j.CachePolicy, services, j.Network, timeoutSec, j.Retry+1, status, j.Manual, j.AllowFailure, blockedAt).Scan(&id)
+			`INSERT INTO jobs (pipeline_id, name, stage, stage_idx, image, script, env, environment, tags, artifact_paths, artifact_expire_seconds, report_junit, cache_paths, cache_key, cache_key_files, cache_policy, services, network, timeout_seconds, max_attempts, status, manual, allow_failure, blocked_at, finished_at, status_reason, resource_group, affinity_key,
+			                   environment_url, report_dotenv, coverage_regex, coverage_report, secrets, registry_logins, retry_when)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35) RETURNING id`,
+			p.ID, j.Name, j.Stage, j.StageIdx, image, j.Script, env, environment, tags, artifacts, j.ArtifactExpireSeconds, reportJUnit, cachePaths, j.CacheKey, cacheKeyFiles, j.CachePolicy, services, j.Network, timeoutSec, j.Retry+1, status, j.Manual, j.AllowFailure, blockedAt, finishedAt, denied, resourceGroup, affinityKey,
+			j.EnvironmentURL, j.ReportDotenv, j.CoverageRegex, j.CoverageReportPath, secretsJSON, registryLogins, retryWhen).Scan(&id)
 		if err != nil {
 			return nil, err
 		}
@@ -332,9 +383,16 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 	}
 	for _, j := range jobs {
 		for _, dep := range j.Needs {
+			target, ok := ids[dep]
+			if !ok {
+				target, ok = req.ExternalNeeds[dep] // a promotion reusing another pipeline's build
+			}
+			if !ok {
+				return nil, fmt.Errorf("job %q needs %q, which is not in this pipeline", j.Name, dep)
+			}
 			if _, err := tx.Exec(ctx,
 				`INSERT INTO job_needs (job_id, needs_job_id) VALUES ($1,$2)`,
-				ids[j.Name], ids[dep]); err != nil {
+				ids[j.Name], target); err != nil {
 				return nil, err
 			}
 		}
@@ -427,7 +485,7 @@ type stageJob struct {
 func (s *Store) ListPipelines(ctx context.Context, repo string) ([]proto.Pipeline, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT `+pipelineWithStagesCols+`
-		 FROM pipelines p LEFT JOIN jobs j ON j.pipeline_id = p.id
+		 FROM pipelines p LEFT JOIN jobs j ON j.pipeline_id = p.id AND NOT j.superseded
 		 WHERE ($1 = '' OR p.repo = $1)
 		 GROUP BY p.id ORDER BY p.id DESC LIMIT 200`, repo)
 	if err != nil {
@@ -540,7 +598,7 @@ func (s *Store) ListRepos(ctx context.Context, q RepoQuery) ([]proto.RepoSummary
 
 	// The last pipeline of each card, with its stages, for the card header.
 	rows, err = s.pool.Query(ctx, `SELECT `+pipelineWithStagesCols+`
-		FROM pipelines p LEFT JOIN jobs j ON j.pipeline_id = p.id
+		FROM pipelines p LEFT JOIN jobs j ON j.pipeline_id = p.id AND NOT j.superseded
 		WHERE p.id = ANY($1) GROUP BY p.id`, lastIDs)
 	if err != nil {
 		return nil, 0, err
@@ -563,10 +621,12 @@ func (s *Store) GetPipeline(ctx context.Context, id int64) (*proto.Pipeline, []p
 	var p proto.Pipeline
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, repo, ref, sha, config_version, config_source, source,
-		        triggered_by, commit_author, commit_message, created_at
+		        triggered_by, commit_author, commit_message, created_at, promoted_from,
+		        (SELECT round(avg(coverage)::numeric, 2)::float8 FROM jobs
+		          WHERE pipeline_id = pipelines.id AND coverage IS NOT NULL AND NOT superseded)
 		 FROM pipelines WHERE id=$1`, id).
 		Scan(&p.ID, &p.Repo, &p.Ref, &p.SHA, &p.ConfigVersion, &p.ConfigSource,
-			&p.Source, &p.TriggeredBy, &p.CommitAuthor, &p.CommitMessage, &p.CreatedAt)
+			&p.Source, &p.TriggeredBy, &p.CommitAuthor, &p.CommitMessage, &p.CreatedAt, &p.PromotedFrom, &p.Coverage)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil, ErrNotFound
 	}
@@ -578,10 +638,11 @@ func (s *Store) GetPipeline(ctx context.Context, id int64) (*proto.Pipeline, []p
 		`SELECT j.id, j.pipeline_id, j.name, j.stage, j.stage_idx, j.image, j.environment,
 		        j.status,
 		        CASE WHEN j.status='failed' AND j.allow_failure THEN 'success' ELSE j.status END,
-		        j.started_at, j.finished_at, j.exit_code, j.manual, j.allow_failure,
+		        j.started_at, j.finished_at, j.exit_code, j.manual, j.allow_failure, j.status_reason,
+		        j.retry_of, j.resource_group, j.coverage::float8, j.runner_id,
 		        COALESCE(array_agg(n.needs_job_id) FILTER (WHERE n.needs_job_id IS NOT NULL), '{}')
 		 FROM jobs j LEFT JOIN job_needs n ON n.job_id = j.id
-		 WHERE j.pipeline_id = $1
+		 WHERE j.pipeline_id = $1 AND NOT j.superseded
 		 GROUP BY j.id ORDER BY j.stage_idx, j.name`, id)
 	if err != nil {
 		return nil, nil, err
@@ -598,7 +659,7 @@ func (s *Store) GetPipeline(ctx context.Context, id int64) (*proto.Pipeline, []p
 		var effective string
 		if err := rows.Scan(&j.ID, &j.PipelineID, &j.Name, &j.Stage, &j.StageIdx, &j.Image,
 			&j.Environment, &j.Status, &effective, &j.StartedAt, &j.FinishedAt, &j.ExitCode,
-			&j.Manual, &j.AllowFailure, &j.Needs); err != nil {
+			&j.Manual, &j.AllowFailure, &j.StatusReason, &j.RetryOf, &j.ResourceGroup, &j.Coverage, &j.RunnerID, &j.Needs); err != nil {
 			return nil, nil, err
 		}
 		jobs = append(jobs, j)
@@ -660,12 +721,13 @@ func (s *Store) GetJob(ctx context.Context, id int64) (*proto.Job, error) {
 	err := s.pool.QueryRow(ctx,
 		`SELECT j.id, j.pipeline_id, j.name, j.stage, j.stage_idx, j.image, j.environment,
 		        j.status, j.started_at, j.finished_at, j.exit_code, j.manual, j.allow_failure,
+		        j.status_reason, j.retry_of, j.resource_group, j.runner_id, j.coverage::float8,
 		        COALESCE(array_agg(n.needs_job_id) FILTER (WHERE n.needs_job_id IS NOT NULL), '{}')
 		 FROM jobs j LEFT JOIN job_needs n ON n.job_id = j.id
 		 WHERE j.id = $1 GROUP BY j.id`, id).
 		Scan(&j.ID, &j.PipelineID, &j.Name, &j.Stage, &j.StageIdx, &j.Image,
 			&j.Environment, &j.Status, &j.StartedAt, &j.FinishedAt, &j.ExitCode,
-			&j.Manual, &j.AllowFailure, &j.Needs)
+			&j.Manual, &j.AllowFailure, &j.StatusReason, &j.RetryOf, &j.ResourceGroup, &j.RunnerID, &j.Coverage, &j.Needs)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -727,25 +789,39 @@ func (s *Store) attachApprovals(ctx context.Context, repo string, jobs []proto.J
 	}
 
 	// One rule lookup per distinct environment, not per job.
-	required := map[string]int{}
+	rules := map[string]*proto.ProtectedEnvironment{}
 	for i := range jobs {
 		if jobs[i].Environment == nil || *jobs[i].Environment == "" {
 			continue
 		}
 		env := *jobs[i].Environment
-		if _, seen := required[env]; !seen {
-			rule, rerr := s.resolveProtectedEnv(ctx, repo, env)
+		rule, seen := rules[env]
+		if !seen {
+			r, rerr := s.resolveProtectedEnv(ctx, repo, env)
 			if rerr != nil {
 				return rerr
 			}
-			if rule != nil {
-				required[env] = rule.RequiredApprovals
-			} else {
-				required[env] = 0 // unprotected environment: no gate
-			}
+			rule = r // nil: unprotected environment, no gate
+			rules[env] = rule
 		}
 		jobs[i].Approvals = votes[jobs[i].ID]
-		jobs[i].RequiredApprovals = required[env]
+		if rule != nil {
+			jobs[i].RequiredApprovals = rule.RequiredApprovals
+			jobs[i].RequiredGroup = rule.RequiredGroup
+			jobs[i].RequiredGroupApprovals = rule.RequiredGroupApprovals
+			if rule.RequiredGroup != "" {
+				members, _ := s.groupMembers(ctx, s.pool, rule.RequiredGroup)
+				for m := range members {
+					jobs[i].GroupMembers = append(jobs[i].GroupMembers, m)
+				}
+				sort.Strings(jobs[i].GroupMembers)
+				for _, v := range votes[jobs[i].ID] {
+					if v.Verdict == "approved" && members[strings.ToLower(v.Approver)] {
+						jobs[i].GroupApprovals++
+					}
+				}
+			}
+		}
 	}
 	return nil
 }
@@ -1022,8 +1098,8 @@ func (s *Store) ExpiredLogObjectKeys(ctx context.Context, olderThan time.Duratio
 
 // Approver is who is casting a vote. Name is the identity the vote is recorded
 // under (the session email when there is a session). PlatformAdmin is true only
-// for an authenticated ADMIN_EMAILS identity; it counts as the "admin" role on
-// every repo, so an environment whose approver_roles include admin can always be
+// for an authenticated platform admin; it counts as the "admin" role on every
+// repo, so an environment whose approver_roles include admin can always be
 // approved by a platform admin even before the repo has members.
 type Approver struct {
 	Name          string
@@ -1056,32 +1132,40 @@ func loadGateJob(ctx context.Context, q querier, jobID int64, lock bool) (*gateJ
 	return &g, nil
 }
 
-// checkApprover enforces the environment's rule for one voter. approver_roles
-// is always enforced: a repo with no members no longer lets anyone vote (it
-// used to, as a "bootstrap mode", which made every rule a no-op until the first
-// member was added). Only a member holding one of the roles — or a platform
-// admin, who counts as "admin" — may vote, and the pipeline's author may not
-// vote on their own deployment unless the rule allows self-approval.
-func (s *Store) checkApprover(ctx context.Context, g *gateJob, rule *proto.ProtectedEnvironment, who Approver) error {
-	role, err := s.memberRole(ctx, g.repo, who.Name)
+// checkApprover enforces the environment's rule for one voter and returns the
+// members of the rule's required group (lowercased). approver_roles is always
+// enforced: a repo with no members no longer lets anyone vote (it used to, as
+// a "bootstrap mode", which made every rule a no-op until the first member was
+// added). A voter must be a member of the rule's required group (naming the
+// group on the rule is what lets them vote), or hold one of the roles — a
+// platform admin counts as "admin". The pipeline's author may not vote on
+// their own deployment unless the rule allows self-approval.
+func (s *Store) checkApprover(ctx context.Context, q querier, g *gateJob, rule *proto.ProtectedEnvironment, who Approver) (map[string]bool, error) {
+	group, err := s.groupMembers(ctx, q, rule.RequiredGroup)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	allowed := false
-	for _, r := range rule.ApproverRoles {
-		if (role != "" && role == r) || (who.PlatformAdmin && r == "admin") {
-			allowed = true
-			break
+	if !group[strings.ToLower(who.Name)] {
+		role, err := s.memberRole(ctx, g.repo, who.Name)
+		if err != nil {
+			return nil, err
+		}
+		allowed := false
+		for _, r := range rule.ApproverRoles {
+			if (role != "" && role == r) || (who.PlatformAdmin && r == "admin") {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return nil, fmt.Errorf("%w: %s needs one of the roles %s on %s",
+				ErrForbidden, rule.Name, strings.Join(rule.ApproverRoles, ", "), g.repo)
 		}
 	}
-	if !allowed {
-		return fmt.Errorf("%w: %s needs one of the roles %s on %s",
-			ErrForbidden, rule.Name, strings.Join(rule.ApproverRoles, ", "), g.repo)
-	}
 	if !rule.AllowSelfApproval && g.triggeredBy != "" && strings.EqualFold(who.Name, g.triggeredBy) {
-		return ErrSelfApproval
+		return nil, ErrSelfApproval
 	}
-	return nil
+	return group, nil
 }
 
 // gateRule returns the rule for a job waiting on environment approval, or
@@ -1114,7 +1198,8 @@ func (s *Store) CanApprove(ctx context.Context, jobID int64, who Approver) (*pro
 	if err != nil {
 		return nil, err
 	}
-	return rule, s.checkApprover(ctx, g, rule, who)
+	_, err = s.checkApprover(ctx, s.pool, g, rule, who)
+	return rule, err
 }
 
 // Approve records a vote and, inside the same transaction, releases the job
@@ -1135,7 +1220,8 @@ func (s *Store) Approve(ctx context.Context, jobID int64, who Approver, req prot
 	if err != nil {
 		return nil, err
 	}
-	if err := s.checkApprover(ctx, g, rule, who); err != nil {
+	group, err := s.checkApprover(ctx, tx, g, rule, who)
+	if err != nil {
 		return nil, err
 	}
 	req.Approver = who.Name
@@ -1156,14 +1242,29 @@ func (s *Store) Approve(ctx context.Context, jobID int64, who Approver, req prot
 			return nil, err
 		}
 	} else {
-		var approved int
-		err = tx.QueryRow(ctx,
-			`SELECT count(*) FROM job_approvals WHERE job_id=$1 AND verdict='approved'`,
-			jobID).Scan(&approved)
+		var approved, fromGroup int
+		vrows, err := tx.Query(ctx,
+			`SELECT approver FROM job_approvals WHERE job_id=$1 AND verdict='approved'`, jobID)
 		if err != nil {
 			return nil, err
 		}
-		if approved >= rule.RequiredApprovals {
+		for vrows.Next() {
+			var voter string
+			if err := vrows.Scan(&voter); err != nil {
+				vrows.Close()
+				return nil, err
+			}
+			approved++
+			if group[strings.ToLower(voter)] {
+				fromGroup++
+			}
+		}
+		vrows.Close()
+		if err := vrows.Err(); err != nil {
+			return nil, err
+		}
+		groupOK := rule.RequiredGroup == "" || fromGroup >= rule.RequiredGroupApprovals
+		if approved >= rule.RequiredApprovals && groupOK {
 			if _, err := tx.Exec(ctx,
 				`UPDATE jobs SET status='pending', blocked_at=NULL WHERE id=$1`, jobID); err != nil {
 				return nil, err
@@ -1201,12 +1302,15 @@ func capCommitMessage(msg string) string {
 // protected refs and environment scope) overlaid by job-level YAML variables.
 // Returns (nil, nil) when the queue is empty.
 func (s *Store) AcquireJob(ctx context.Context, req proto.AcquireRequest) (*proto.RunnerJob, error) {
-	paused, err := s.TouchRunner(ctx, req.RunnerID, req.Executor, req.Tags)
+	state, err := s.TouchRunnerV(ctx, req)
 	if err != nil {
 		return nil, err
 	}
-	if paused {
+	if state.Paused || state.Draining {
 		return nil, nil
+	}
+	if mm, err := s.Maintenance(ctx); err == nil && mm.On {
+		return nil, nil // server upgrade in progress: jobs queue
 	}
 	runnerTags := req.Tags
 	if runnerTags == nil {
@@ -1214,30 +1318,82 @@ func (s *Store) AcquireJob(ctx context.Context, req proto.AcquireRequest) (*prot
 	}
 	var j proto.RunnerJob
 	var image, environment *string
-	var envRaw, artifactsRaw, reportJUnitRaw, cachePathsRaw, cacheKeyFilesRaw, servicesRaw []byte
+	var envRaw, artifactsRaw, reportJUnitRaw, cachePathsRaw, cacheKeyFilesRaw, servicesRaw, secretsRaw []byte
 	var cachePolicy string
-	var repo, ref, sha string
-	err = s.pool.QueryRow(ctx,
-		`UPDATE jobs j
-		 SET status='running', started_at=now(), heartbeat_at=now(), runner_id=$1
-		 FROM (SELECT id FROM jobs
-		       WHERE status='pending' AND tags <@ $2::text[]
-		       ORDER BY id
-		       FOR UPDATE SKIP LOCKED LIMIT 1) next,
-		      pipelines p
-		 WHERE j.id = next.id AND p.id = j.pipeline_id
-		 RETURNING j.id, j.pipeline_id, j.name, j.image, j.script, j.env,
-		           j.artifact_paths, j.report_junit, j.cache_paths, j.cache_key, j.cache_key_files,
-		           j.cache_policy, j.services, j.network, j.environment, j.timeout_seconds,
-		           p.repo, p.ref, p.sha`,
-		req.RunnerID, runnerTags).
-		Scan(&j.ID, &j.PipelineID, &j.Name, &image, &j.Script, &envRaw,
-			&artifactsRaw, &reportJUnitRaw, &cachePathsRaw, &j.CacheKey, &cacheKeyFilesRaw,
-			&cachePolicy, &servicesRaw, &j.Network, &environment, &j.TimeoutSeconds, &repo, &ref, &sha)
+	var repo, ref, sha, source, triggeredBy, commitAuthor, commitMessage string
+	// Pick the next pending job this runner can take. A job in a
+	// resource_group is skipped while another job of the same (repo, group)
+	// is running; the per-group advisory lock + re-check below closes the race
+	// between two runners picking two jobs of one group at the same moment.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	var candidate int64
+	var candGroup, candRepo string
+	// Cache affinity: a job whose preferred runner (the last to run it
+	// successfully) is another online, unpaused runner able to take it is left
+	// for that runner until it has waited affinityWait; this runner's own
+	// preferred jobs come first.
+	err = tx.QueryRow(ctx,
+		`SELECT j.id, j.resource_group, p.repo FROM jobs j JOIN pipelines p ON p.id = j.pipeline_id
+		 LEFT JOIN runner_affinity a ON j.affinity_key <> '' AND a.key = j.affinity_key
+		 WHERE j.status = 'pending' AND j.tags <@ $1::text[]
+		   AND (j.resource_group = '' OR NOT EXISTS (
+		         SELECT 1 FROM jobs r JOIN pipelines rp ON rp.id = r.pipeline_id
+		         WHERE r.status = 'running' AND r.resource_group = j.resource_group AND rp.repo = p.repo))
+		   AND (a.runner_id IS NULL OR a.runner_id = $2
+		        OR j.queued_at < now() - make_interval(secs => $3)
+		        OR NOT EXISTS (SELECT 1 FROM runners pr WHERE pr.id = a.runner_id AND NOT pr.paused
+		                       AND pr.last_contact_at > now() - interval '30 seconds' AND j.tags <@ pr.tags))
+		 ORDER BY (a.runner_id IS NOT NULL AND a.runner_id = $2) DESC, j.id
+		 FOR UPDATE OF j SKIP LOCKED LIMIT 1`, runnerTags, req.RunnerID, s.affinityWait.Seconds()).Scan(&candidate, &candGroup, &candRepo)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
+		return nil, err
+	}
+	if candGroup != "" {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`,
+			"forge-resource-group:"+candRepo+":"+candGroup); err != nil {
+			return nil, err
+		}
+		var busy bool
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM jobs r JOIN pipelines rp ON rp.id = r.pipeline_id
+			  WHERE r.status = 'running' AND r.resource_group = $1 AND rp.repo = $2 AND r.id <> $3)`,
+			candGroup, candRepo, candidate).Scan(&busy); err != nil {
+			return nil, err
+		}
+		if busy {
+			return nil, nil // another runner just took this group; it stays pending
+		}
+	}
+	err = tx.QueryRow(ctx,
+		`UPDATE jobs j
+		 SET status='running', started_at=now(), heartbeat_at=now(), runner_id=$1
+		 FROM pipelines p
+		 WHERE j.id = $3 AND p.id = j.pipeline_id AND j.status = 'pending' AND j.tags <@ $2::text[]
+		 RETURNING j.id, j.pipeline_id, j.name, j.image, j.script, j.env,
+		           j.artifact_paths, j.report_junit, j.cache_paths, j.cache_key, j.cache_key_files,
+		           j.cache_policy, j.services, j.network, j.environment, j.timeout_seconds,
+		           p.repo, p.ref, p.sha, p.source, p.triggered_by, p.commit_author, p.commit_message,
+		           j.report_dotenv, j.coverage_report, j.secrets, j.registry_logins`,
+		req.RunnerID, runnerTags, candidate).
+		Scan(&j.ID, &j.PipelineID, &j.Name, &image, &j.Script, &envRaw,
+			&artifactsRaw, &reportJUnitRaw, &cachePathsRaw, &j.CacheKey, &cacheKeyFilesRaw,
+			&cachePolicy, &servicesRaw, &j.Network, &environment, &j.TimeoutSeconds, &repo, &ref, &sha,
+			&source, &triggeredBy, &commitAuthor, &commitMessage,
+			&j.ReportDotenvPath, &j.CoverageReportPath, &secretsRaw, &j.RegistryLogins)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	if image != nil {
@@ -1254,12 +1410,39 @@ func (s *Store) AcquireJob(ctx context.Context, req proto.AcquireRequest) (*prot
 	if err != nil {
 		return nil, err
 	}
+	var defaultBranch, registeredCloneURL string
+	_ = s.pool.QueryRow(ctx, `SELECT default_branch, clone_url FROM repo_registry WHERE repo=$1`, repo).
+		Scan(&defaultBranch, &registeredCloneURL)
+	// Predefined CI_* variables first; repo variables, then the job's own
+	// YAML variables, override them (GitLab precedence).
+	merged := PredefinedVars(JobContext{
+		Repo: repo, Ref: ref, SHA: sha, Source: source, TriggeredBy: triggeredBy,
+		CommitAuthor: commitAuthor, CommitMessage: commitMessage, Environment: env,
+		PipelineID: j.PipelineID, JobID: j.ID, JobName: j.Name,
+		DefaultBranch: defaultBranch, CloneURL: registeredCloneURL,
+	})
+	for k, v := range resolved {
+		merged[k] = v
+	}
+	// Dotenv reports of the jobs this one needs (GitLab artifacts:reports:dotenv),
+	// oldest first so a later job's value wins. A promotion's deploy job gets
+	// the source build's DEPLOY_VERSION / DEPLOY_DIGEST this way.
+	if denv, err := s.neededDotenv(ctx, j.ID); err == nil {
+		for k, v := range denv {
+			merged[k] = v
+		}
+	}
 	jobEnv := map[string]string{}
 	_ = json.Unmarshal(envRaw, &jobEnv)
 	for k, v := range jobEnv { // job-level YAML variables win
-		resolved[k] = v
+		merged[k] = v
 	}
-	j.Env = resolved
+	if jobEnv["CI_COMMIT_TAG"] != "" { // a tag pipeline (the trigger said so) has no branch
+		if _, set := jobEnv["CI_COMMIT_BRANCH"]; !set {
+			delete(merged, "CI_COMMIT_BRANCH")
+		}
+	}
+	j.Env = merged
 
 	// Keyless cloud auth: mint a short-lived, per-job OIDC ID token and inject it
 	// as FORGE_OIDC_TOKEN (with the GitLab-style CI_JOB_JWT alias). The job
@@ -1281,6 +1464,9 @@ func (s *Store) AcquireJob(ctx context.Context, req proto.AcquireRequest) (*prot
 	_ = json.Unmarshal(cacheKeyFilesRaw, &j.CacheKeyFiles)
 	j.CachePolicy = cachePolicy
 	_ = json.Unmarshal(servicesRaw, &j.Services)
+	if len(secretsRaw) > 2 {
+		_ = json.Unmarshal(secretsRaw, &j.Secrets)
+	}
 
 	// Source checkout info when the repo is registered against a real VCS.
 	cloneURL, token, conn, err := s.cloneTarget(ctx, repo)
@@ -1368,16 +1554,17 @@ func (s *Store) CompleteJob(ctx context.Context, jobID int64, status string, exi
 	defer tx.Rollback(ctx)
 
 	var attempt, maxAttempts int
+	var retryWhen []string
 	var cancelReq bool
 	var environment *string
 	var pipelineID int64
 	var repo, ref, sha, triggeredBy string
 	err = tx.QueryRow(ctx,
-		`SELECT j.attempt, j.max_attempts, j.cancel_requested, j.environment,
+		`SELECT j.retry_when, j.attempt, j.max_attempts, j.cancel_requested, j.environment,
 		        p.id, p.repo, p.ref, p.sha, p.triggered_by
 		 FROM jobs j JOIN pipelines p ON p.id = j.pipeline_id
 		 WHERE j.id=$1 AND j.status='running' FOR UPDATE OF j`, jobID).
-		Scan(&attempt, &maxAttempts, &cancelReq, &environment, &pipelineID, &repo, &ref, &sha, &triggeredBy)
+		Scan(&retryWhen, &attempt, &maxAttempts, &cancelReq, &environment, &pipelineID, &repo, &ref, &sha, &triggeredBy)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", "", ErrNotFound
 	}
@@ -1406,8 +1593,9 @@ func (s *Store) CompleteJob(ctx context.Context, jobID int64, status string, exi
 		return "canceled", "", tx.Commit(ctx)
 	}
 
-	// Retry a plain failure (not a timeout-kill: exit 124) while attempts remain.
-	if status == "failed" && exitCode != 124 && attempt < maxAttempts {
+	// Retry a plain failure (not a timeout-kill: exit 124) while attempts
+	// remain and the job's retry.when covers script failures.
+	if status == "failed" && exitCode != 124 && attempt < maxAttempts && compiler.RetryAppliesTo(retryWhen, compiler.RetryScriptFailure) {
 		if _, err := tx.Exec(ctx,
 			`UPDATE jobs SET status='pending', attempt=attempt+1, started_at=NULL,
 			        heartbeat_at=NULL, runner_id=NULL, exit_code=NULL WHERE id=$1`, jobID); err != nil {
@@ -1430,17 +1618,31 @@ func (s *Store) CompleteJob(ctx context.Context, jobID int64, status string, exi
 	// dedupes: a given job's success is recorded at most once, even on a late or
 	// duplicated runner report. deployed_by is the environment approver when the
 	// job was approval-gated, otherwise the pipeline's triggered_by.
+	if status == "success" {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO runner_affinity (key, runner_id)
+			 SELECT affinity_key, runner_id FROM jobs
+			 WHERE id = $1 AND affinity_key <> '' AND runner_id IS NOT NULL
+			 ON CONFLICT (key) DO UPDATE SET runner_id = EXCLUDED.runner_id, updated_at = now()`, jobID); err != nil {
+			return "", "", err
+		}
+	}
 	if status == "success" && environment != nil && *environment != "" {
+		envURL, outEnv, err := s.jobOutputEnv(ctx, tx, jobID)
+		if err != nil {
+			return "", "", err
+		}
+		url, version, digest := deployFacts(envURL, outEnv, sha)
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO deployments
-			     (repo, environment, sha, ref, pipeline_id, job_id, deployed_by, status)
+			     (repo, environment, sha, ref, pipeline_id, job_id, deployed_by, status, url, version, digest, promoted_from)
 			 VALUES ($1,$2,$3,$4,$5,$6,
 			         COALESCE((SELECT approver FROM job_approvals
 			                   WHERE job_id=$6 AND verdict='approved'
 			                   ORDER BY id DESC LIMIT 1), $7),
-			         'success')
+			         'success', $8, $9, $10, (SELECT promoted_from FROM pipelines WHERE id=$5))
 			 ON CONFLICT (job_id) DO NOTHING`,
-			repo, *environment, sha, ref, pipelineID, jobID, triggeredBy); err != nil {
+			repo, *environment, sha, ref, pipelineID, jobID, triggeredBy, url, version, digest); err != nil {
 			return "", "", err
 		}
 	}
@@ -1610,7 +1812,7 @@ func (s *Store) CancelDeadJobs(ctx context.Context) (int64, error) {
 // the global (repo=”) default.
 const protectedFor = `EXISTS (
 	SELECT 1 FROM protected_environments pe, pipelines p
-	WHERE p.id = j.pipeline_id AND pe.name = j.environment AND pe.repo IN ('', p.repo))`
+	WHERE p.id = j.pipeline_id AND lower(pe.name) = lower(j.environment) AND pe.repo IN ('', p.repo))`
 
 // frozenEnv is true when the job targets an environment currently inside a
 // deploy-freeze window (repo-specific or global). A frozen job is left in
@@ -1647,7 +1849,7 @@ func (s *Store) ExpireBlockedJobs(ctx context.Context) (int64, error) {
 		   AND j.blocked_at + make_interval(hours => (
 		       SELECT pe.approval_timeout_hours
 		       FROM protected_environments pe, pipelines p
-		       WHERE p.id = j.pipeline_id AND pe.name = j.environment
+		       WHERE p.id = j.pipeline_id AND lower(pe.name) = lower(j.environment)
 		         AND pe.repo IN ('', p.repo)
 		       ORDER BY pe.repo DESC LIMIT 1)) < now()`)
 	return tag.RowsAffected(), err
@@ -1655,11 +1857,27 @@ func (s *Store) ExpireBlockedJobs(ctx context.Context) (int64, error) {
 
 // FailStaleJobs fails running jobs whose runner stopped heartbeating.
 func (s *Store) FailStaleJobs(ctx context.Context, staleAfter time.Duration) (int64, error) {
-	tag, err := s.pool.Exec(ctx,
-		`UPDATE jobs SET status='failed', finished_at=now()
+	// Jobs whose retry.when covers runner losses get another attempt first.
+	requeued, err := s.pool.Exec(ctx,
+		`UPDATE jobs SET status='pending', attempt=attempt+1, started_at=NULL, heartbeat_at=NULL,
+		        runner_id=NULL, exit_code=NULL,
+		        status_reason = 'runner lost (no heartbeat for ' || $1 || '); retrying'
+		 WHERE status='running' AND heartbeat_at < now() - $1::interval
+		   AND attempt < max_attempts
+		   AND ('always' = ANY(retry_when) OR 'runner_system_failure' = ANY(retry_when))`,
+		staleAfter.String())
+	if err != nil {
+		return 0, err
+	}
+	failed, err := s.pool.Exec(ctx,
+		`UPDATE jobs SET status='failed', finished_at=now(),
+		        status_reason = 'runner lost: no heartbeat for ' || $1 || ' (runner ' || COALESCE(runner_id, '?') || ')'
 		 WHERE status='running' AND heartbeat_at < now() - $1::interval`,
 		staleAfter.String())
-	return tag.RowsAffected(), err
+	if err != nil {
+		return 0, err
+	}
+	return requeued.RowsAffected() + failed.RowsAffected(), nil
 }
 
 // FailOverdueJobs is the server-side timeout backstop: running jobs past
@@ -1683,7 +1901,7 @@ func (s *Store) FailOverdueJobs(ctx context.Context) (int64, error) {
 // FINAL, retries-exhausted failure of a non-allow_failure job matches here.
 const hasGenuineFailure = `EXISTS (
 	SELECT 1 FROM jobs f
-	WHERE f.pipeline_id = j.pipeline_id
+	WHERE f.pipeline_id = j.pipeline_id AND NOT f.superseded
 	  AND f.status='failed' AND NOT f.allow_failure)`
 
 // FailFastCancel implements opt-in pipeline-level fail-fast. For every pipeline

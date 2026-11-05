@@ -1,4 +1,4 @@
-# Artifact storage: local, MinIO, AWS S3, or GCS
+# Artifact storage: local disk, any S3-compatible store, or Azure Blob
 
 Runners archive the `artifacts.paths` of a successful job as `artifacts.tar.gz`
 and stream it to the control plane, which writes it to the configured blob
@@ -144,6 +144,24 @@ GCS exposes an S3-compatible XML API with HMAC keys.
    S3_ACCESS_KEY=<accessId> S3_SECRET_KEY=<secret> \
    ./bin/forge-server
    ```
+
+## Option E — Azure Blob Storage
+
+```sh
+ARTIFACT_STORE=azure
+AZURE_STORAGE_ACCOUNT=forgeartifacts
+AZURE_STORAGE_CONTAINER=forge            # created when missing
+# one of:
+AZURE_STORAGE_KEY=...                    # shared key
+AZURE_STORAGE_CONNECTION_STRING=...      # account key or SAS inside
+#   or neither: the default Azure credential chain — managed identity,
+#   workload identity, az login, AZURE_CLIENT_ID/… env vars
+AZURE_STORAGE_ENDPOINT=http://127.0.0.1:10000/devstoreaccount1   # Azurite, optional
+```
+
+Same keys and layout as the other backends (artifacts, caches, archived
+logs). A managed identity needs **Storage Blob Data Contributor** on the
+container.
 
 ## Declaring artifacts in a job
 

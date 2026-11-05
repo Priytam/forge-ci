@@ -4,6 +4,8 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"github.com/priytamjeepandey/forge-ci/internal/buildinfo"
 	"log/slog"
 	"net/http"
 	"os"
@@ -11,8 +13,10 @@ import (
 	"syscall"
 
 	"github.com/priytamjeepandey/forge-ci/internal/api"
+	"github.com/priytamjeepandey/forge-ci/internal/autoscale"
 	"github.com/priytamjeepandey/forge-ci/internal/blob"
 	"github.com/priytamjeepandey/forge-ci/internal/logstore"
+	"github.com/priytamjeepandey/forge-ci/internal/review"
 	"github.com/priytamjeepandey/forge-ci/internal/scheduler"
 	"github.com/priytamjeepandey/forge-ci/internal/store"
 )
@@ -25,6 +29,11 @@ func envOr(key, fallback string) string {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "--version" {
+		fmt.Println(buildinfo.Version)
+		return
+	}
+	slog.Info("forge-server", "version", buildinfo.Version)
 	addr := envOr("LISTEN_ADDR", ":8080")
 	dsn := envOr("DATABASE_URL", "postgres://forge:forge@localhost:5433/forge?sslmode=disable")
 
@@ -51,8 +60,13 @@ func main() {
 	defer logs.Close()
 
 	go scheduler.New(st, blobs, logs).Run(ctx)
+	go autoscale.Loop(ctx, st) // runner pools (no-op until one is configured)
+	handler := api.New(st, blobs, logs)
+	// Code review: refreshes, reconcile, gates, writes, merge queues, diff retention.
+	go review.Loop(ctx, st, blobs, handler.StartQueuePipeline)
+	go handler.RunLive(ctx)
 
-	srv := &http.Server{Addr: addr, Handler: api.New(st, blobs, logs)}
+	srv := &http.Server{Addr: addr, Handler: handler}
 	go func() {
 		<-ctx.Done()
 		_ = srv.Shutdown(context.Background())

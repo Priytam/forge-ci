@@ -15,7 +15,7 @@ Membership is per repo, one role per user:
 | Action | Who |
 |---|---|
 | Retry or cancel a pipeline, play or cancel a job | Platform admins, plus any member of the repo (`admin`, `owner` or `developer`). On a repo with no members (bootstrap mode) any signed-in user. |
-| Variables and secrets, runners and runner tokens, members, approval rules, SSO, token policy | Platform admins only (`ADMIN_EMAILS`) |
+| Variables and secrets, runners and runner tokens, members, approval rules, SSO, token policy | Platform admins only (`ADMIN_EMAILS`, Admin → Platform admins, or an admin IdP group) |
 
 Members are matched to the signed-in email case-insensitively. The UI asks
 `GET /api/v1/permissions?repo=<repo>` (`{is_admin, can_run, can_cancel}`) to
@@ -34,8 +34,10 @@ curl -X DELETE $FORGE/api/v1/members/<id>                     # remove
 
 > **Approvals are never open.** `approver_roles` is enforced on every repo,
 > including one with no members yet. A voter must be a member holding one of
-> the rule's roles; a platform admin (`ADMIN_EMAILS`, signed in) counts as
-> `admin` on every repo, so on a repo with no members only platform admins can
+> the rule's roles (directly or through an IdP group grant), or a member of the
+> rule's `required_group`. A signed-in platform admin (`ADMIN_EMAILS`, granted
+> in Admin → Platform admins, or an IdP admin group) counts as `admin` on every
+> repo, so on a repo with no members only platform admins can
 > approve, and only when the rule lists `admin`. (Earlier versions skipped the
 > role check on repos with zero members, so anyone could approve there.)
 > Retry, cancel and play keep the bootstrap rule above; approvals do not.
@@ -96,3 +98,58 @@ Enforced transitions (all server-side, all audited in `job_approvals`):
 
 A default global rule ships out of the box: environment `production`,
 1 approval, roles `admin,owner`.
+
+## Approver groups: "N approvals, at least M from group X"
+
+Admins define named groups of people under **Admin ▾ → Approver groups**
+(`GET /api/v1/approver-groups`, `PUT`/`DELETE /api/v1/approver-groups/{name}`
+with `{"description", "members": ["harish@acme.io", ...]}`).
+
+An approval rule can then require part of its approvals from a group:
+
+```sh
+curl -X POST $FORGE/api/v1/protected-environments -d '{
+  "repo": "acme/ecom", "name": "production",
+  "required_approvals": 2, "approver_roles": ["owner"],
+  "required_group": "release-managers", "required_group_approvals": 1
+}'
+```
+
+- The job is released only when it has `required_approvals` approvals **and**
+  at least `required_group_approvals` of them are from group members.
+- Group members may vote on that environment even without a repo role.
+- Self-approval and one-vote-per-person rules still apply; members are matched
+  case-insensitively by email.
+- A group named by a rule can't be deleted (409) until the rule changes.
+- Approval notifications include the group's members and say "at least M from
+  <group>".
+
+
+## One environment, one rule
+
+Rule names are canonicalised through the environment registry (an alias or
+case variant such as `prod` or `production` becomes the registered
+`Production`), in three places so an old rule can never win silently:
+
+- **saving** a rule canonicalises its name;
+- **resolving** the rule for a job canonicalises the job's environment the
+  same way (and matches case-insensitively), so a job stored under an old
+  spelling meets the canonical rule;
+- **at start and whenever the registry is saved**, rules saved under an
+  alias or case variant are **folded** into the canonical rule, keeping the
+  stricter of each setting (more approvals, the shorter timeout, self-approval
+  off, the group requirement), and the leftover row is deleted. The server log
+  says how many were folded.
+
+A rule whose name matches no registered environment (nor an alias) is shown
+as **inactive** on the Members & approval rules page — no job can ever match
+it — with a Delete button.
+
+## Seeing why a job is still blocked
+
+Job detail (`GET /api/v1/jobs/{id}`) and the pipeline view both return the
+full gate: `required_approvals`, `required_group`,
+`required_group_approvals`, `group_approvals` (group votes so far) and
+`group_members`. The gate shows "1 of 2 from release-approvers — waiting on
+Ravi, Ashwin", and tells a viewer whose vote cannot release the job that
+their vote counts but one more is still needed from the group.

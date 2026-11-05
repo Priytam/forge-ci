@@ -20,6 +20,7 @@ import (
 
 	"github.com/priytamjeepandey/forge-ci/internal/compiler"
 	"github.com/priytamjeepandey/forge-ci/internal/proto"
+	"github.com/priytamjeepandey/forge-ci/internal/review"
 	"github.com/priytamjeepandey/forge-ci/internal/store"
 	"github.com/priytamjeepandey/forge-ci/internal/vcs"
 )
@@ -29,11 +30,13 @@ import (
 // with Forge (PUT /api/v1/repo-configs). See docs/vcs-integration.md.
 
 func (s *Server) registerWebhookRoutes() {
-	s.mux.HandleFunc("POST /api/v1/webhooks/github", s.githubWebhook)
-	s.mux.HandleFunc("POST /api/v1/webhooks/bitbucket", s.bitbucketWebhook)
+	s.mux.HandleFunc("POST /api/v1/webhooks/github", s.logged("github", s.githubWebhook))
+	s.mux.HandleFunc("POST /api/v1/webhooks/bitbucket", s.logged("bitbucket", s.bitbucketWebhook))
+	s.mux.HandleFunc("POST /api/v1/webhooks/gitlab", s.logged("gitlab", s.gitlabWebhook))
+	s.mux.HandleFunc("POST /api/v1/webhooks/gitea", s.logged("gitea", s.giteaWebhook))
 	// CodeCommit has no webhooks: this route is fed by an EventBridge API
 	// Destination. See internal/api/webhooks_codecommit.go.
-	s.mux.HandleFunc("POST /api/v1/webhooks/codecommit", s.codecommitWebhook)
+	s.mux.HandleFunc("POST /api/v1/webhooks/codecommit", s.logged("codecommit", s.codecommitWebhook))
 	s.mux.HandleFunc("PUT /api/v1/repo-configs", s.putRepoConfig)
 	s.mux.HandleFunc("GET /api/v1/repo-configs", s.getRepoConfig)
 	s.mux.HandleFunc("GET /api/v1/repo-configs/versions", s.listConfigVersions)
@@ -115,13 +118,20 @@ func (s *Server) registerRepo(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
-	case "other":
+	case "gitlab":
 		if req.CloneURL == "" {
-			writeErr(w, http.StatusBadRequest, `provider "other" requires clone_url`)
+			req.CloneURL = "https://gitlab.com/" + req.Repo + ".git"
+		}
+	case "gitea", "git", "other":
+		if req.CloneURL == "" {
+			writeErr(w, http.StatusBadRequest, `provider "`+req.Provider+`" requires clone_url`)
 			return
 		}
+		if req.Provider == "other" {
+			req.Provider = "git" // the generic git provider
+		}
 	default:
-		writeErr(w, http.StatusBadRequest, "provider must be github, bitbucket, codecommit or other")
+		writeErr(w, http.StatusBadRequest, "provider must be one of: "+strings.Join(vcs.Names(), ", ")+" (git = any git server)")
 		return
 	}
 	if req.DefaultBranch == "" {
@@ -294,10 +304,8 @@ func validateCloneAccessWithToken(ctx context.Context, cloneURL, token, provider
 	if token != "" {
 		parsed, err := url.Parse(u)
 		if err == nil {
-			if provider == "bitbucket" {
-				parsed.User = url.UserPassword("x-token-auth", token)
-			} else {
-				parsed.User = url.UserPassword("x-access-token", token)
+			if ui := vcs.Lookup(provider).CloneUser(token); ui != nil {
+				parsed.User = ui
 			}
 			u = parsed.String()
 		}
@@ -364,36 +372,84 @@ type webhookRun struct {
 }
 
 func (s *Server) triggerFromWebhook(w http.ResponseWriter, r *http.Request, run webhookRun) bool {
-	repo, ref, sha, author, source := run.Repo, run.Ref, run.SHA, run.Actor, run.Source
-	extraCtx, pr := run.ExtraCtx, run.PR
-	if repo == "" || ref == "" || sha == "" {
+	if run.Repo == "" || run.Ref == "" || run.SHA == "" {
 		writeErr(w, http.StatusBadRequest, "payload missing repo/ref/sha")
 		return false
 	}
+	if strings.HasPrefix(strings.TrimPrefix(run.Ref, "refs/heads/"), review.QueueBranchPrefix) {
+		// The merge queue's test merges: the queue starts their pipelines.
+		writeJSON(w, http.StatusAccepted, map[string]string{"status": "merge queue branch: pipelines are started by the queue"})
+		return false
+	}
+	p, status, err := s.runPipeline(r.Context(), run)
+	if err != nil {
+		writeErr(w, status, err.Error())
+		return false
+	}
+	slog.Info("pipeline triggered via webhook", "repo", run.Repo, "ref", run.Ref, "pipeline", p.ID, "config_source", p.ConfigSource)
+	writeJSON(w, http.StatusCreated, map[string]any{"pipeline": p})
+	return true
+}
+
+// StartQueuePipeline starts the merge queue's test pipeline for sha on its
+// queue branch, as a push there would (source merge_queue).
+func (s *Server) StartQueuePipeline(ctx context.Context, repo, ref, sha, actor string) (int64, error) {
+	p, _, err := s.runPipeline(ctx, webhookRun{Repo: repo, Ref: ref, SHA: sha, Actor: actor, Source: compiler.SourceMergeQueue,
+		CommitMessage: "Merge queue test"})
+	if err != nil {
+		return 0, err
+	}
+	slog.Info("merge queue: test pipeline started", "repo", repo, "ref", ref, "pipeline", p.ID)
+	return p.ID, nil
+}
+
+// runPipeline compiles and creates the pipeline for run; on failure the
+// status says how to answer an HTTP caller.
+func (s *Server) runPipeline(ctx context.Context, run webhookRun) (*proto.Pipeline, int, error) {
+	repo, ref, sha, author, source := run.Repo, run.Ref, run.SHA, run.Actor, run.Source
+	extraCtx, pr := run.ExtraCtx, run.PR
 	// config-from-repo: resolve the config for this event per the repo's
 	// config_source toggle — an in-repo .forge-ci.yml fetched at the event sha
 	// (preferred by default), else the registered config. configVersion is nil
 	// for an in-repo config (it is not a registry version); cfgSource is stamped
 	// on the pipeline for audit. config_yaml stores exactly what compiled.
-	config, configVersion, cfgSource, err := s.store.ResolvePipelineConfig(r.Context(), repo, sha)
+	config, configVersion, cfgSource, err := s.store.ResolvePipelineConfig(ctx, repo, sha)
 	if errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound,
-			"no pipeline config for "+repo+" — add .forge-ci.yml to the repo or PUT /api/v1/repo-configs first")
-		return false
+		return nil, http.StatusNotFound,
+			errors.New("no pipeline config for " + repo + " — add .forge-ci.yml to the repo or PUT /api/v1/repo-configs first")
 	}
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "failed to load repo config")
-		return false
+		return nil, http.StatusInternalServerError, errors.New("failed to load repo config")
 	}
-	jobs, err := compiler.Compile(config, ref, source, s.store.TemplateResolver(r.Context(), repo), extraCtx)
+	if source == compiler.SourceMergeRequest && extraCtx != nil {
+		// The same MR variables on every host. Hosts without a separate global
+		// MR id use the per-repo number for both.
+		if extraCtx["CI_MERGE_REQUEST_ID"] == "" {
+			extraCtx["CI_MERGE_REQUEST_ID"] = extraCtx["CI_MERGE_REQUEST_IID"]
+		}
+		extraCtx["CI_MERGE_REQUEST_PROJECT_PATH"] = repo
+		extraCtx["CI_MERGE_REQUEST_SOURCE_BRANCH_SHA"] = sha
+		if pr != nil && pr.BaseSHA != "" {
+			extraCtx["CI_MERGE_REQUEST_DIFF_BASE_SHA"] = pr.BaseSHA
+		}
+	}
+	mrBase := ""
+	if pr != nil {
+		mrBase = pr.BaseSHA
+		if mrBase == "" {
+			mrBase = extraCtx["CI_MERGE_REQUEST_TARGET_BRANCH"] // diff from the merge base with the target
+		}
+	}
+	changes := s.store.PipelineChangeSet(ctx, repo, ref, sha, source, mrBase)
+	copts := s.store.CompileOpts(ctx, repo)
+	copts.Changes, copts.Extra = changes, extraCtx
+	jobs, err := compiler.CompileWith(config, ref, source, copts)
 	if err != nil {
-		writeErr(w, http.StatusUnprocessableEntity, "pipeline config error: "+err.Error())
-		return false
+		return nil, http.StatusUnprocessableEntity, errors.New("pipeline config error: " + err.Error())
 	}
 	opts, err := compiler.Options(config)
 	if err != nil {
-		writeErr(w, http.StatusUnprocessableEntity, "pipeline config error: "+err.Error())
-		return false
+		return nil, http.StatusUnprocessableEntity, errors.New("pipeline config error: " + err.Error())
 	}
 	create := proto.CreatePipelineRequest{
 		Repo: repo, Ref: ref, SHA: sha, Config: config,
@@ -403,16 +459,14 @@ func (s *Server) triggerFromWebhook(w http.ResponseWriter, r *http.Request, run 
 	if pr != nil {
 		create.MRIID, create.MRBaseSHA = pr.IID, pr.BaseSHA
 	}
-	p, err := s.store.CreatePipeline(r.Context(), create,
+	p, err := s.store.CreatePipeline(ctx, create,
 		jobs, configVersion, opts.AutoCancel, opts.FailFast)
 	if err != nil {
 		slog.Error("webhook pipeline create", "err", err)
-		writeErr(w, http.StatusInternalServerError, "failed to create pipeline")
-		return false
+		return nil, http.StatusInternalServerError, errors.New("failed to create pipeline")
 	}
-	slog.Info("pipeline triggered via webhook", "repo", repo, "ref", ref, "pipeline", p.ID, "config_source", cfgSource)
-	writeJSON(w, http.StatusCreated, map[string]any{"pipeline": p})
-	return true
+	s.nudgeNativeChanges(ctx, repo, ref)
+	return p, http.StatusCreated, nil
 }
 
 // dedupDelivery records this webhook delivery and reports whether processing
@@ -436,13 +490,39 @@ func (s *Server) dedupDelivery(w http.ResponseWriter, r *http.Request, provider,
 	return true, created
 }
 
+// defaultMaxWebhookBytes is GitHub's documented 25 MB payload cap. A body is
+// never truncated: truncating it silently broke the HMAC check for large pushes.
+const defaultMaxWebhookBytes = 25 << 20
+
+// readWebhookBody reads the whole request body up to WEBHOOK_MAX_BYTES
+// (default 25 MiB). A larger body is rejected with 413 rather than cut short,
+// so signature verification always runs over the exact bytes the provider
+// signed.
+func (s *Server) readWebhookBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	max := s.maxWebhookBytes
+	if max <= 0 {
+		max = defaultMaxWebhookBytes
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, max+1))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "unreadable body")
+		return nil, false
+	}
+	if int64(len(body)) > max {
+		slog.Warn("webhook body over limit", "bytes_limit", max, "path", r.URL.Path)
+		writeErr(w, http.StatusRequestEntityTooLarge,
+			"webhook payload exceeds WEBHOOK_MAX_BYTES ("+strconv.FormatInt(max, 10)+" bytes)")
+		return nil, false
+	}
+	return body, true
+}
+
 // githubWebhook handles push and pull_request events. If WEBHOOK_SECRET is set,
 // the X-Hub-Signature-256 HMAC is verified. The X-GitHub-Event header selects
 // the handler; any other event is acknowledged (202) and ignored.
 func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "unreadable body")
+	body, ok := s.readWebhookBody(w, r)
+	if !ok {
 		return
 	}
 	if secret := os.Getenv("WEBHOOK_SECRET"); secret != "" {
@@ -454,6 +534,9 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Code review first: pull request and review events update the change
+	// whether or not they also start a pipeline.
+	s.ingestChanges(r, "github", body)
 	switch r.Header.Get("X-GitHub-Event") {
 	case "", "push":
 		s.githubPush(w, r, body)
@@ -490,6 +573,7 @@ func parseGitHubPush(body []byte) (webhookRun, error) {
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return webhookRun{}, err
 	}
+	isTag := strings.HasPrefix(payload.Ref, "refs/tags/")
 	ref := strings.TrimPrefix(payload.Ref, "refs/heads/")
 	ref = strings.TrimPrefix(ref, "refs/tags/")
 	var commitAuthor, commitMessage string
@@ -506,6 +590,7 @@ func parseGitHubPush(body []byte) (webhookRun, error) {
 		Repo: payload.Repository.FullName, Ref: ref, SHA: payload.After,
 		Actor: payload.Pusher.Name, Source: compiler.SourceWebhook,
 		CommitAuthor: commitAuthor, CommitMessage: commitMessage,
+		ExtraCtx: tagContext(isTag, ref),
 	}, nil
 }
 
@@ -646,6 +731,15 @@ func prActionTriggers(action string) bool {
 	return false
 }
 
+// tagContext marks a tag push: CI_COMMIT_TAG is set and CI_COMMIT_BRANCH is
+// left undefined, the same on every git host.
+func tagContext(isTag bool, name string) map[string]string {
+	if !isTag {
+		return nil
+	}
+	return map[string]string{"CI_COMMIT_TAG": name}
+}
+
 // mergeRequestContext builds the CI_MERGE_REQUEST_* context for a PR/MR pipeline.
 // It also pins CI_PIPELINE_SOURCE=merge_request so the value is present in job env
 // (Compile already sets it in the rules context from the source argument).
@@ -669,11 +763,13 @@ func bodyHash(body []byte) string {
 // payload shape). The X-Event-Key header selects the handler; any other event is
 // acknowledged (202) and ignored.
 func (s *Server) bitbucketWebhook(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "unreadable body")
+	body, ok := s.readWebhookBody(w, r)
+	if !ok {
 		return
 	}
+	// Code review: merge request, review and comment events update the change
+	// whether or not they also start a pipeline.
+	s.ingestChanges(r, "bitbucket", body)
 	switch r.Header.Get("X-Event-Key") {
 	case "", "repo:push":
 		s.bitbucketPush(w, r, body)
@@ -699,6 +795,7 @@ func parseBitbucketPush(body []byte) (webhookRun, bool, error) {
 			Changes []struct {
 				New struct {
 					Name   string `json:"name"`
+					Type   string `json:"type"` // branch | tag | named_branch | bookmark
 					Target struct {
 						Hash    string `json:"hash"`
 						Message string `json:"message"`
@@ -737,6 +834,7 @@ func parseBitbucketPush(body []byte) (webhookRun, bool, error) {
 		Repo: payload.Repository.FullName, Ref: change.Name, SHA: change.Target.Hash,
 		Actor: author, Source: compiler.SourceWebhook,
 		CommitAuthor: commitAuthor, CommitMessage: change.Target.Message,
+		ExtraCtx: tagContext(change.Type == "tag", change.Name),
 	}, true, nil
 }
 
@@ -883,7 +981,7 @@ func (s *Server) putRepoConfig(w http.ResponseWriter, r *http.Request) {
 	// Validate against a representative ref so broken YAML is rejected early.
 	// Templates referenced via include: are resolved against this repo's
 	// registered templates so an include of a missing template is caught here.
-	if _, err := compiler.Compile(req.Config, "main", compiler.SourcePush, s.store.TemplateResolver(r.Context(), req.Repo)); err != nil {
+	if _, err := compiler.CompileWith(req.Config, "main", compiler.SourcePush, s.store.CompileOpts(r.Context(), req.Repo)); err != nil {
 		writeErr(w, http.StatusBadRequest, "config error: "+err.Error())
 		return
 	}

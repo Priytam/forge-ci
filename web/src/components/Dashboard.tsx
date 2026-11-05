@@ -1,5 +1,6 @@
-import { useId, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { getStats } from "../api";
+import RangePicker, { useRange } from "./RangePicker";
 import { usePoll } from "../hooks/usePoll";
 
 function hourLabel(hour: string): string {
@@ -18,7 +19,7 @@ function StatTile({
   sublabel,
   valueClass,
   dot,
-  accent = "#8b949e",
+  accent = "var(--text-muted)",
 }: {
   value: ReactNode;
   label: string;
@@ -31,7 +32,7 @@ function StatTile({
   return (
     <div
       className="stat-tile"
-      style={{ "--accent": accent } as React.CSSProperties}
+      style={{ "--tile-accent": accent } as React.CSSProperties}
     >
       <div className={`stat-value ${valueClass ?? ""}`}>
         {value}
@@ -105,6 +106,15 @@ function MiniChart({
   const uid = useId().replace(/[^a-zA-Z0-9]/g, "");
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const [hover, setHover] = useState<number | null>(null);
+  // Real plot height, so end labels can be spaced in pixels (re-measured on resize).
+  const [plotPx, setPlotPx] = useState(140);
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => setPlotPx(el.clientHeight || 140));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [hours.length > 0]);
 
   const n = hours.length;
   if (n === 0) return null;
@@ -138,11 +148,14 @@ function MiniChart({
   const labelOrder = endLabelYs
     .map((_, i) => i)
     .sort((a, b) => endLabelYs[a] - endLabelYs[b]);
+  // The plot is stretched to its box, so a readable gap (~14px) is a different
+  // number of viewBox units on a short chart than on a tall one.
+  const labelGap = Math.max(10, (14 / plotPx) * 100);
   for (let k = 1; k < labelOrder.length; k++) {
     const prev = labelOrder[k - 1];
     const cur = labelOrder[k];
-    if (endLabelYs[cur] - endLabelYs[prev] < 14) {
-      endLabelYs[cur] = endLabelYs[prev] + 14;
+    if (endLabelYs[cur] - endLabelYs[prev] < labelGap) {
+      endLabelYs[cur] = endLabelYs[prev] + labelGap;
     }
   }
   const labelOverflow = Math.max(0, Math.max(...endLabelYs) - 98);
@@ -187,10 +200,10 @@ function MiniChart({
                   >
                     <stop
                       offset="0"
-                      stopColor={s.color}
+                      style={{ stopColor: s.color }}
                       stopOpacity={s.areaAlpha ?? 0.22}
                     />
-                    <stop offset="1" stopColor={s.color} stopOpacity="0" />
+                    <stop offset="1" style={{ stopColor: s.color }} stopOpacity="0" />
                   </linearGradient>
                 )
             )}
@@ -204,8 +217,8 @@ function MiniChart({
                 x2="100"
                 y2="0"
               >
-                <stop offset="0" stopColor={s.color} stopOpacity="0.25" />
-                <stop offset="1" stopColor={s.color} stopOpacity="1" />
+                <stop offset="0" style={{ stopColor: s.color }} stopOpacity="0.25" />
+                <stop offset="1" style={{ stopColor: s.color }} stopOpacity="1" />
               </linearGradient>
             ))}
           </defs>
@@ -238,7 +251,7 @@ function MiniChart({
               x2={xOf(hover)}
               y1={0}
               y2={100}
-              stroke="rgba(255,255,255,0.15)"
+              style={{ stroke: "var(--border-strong)" }}
               strokeWidth={1}
               vectorEffect="non-scaling-stroke"
             />
@@ -303,14 +316,27 @@ function MiniChart({
 
 /* ---------------- Dashboard ---------------- */
 
+/** "▲4 vs last week" for a current/previous pair; null when nothing to compare. */
+function delta(cur: number, prev: number | undefined, unit = ""): { text: string; up: boolean } | null {
+  if (prev == null || prev < 0 || cur < 0) return null;
+  const d = cur - prev;
+  if (d === 0) return { text: "same as before", up: true };
+  return { text: `${d > 0 ? "▲" : "▼"}${Math.abs(d)}${unit} vs previous`, up: d > 0 };
+}
+
 export default function Dashboard() {
-  const { data } = usePoll(getStats, 5000);
+  const [range, setRange] = useRange();
+  const fetcher = useCallback(() => getStats(range), [range]);
+  const { data } = usePoll(fetcher, 5000);
 
   if (!data) return null;
   const { now } = data;
 
-  const rate = now.success_rate_24h;
-  const finished = now.finished_24h ?? 0;
+  const rangeLabel = range === "24h" ? "24h" : range === "7d" ? "7 days" : "30 days";
+  const rate = data.totals?.success_rate ?? now.success_rate_24h;
+  const finished = data.totals?.finished ?? now.finished_24h ?? 0;
+  const rateDelta = delta(rate, data.previous?.success_rate, "pt");
+  const runsDelta = delta(data.totals?.pipelines ?? 0, data.previous?.pipelines);
   const rateClass =
     rate < 0 ? "" : rate >= 90 ? "stat-good" : rate >= 70 ? "stat-warn" : "stat-bad";
 
@@ -318,30 +344,41 @@ export default function Dashboard() {
 
   return (
     <div className="dash">
+      <div className="page-head dash-head">
+        <h1>Overview</h1>
+        <div className="page-head-actions">
+          {runsDelta && (
+            <span className="muted">
+              {data.totals.pipelines} pipeline{data.totals.pipelines === 1 ? "" : "s"} in the last {rangeLabel} · {runsDelta.text}
+            </span>
+          )}
+          <RangePicker value={range} onChange={setRange} />
+        </div>
+      </div>
       <div className="stat-grid">
         <StatTile
           value={now.running_jobs}
           label="Jobs running"
           dot={now.running_jobs > 0}
-          accent="#58a6ff"
+          accent="var(--accent)"
         />
-        <StatTile value={now.pending_jobs} label="Queued" accent="#8b949e" />
+        <StatTile value={now.pending_jobs} label="Queued" accent="var(--text-muted)" />
         <StatTile
           value={now.blocked_jobs}
           label="Awaiting approval"
           valueClass={now.blocked_jobs > 0 ? "stat-blocked" : ""}
-          accent="#d29922"
+          accent="var(--warning)"
         />
         <StatTile
           value={now.online_runners}
           label="Runners online"
-          accent="#3fb950"
+          accent="var(--success)"
         />
         <StatTile
           value={now.active_executors}
           label="Executors in flight"
           sublabel="forked runners/pods"
-          accent="#bc8cff"
+          accent="var(--neutral)"
         />
         <StatTile
           value={
@@ -356,51 +393,52 @@ export default function Dashboard() {
               </>
             )
           }
-          label="Success rate 24h"
+          label={`Success rate ${rangeLabel}`}
           /* The sample size sits beside the percentage: without it, 0% of one
              run is indistinguishable from 0% of two hundred. */
           sublabel={
             rate < 0
               ? "no runs finished yet"
-              : now.blocked_jobs > 0
-                ? `${now.blocked_jobs} still awaiting approval`
-                : undefined
+              : rateDelta
+                ? rateDelta.text
+                : now.blocked_jobs > 0
+                  ? `${now.blocked_jobs} still awaiting approval`
+                  : undefined
           }
           valueClass={rateClass}
           accent={
             rate < 0
-              ? "#8b949e"
+              ? "var(--text-muted)"
               : rate >= 90
-                ? "#3fb950"
+                ? "var(--success)"
                 : rate >= 70
-                  ? "#d29922"
-                  : "#f85149"
+                  ? "var(--warning)"
+                  : "var(--danger)"
           }
         />
       </div>
 
       <MiniChart
-        title="Activity (24h)"
+        title={`Activity (${rangeLabel})`}
         hours={hours}
         legend
-        endLabels
         series={[
           {
             name: "Passed",
-            color: "#3fb950",
+            color: "var(--success)",
             values: data.pipelines.map((b) => b.success),
             area: true,
             areaAlpha: 0.2,
           },
           {
             name: "Failed",
-            color: "#f85149",
+            color: "var(--danger)",
             values: data.pipelines.map((b) => b.failed),
             area: false,
           },
           {
             name: "Jobs",
-            color: "#58a6ff",
+            color: "var(--accent)",
             values: data.jobs.map((b) => b.count),
             area: true,
             areaAlpha: 0.08,

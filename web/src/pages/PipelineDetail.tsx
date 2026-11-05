@@ -1,3 +1,4 @@
+import Skeleton from "../components/ui/Skeleton";
 import {
   useCallback,
   useEffect,
@@ -15,17 +16,24 @@ import {
   sourceLabel,
   triggerVerb,
   commitSubject,
+  getLiveSummary,
   type Job,
+  type LiveSummary,
   type Pipeline,
 } from "../api";
 import { usePoll } from "../hooks/usePoll";
-import StatusBadge from "../components/StatusBadge";
 import { StatusIcon } from "../components/StageDots";
 import ConfigChip from "../components/ConfigChip";
 import Avatar, { displayName } from "../components/Avatar";
 import ApprovalGate from "../components/ApprovalGate";
 import PlayButton from "../components/PlayButton";
 import PipelineActions from "../components/PipelineActions";
+import JobListView from "../components/JobListView";
+import RepoHeader from "../components/RepoHeader";
+import { StatusBar } from "../components/review/ui";
+import { HealthIcon, liveLink } from "../components/live/ui";
+import type { Tone } from "../components/ui/Pill";
+import type { IconName } from "../components/Icon";
 
 interface Stage {
   name: string;
@@ -36,6 +44,62 @@ interface Stage {
 interface Edge {
   key: string;
   d: string;
+  /** a Deploy → Live edge */
+  live?: boolean;
+}
+
+interface Box {
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+}
+
+/**
+ * SVG path for a needs edge from (x1,y1) to (x2,y2). A plain S-curve when the
+ * way is clear; when cards of an in-between column sit across it, the edge
+ * drops into the nearest free gap between rows, runs along it past those
+ * cards, and curves into its target — so it never looks attached to a job it
+ * merely passes.
+ */
+export function edgePath(x1: number, y1: number, x2: number, y2: number, boxes: Box[]): string {
+  const between = boxes.filter((b) => b.left > x1 + 2 && b.right < x2 - 2);
+  const crosses = (y: number) => between.some((b) => y > b.top - 3 && y < b.bottom + 3);
+  const bend = Math.max(24, Math.abs(x2 - x1) * 0.5);
+  const straight = `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 - bend} ${y2}, ${x2} ${y2}`;
+  if (between.length === 0) return straight;
+  // Sample the S-curve; if it clears every in-between card, keep it.
+  let blocked = false;
+  for (let t = 0.1; t < 1; t += 0.1) {
+    const u = 1 - t;
+    const x = u * u * u * x1 + 3 * u * u * t * (x1 + bend) + 3 * u * t * t * (x2 - bend) + t * t * t * x2;
+    const y = u * u * u * y1 + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t * t * t * y2;
+    if (between.some((b) => x > b.left && x < b.right && y > b.top - 3 && y < b.bottom + 3)) {
+      blocked = true;
+      break;
+    }
+  }
+  if (!blocked) return straight;
+  // Free horizontal lanes: just above or below each in-between card.
+  const lanes = between.flatMap((b) => [b.top - 6, b.bottom + 6]).filter((y) => y > 2 && !crosses(y));
+  if (lanes.length === 0) return straight;
+  const lane = lanes.reduce((best, y) => (Math.abs(y - y1) < Math.abs(best - y1) ? y : best));
+  const left = Math.min(...between.map((b) => b.left));
+  const right = Math.max(...between.map((b) => b.right));
+  const inX = Math.max(x1 + 12, left - 14);
+  const outX = Math.min(x2 - 12, right + 14);
+  return (
+    `M ${x1} ${y1} C ${(x1 + inX) / 2} ${y1}, ${(x1 + inX) / 2} ${lane}, ${inX} ${lane} ` +
+    `L ${outX} ${lane} C ${(outX + x2) / 2} ${lane}, ${(outX + x2) / 2} ${y2}, ${x2} ${y2}`
+  );
+}
+
+/** A job's run time for its pill: "42s", "3m 05s", or "1h 02m"; live while running. */
+function jobTook(start: string, end: string | null): string {
+  const s = Math.max(0, Math.round(((end ? new Date(end).getTime() : Date.now()) - new Date(start).getTime()) / 1000));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
+  return `${Math.floor(s / 3600)}h ${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}m`;
 }
 
 function groupStages(jobs: Job[]): Stage[] {
@@ -111,7 +175,54 @@ function groupByDepth(jobs: Job[]): Stage[] {
   return columns;
 }
 
-type GroupMode = "stage" | "deps";
+type GroupMode = "stage" | "deps" | "list";
+
+/** What the status bar says about a run: its outcome in words, and how
+ *  many of its jobs have finished. */
+function runStatus(status: string, jobs: Job[]) {
+  const total = jobs.length;
+  const finished = jobs.filter((j) => isTerminalStatus(j.status));
+  const progress = { done: finished.length, total };
+  const failed = jobs.filter((j) => j.status === "failed" && !j.allow_failure);
+  const waiting = jobs.filter((j) => j.status === "blocked");
+  const starts = jobs.map((j) => j.started_at).filter(Boolean) as string[];
+  const ends = jobs.map((j) => j.finished_at).filter(Boolean) as string[];
+  const took =
+    starts.length && ends.length
+      ? duration(starts.sort()[0], ends.sort()[ends.length - 1])
+      : null;
+  const names = (js: Job[]) =>
+    js.slice(0, 3).map((j) => j.name).join(", ") +
+    (js.length > 3 ? ` and ${js.length - 3} more` : "");
+  const out = (tone: Tone, icon: IconName, title: string, detail?: string) => ({
+    tone,
+    icon,
+    title,
+    detail,
+    progress,
+  });
+  switch (status) {
+    case "success":
+      return out("success", "ok", took ? `Passed in ${took}` : "Passed", `${total} job${total === 1 ? "" : "s"} passed`);
+    case "failed":
+      return out("danger", "blocked", `${failed.length || "Some"} of ${total} jobs failed`, failed.length ? names(failed) : undefined);
+    case "canceled":
+      return out("neutral", "closed", "Canceled", `${finished.length} of ${total} jobs had finished`);
+    case "blocked": {
+      const manual = waiting.length > 0 && waiting.every((j) => j.manual);
+      return out(
+        "warning",
+        "pause",
+        manual ? "Waiting for someone to start a job" : "Waiting for approval",
+        waiting.length ? `${manual ? "Press play on" : "Needs a go-ahead"}: ${names(waiting)}` : undefined
+      );
+    }
+    case "running":
+      return out("accent", "activity", "Running", `${finished.length} of ${total} jobs done`);
+    default:
+      return out("neutral", "clock", "Queued", "Waiting for a runner");
+  }
+}
 
 /**
  * authorDiffers reports whether the commit author is a DIFFERENT person from
@@ -136,14 +247,15 @@ export default function PipelineDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const mode: GroupMode = searchParams.get("group") === "deps" ? "deps" : "stage";
+  const groupParam = searchParams.get("group");
+  const mode: GroupMode = groupParam === "deps" || groupParam === "list" ? groupParam : "stage";
 
   const setMode = (next: GroupMode) => {
     const params = new URLSearchParams(searchParams);
-    if (next === "deps") {
-      params.set("group", "deps");
-    } else {
+    if (next === "stage") {
       params.delete("group");
+    } else {
+      params.set("group", next);
     }
     setSearchParams(params, { replace: true });
   };
@@ -174,6 +286,16 @@ export default function PipelineDetail() {
   }, []);
 
   const jobs = data?.jobs;
+  // Forge Live: what runs in each environment this pipeline deploys to.
+  const deployJobs = useMemo(() => (jobs ?? []).filter((j) => j.environment), [jobs]);
+  const repo = data?.pipeline.repo ?? "";
+  const liveFetcher = useCallback(
+    () => (repo && deployJobs.length ? getLiveSummary(repo) : Promise.resolve({} as Record<string, LiveSummary>)),
+    [repo, deployJobs.length]
+  );
+  const { data: live, refresh: refreshLive } = usePoll(liveFetcher, 10_000);
+  useEffect(() => refreshLive(), [liveFetcher, refreshLive]);
+  const liveRefs = useRef(new Map<number, HTMLAnchorElement>());
 
   const computeEdges = useCallback(() => {
     const board = boardRef.current;
@@ -184,6 +306,18 @@ export default function PipelineDetail() {
     const boardRect = board.getBoundingClientRect();
     const scrollLeft = board.scrollLeft;
     const scrollTop = board.scrollTop;
+
+    // Every card's box in board coordinates, so an edge that skips a column
+    // can be routed around the cards in between instead of through them.
+    const boxes = [...cardRefs.current.values()].map((el) => {
+      const r = el.getBoundingClientRect();
+      return {
+        left: r.left - boardRect.left + scrollLeft,
+        right: r.right - boardRect.left + scrollLeft,
+        top: r.top - boardRect.top + scrollTop,
+        bottom: r.bottom - boardRect.top + scrollTop,
+      };
+    });
 
     const next: Edge[] = [];
     for (const job of jobs) {
@@ -200,12 +334,22 @@ export default function PipelineDetail() {
         // end = left-center of the dependent job's card
         const x2 = toRect.left - boardRect.left + scrollLeft;
         const y2 = toRect.top + toRect.height / 2 - boardRect.top + scrollTop;
-        // cubic bezier: leaves the source pill horizontally, enters the
-        // target pill horizontally (GitLab-style rounded connector).
-        const bend = Math.max(24, Math.abs(x2 - x1) * 0.5);
-        const d = `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 - bend} ${y2}, ${x2} ${y2}`;
-        next.push({ key: `${needId}-${job.id}`, d });
+        next.push({ key: `${needId}-${job.id}`, d: edgePath(x1, y1, x2, y2, boxes) });
       }
+    }
+    // Deploy → Live: each deploy job to its environment's Live node.
+    for (const [jobId, liveEl] of liveRefs.current) {
+      const fromEl = cardRefs.current.get(jobId);
+      if (!fromEl) continue;
+      const a = fromEl.getBoundingClientRect();
+      const b = liveEl.getBoundingClientRect();
+      next.push({
+        key: `live-${jobId}`,
+        live: true,
+        d: edgePath(
+          a.right - boardRect.left + scrollLeft, a.top + a.height / 2 - boardRect.top + scrollTop,
+          b.left - boardRect.left + scrollLeft, b.top + b.height / 2 - boardRect.top + scrollTop, boxes),
+      });
     }
     setEdges(next);
     setOverlaySize({ w: board.scrollWidth, h: board.scrollHeight });
@@ -214,7 +358,7 @@ export default function PipelineDetail() {
   // Recompute after every poll render and whenever the grouping changes...
   useLayoutEffect(() => {
     computeEdges();
-  }, [computeEdges, mode]);
+  }, [computeEdges, mode, live]);
 
   // ...and on window resize.
   useEffect(() => {
@@ -227,7 +371,7 @@ export default function PipelineDetail() {
     return <div className="error-banner">Failed to load pipeline: {error}</div>;
   }
   if (loading && !data) {
-    return <div className="muted">Loading pipeline…</div>;
+    return <Skeleton />;
   }
   if (!data) return null;
 
@@ -235,19 +379,12 @@ export default function PipelineDetail() {
 
   return (
     <div>
-      <div className="breadcrumbs">
-        <Link to="/">Repos</Link> <span className="crumb-sep">/</span>{" "}
-        <Link to={`/repos/${encodeURIComponent(pipeline.repo)}`}>
-          {pipeline.repo}
-        </Link>{" "}
-        <span className="crumb-sep">/</span>{" "}
-        <span className="mono">#{pipeline.id}</span>
-      </div>
+      <RepoHeader repo={pipeline.repo} tab="pipelines" />
 
-      <div className="card pipeline-head">
+      <div className="pipeline-head pipeline-head-v2">
         <div className="pipeline-head-main">
-          <h1>
-            {pipeline.repo} <span className="muted">·</span>{" "}
+          <h1 className="cr-title">
+            Pipeline <span className="cr-num">#{pipeline.id}</span>{" "}
             <span className="ref-tag">{pipeline.ref}</span>
           </h1>
           {/* What this run is. A bare sha says nothing; the subject line is the
@@ -293,10 +430,14 @@ export default function PipelineDetail() {
             {sourceLabel(pipeline.source) && (
               <span className="source-chip">{sourceLabel(pipeline.source)}</span>
             )}
+            {pipeline.coverage != null && (
+              <span className="source-chip" title="Mean coverage of the jobs that report one">
+                coverage {pipeline.coverage.toFixed(1)}%
+              </span>
+            )}
           </div>
         </div>
         <div className="pipeline-head-side">
-          <StatusBadge status={pipeline.status} />
           <PipelineActions
             pipelineId={pipeline.id}
             repo={pipeline.repo}
@@ -305,6 +446,8 @@ export default function PipelineDetail() {
           />
         </div>
       </div>
+
+      <StatusBar {...runStatus(pipeline.status, data.jobs)} />
 
       {error && <div className="error-banner">Refresh failed: {error}</div>}
 
@@ -325,9 +468,19 @@ export default function PipelineDetail() {
           >
             Job dependencies
           </button>
+          <button
+            type="button"
+            className={mode === "list" ? "seg-btn seg-active" : "seg-btn"}
+            onClick={() => setMode("list")}
+          >
+            List &amp; filter
+          </button>
         </div>
       </div>
 
+      {mode === "list" && <JobListView jobs={data.jobs} pipelineId={pipeline.id} />}
+
+      {mode !== "list" && (
       <div
         className={mode === "deps" ? "board board-deps" : "board"}
         ref={boardRef}
@@ -340,7 +493,7 @@ export default function PipelineDetail() {
           aria-hidden="true"
         >
           {edges.map((e) => (
-            <path key={e.key} d={e.d} className="dag-edge" />
+            <path key={e.key} d={e.d} className={e.live ? "dag-edge dag-edge-live" : "dag-edge"} />
           ))}
         </svg>
         <div className="stages">
@@ -363,6 +516,8 @@ export default function PipelineDetail() {
                   allowedFail ? "failed (allowed to fail)" : job.status,
                   isTerminalStatus(job.status) && dur ? dur : null,
                   job.environment,
+                  job.coverage != null ? `coverage ${job.coverage}%` : null,
+                  job.status_reason,
                 ]
                   .filter(Boolean)
                   .join(" · ");
@@ -391,9 +546,17 @@ export default function PipelineDetail() {
                         status={allowedFail ? "warning" : job.status}
                       />
                       <span className="job-pill-name">{job.name}</span>
+                      {job.started_at && (
+                        <span className="job-pill-time">{jobTook(job.started_at, job.finished_at)}</span>
+                      )}
                       {job.allow_failure && (
                         <span className="allowfail-tag" title="allowed to fail">
                           AF
+                        </span>
+                      )}
+                      {job.coverage != null && (
+                        <span className="allowfail-tag" title={`coverage ${job.coverage}%`}>
+                          {Math.round(job.coverage)}%
                         </span>
                       )}
                     </div>
@@ -410,6 +573,10 @@ export default function PipelineDetail() {
                             jobId={job.id}
                             approvals={job.approvals}
                             required={job.required_approvals}
+                            requiredGroup={job.required_group}
+                            requiredGroupApprovals={job.required_group_approvals}
+                            groupApprovals={job.group_approvals}
+                            groupMembers={job.group_members}
                             status={job.status}
                             onDone={refresh}
                           />
@@ -421,8 +588,46 @@ export default function PipelineDetail() {
               })}
             </div>
           ))}
+          {deployJobs.length > 0 && (
+            <div className="stage-col lv-live-col">
+              <div className="stage-title">Live</div>
+              {deployJobs.map((job) => (
+                <LiveNode
+                  key={job.id}
+                  env={job.environment!}
+                  repo={pipeline.repo}
+                  summary={live?.[job.environment!]}
+                  nodeRef={(el) => {
+                    if (el) liveRefs.current.set(job.id, el);
+                    else liveRefs.current.delete(job.id);
+                  }}
+                />
+              ))}
+            </div>
+          )}
         </div>
       </div>
+      )}
     </div>
+  );
+}
+
+/** The node after a deploy job: what runs in its environment now. */
+function LiveNode({ env, repo, summary, nodeRef }: {
+  env: string;
+  repo: string;
+  summary?: LiveSummary;
+  nodeRef: (el: HTMLAnchorElement | null) => void;
+}) {
+  const bad = summary ? summary.apps - (summary.counts.Healthy ?? 0) : 0;
+  return (
+    <Link ref={nodeRef} to={liveLink(env, repo)} className={`job-pill lv-live-node${summary ? "" : " lv-live-none"}`}
+      title={summary ? `Live in ${env}: ${Object.entries(summary.counts).map(([h, n]) => `${n} ${h}`).join(", ")}` : `Nothing reported in ${env} yet`}>
+      {summary ? <HealthIcon health={summary.health} size={14} /> : <span className="lv-ic lv-tone-neutral">◌</span>}
+      <span className="job-pill-name">{env}</span>
+      <span className="job-pill-time">
+        {summary ? (bad ? `${bad} of ${summary.apps} ${summary.health.toLowerCase()}` : `${summary.apps} healthy`) : "no live apps"}
+      </span>
+    </Link>
   );
 }

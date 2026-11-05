@@ -38,10 +38,15 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
-// FromEnv builds the configured store. ARTIFACT_STORE=s3 selects the
-// S3-compatible backend; anything else falls back to local disk.
+// FromEnv builds the configured store. ARTIFACT_STORE selects the backend:
+// "s3" (any S3-compatible service: AWS, GCS interop, MinIO, Ceph, R2...),
+// "azure" (Azure Blob Storage, see azure.go), anything else local disk.
 func FromEnv() (Store, error) {
-	if envOr("ARTIFACT_STORE", "local") != "s3" {
+	switch envOr("ARTIFACT_STORE", "local") {
+	case "s3":
+	case "azure":
+		return newAzureFromEnv()
+	default:
 		return NewLocal(envOr("ARTIFACTS_DIR", "data/artifacts")), nil
 	}
 	endpoint := os.Getenv("S3_ENDPOINT") // e.g. s3.amazonaws.com, storage.googleapis.com, minio:9000

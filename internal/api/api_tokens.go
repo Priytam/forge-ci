@@ -21,6 +21,7 @@ import (
 
 const (
 	apiTokenProvider       = "api-token"
+	serviceAccountProvider = "service-account"
 	defaultTokenLifetime   = 90 // days, when the caller names no lifetime
 	tokenPolicyCacheMaxAge = 5 * time.Second
 )
@@ -66,6 +67,10 @@ func (s *Server) tokenSession(r *http.Request) *store.Session {
 		return nil
 	}
 	sess := &store.Session{Email: t.Owner, Name: t.OwnerName, Provider: apiTokenProvider}
+	if t.ServiceAccountID != nil {
+		sess.Provider = serviceAccountProvider
+		sess.ServiceAdmin = t.ServiceAdmin
+	}
 	if t.ExpiresAt != nil {
 		sess.Expires = *t.ExpiresAt
 	}
@@ -114,7 +119,7 @@ func (s *Server) createAPIToken(w http.ResponseWriter, r *http.Request) {
 			"API tokens act on behalf of a signed-in user — enable SSO and sign in first")
 		return
 	}
-	if sess.Provider == apiTokenProvider {
+	if sess.Provider == apiTokenProvider || sess.Provider == serviceAccountProvider {
 		writeErr(w, http.StatusForbidden, "API tokens cannot create other tokens — sign in to the UI")
 		return
 	}

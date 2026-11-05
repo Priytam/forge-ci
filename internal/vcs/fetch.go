@@ -14,7 +14,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -78,91 +77,17 @@ func (f *Fetcher) FetchFile(ctx context.Context, req FetchRequest) (content []by
 	if path == "" {
 		path = DefaultConfigPath
 	}
-	// CodeCommit is handled before splitRepo: its repository names are a single
-	// segment with no owner/ prefix, and it reads over a SigV4-signed API call
-	// rather than an HTTP request with an Authorization header.
-	if req.Provider == "codecommit" {
-		repo, ok := ParseCodeCommitURL(req.CloneURL)
-		// An explicitly registered region/profile wins over whatever the clone URL
-		// encodes; the URL is the fall-back for URL-only registrations.
-		if req.Region != "" {
-			repo.Region = req.Region
-			ok = ok || repo.Name != ""
-		}
-		if req.Profile != "" {
-			repo.Profile = req.Profile
-		}
-		if !ok || repo.Region == "" || repo.Name == "" {
-			// Without a region there is nothing to call. This surfaces as an
-			// error rather than a silent miss so the misregistration is visible;
-			// ResolvePipelineConfig still logs it and falls back to the
-			// registered config rather than failing the pipeline outright.
-			return nil, false, fmt.Errorf("invalid codecommit clone URL %q "+
-				"(want codecommit::<region>://<repo>)", req.CloneURL)
-		}
-		return f.cc.getFile(ctx, repo, req.RoleARN, req.SHA, path)
+	repo := RepoRef{
+		Provider: req.Provider, Repo: req.Repo, CloneURL: req.CloneURL, Token: req.Token,
+		Region: req.Region, Profile: req.Profile, RoleARN: req.RoleARN,
 	}
-
-	owner, name, ok := splitRepo(req.Repo)
-	if !ok {
-		return nil, false, fmt.Errorf("invalid repo %q (want owner/name)", req.Repo)
+	p := Lookup(req.Provider)
+	if p.Name() == "git" && (!gitReachable(repo.CloneURL) || !gitAvailable()) {
+		return nil, false, nil // nothing to read from: fall back to the registered config
 	}
-
-	var reqURL, accept string
-	switch req.Provider {
-	case "github":
-		// contents API; raw media type returns the file bytes directly.
-		reqURL = fmt.Sprintf("%s/repos/%s/%s/contents/%s?ref=%s",
-			f.githubBase, owner, name, pathEscape(path), url.QueryEscape(req.SHA))
-		accept = "application/vnd.github.raw"
-	case "bitbucket":
-		// src endpoint returns the raw file bytes.
-		reqURL = fmt.Sprintf("%s/2.0/repositories/%s/%s/src/%s/%s",
-			f.bitbucketBase, owner, name, url.PathEscape(req.SHA), pathEscape(path))
-		accept = "*/*"
-	default:
-		// provider "other" (or unset) has no supported contents API — not found.
-		return nil, false, nil
-	}
-
-	r, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-	if err != nil {
-		return nil, false, err
-	}
-	if req.Token != "" {
-		r.Header.Set("Authorization", "Bearer "+req.Token)
-	}
-	r.Header.Set("Accept", accept)
-
-	resp, err := f.client.Do(r)
-	if err != nil {
-		return nil, false, err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // configs are small; cap at 1 MiB
-	switch {
-	case resp.StatusCode == http.StatusNotFound:
-		return nil, false, nil // file absent → fall back
-	case resp.StatusCode < 200 || resp.StatusCode >= 300:
-		// Status only — the body can echo request material; never the token.
-		return nil, false, fmt.Errorf("vcs: fetch %s failed: HTTP %d", path, resp.StatusCode)
-	}
-
-	// GitHub honors the raw media type and returns the file bytes. If a base or
-	// proxy instead returns the JSON contents object (base64-encoded), decode it.
-	if req.Provider == "github" && strings.Contains(resp.Header.Get("Content-Type"), "application/json") {
-		decoded, derr := decodeGitHubContents(body)
-		if derr != nil {
-			return nil, false, derr
-		}
-		return decoded, true, nil
-	}
-	return body, true, nil
+	return p.FetchFile(ctx, f, repo, req.SHA, path)
 }
 
-// decodeGitHubContents extracts the file bytes from a GitHub contents JSON
-// object (encoding: base64). GitHub wraps base64 content at 60 columns, so
-// newlines are stripped before decoding.
 func decodeGitHubContents(body []byte) ([]byte, error) {
 	var obj struct {
 		Content  string `json:"content"`

@@ -228,20 +228,23 @@ func (s *Store) RemoveMember(ctx context.Context, id int64) error {
 }
 
 // memberRole returns the user's role on a repo, or "" if not a member.
-// Usernames match case-insensitively, as in RepoAccess: SSO identities are
-// emails and members are usually added by hand.
+// It includes roles granted through the user's IdP groups. Usernames match
+// case-insensitively: SSO identities are emails and members are added by hand.
 func (s *Store) memberRole(ctx context.Context, repo, username string) (string, error) {
 	if username == "" {
 		return "", nil
 	}
 	var role string
 	err := s.pool.QueryRow(ctx,
-		`SELECT role FROM repo_members WHERE repo=$1 AND lower(username)=lower($2) LIMIT 1`,
-		repo, username).Scan(&role)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", nil
+		`SELECT role FROM repo_members WHERE repo=$1 AND lower(username)=lower($2)`, repo, username).Scan(&role)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return "", err
 	}
-	return role, err
+	g, err := s.groupRole(ctx, repo, username)
+	if err != nil {
+		return "", err
+	}
+	return higherRole(role, g), nil
 }
 
 // DefaultApproverRoles is who may approve when a rule names no roles. There is
@@ -259,18 +262,37 @@ func effectiveApproverRoles(roles []string) []string {
 	return roles
 }
 
+// repoHasMembers reports whether any membership exists for the repo. Repos
+// with no members run in bootstrap mode for retry/cancel/play and notifications.
+// Approvals do not use it: approver_roles is enforced on every repo.
+func (s *Store) repoHasMembers(ctx context.Context, repo string) (bool, error) {
+	var exists bool
+	err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM repo_members WHERE repo=$1)`, repo).Scan(&exists)
+	if err != nil || exists {
+		return exists, err
+	}
+	return s.repoHasGroupGrants(ctx, repo)
+}
+
 // resolveProtectedEnv returns the approval rule for (repo, env): the
 // repo-specific row if present, else the global (repo=”) default, else nil.
+// The job's environment is canonicalised the same way saving a rule is
+// (registry alias or case variant → registered name), so a job stored under
+// an old spelling never matches a weaker leftover rule.
 func (s *Store) resolveProtectedEnv(ctx context.Context, repo, name string) (*proto.ProtectedEnvironment, error) {
+	if policy, err := s.GetEnvPolicy(ctx); err == nil && len(policy.Environments) > 0 {
+		name = policy.Canonical(name)
+	}
 	var pe proto.ProtectedEnvironment
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, repo, name, required_approvals, approval_timeout_hours,
-		        approver_roles, allow_self_approval
+		        approver_roles, allow_self_approval, required_group, required_group_approvals
 		 FROM protected_environments
-		 WHERE name=$2 AND repo IN ('', $1)
-		 ORDER BY repo DESC LIMIT 1`, repo, name).
+		 WHERE lower(name)=lower($2) AND repo IN ('', $1)
+		 ORDER BY repo DESC, (name = $2) DESC LIMIT 1`, repo, name).
 		Scan(&pe.ID, &pe.Repo, &pe.Name, &pe.RequiredApprovals, &pe.ApprovalTimeoutHours,
-			&pe.ApproverRoles, &pe.AllowSelfApproval)
+			&pe.ApproverRoles, &pe.AllowSelfApproval, &pe.RequiredGroup, &pe.RequiredGroupApprovals)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -284,7 +306,7 @@ func (s *Store) resolveProtectedEnv(ctx context.Context, repo, name string) (*pr
 func (s *Store) ListProtectedEnvs(ctx context.Context, repo string) ([]proto.ProtectedEnvironment, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, repo, name, required_approvals, approval_timeout_hours,
-		        approver_roles, allow_self_approval
+		        approver_roles, allow_self_approval, required_group, required_group_approvals
 		 FROM protected_environments WHERE repo IN ('', $1) ORDER BY repo, name`, repo)
 	if err != nil {
 		return nil, err
@@ -294,13 +316,114 @@ func (s *Store) ListProtectedEnvs(ctx context.Context, repo string) ([]proto.Pro
 	for rows.Next() {
 		var pe proto.ProtectedEnvironment
 		if err := rows.Scan(&pe.ID, &pe.Repo, &pe.Name, &pe.RequiredApprovals,
-			&pe.ApprovalTimeoutHours, &pe.ApproverRoles, &pe.AllowSelfApproval); err != nil {
+			&pe.ApprovalTimeoutHours, &pe.ApproverRoles, &pe.AllowSelfApproval,
+			&pe.RequiredGroup, &pe.RequiredGroupApprovals); err != nil {
 			return nil, err
 		}
 		pe.ApproverRoles = effectiveApproverRoles(pe.ApproverRoles)
 		out = append(out, pe)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// With a registry in use, a rule whose name is no registered environment
+	// (nor an alias of one) can never match a job: say so.
+	if policy, perr := s.GetEnvPolicy(ctx); perr == nil && len(policy.Environments) > 0 {
+		for i := range out {
+			out[i].Inactive = policy.Resolve(out[i].Name) == nil
+		}
+	}
+	return out, nil
+}
+
+// FoldProtectedEnvRules merges approval rules saved under an alias or case
+// variant of a registered environment into the canonical rule, keeping the
+// stricter settings (more approvals, shorter timeout, self-approval off,
+// the group requirement), so a job can never fall through to a weaker
+// leftover. Runs at start and when the registry is saved. Returns how many
+// rules were folded.
+func (s *Store) FoldProtectedEnvRules(ctx context.Context) (int, error) {
+	policy, err := s.GetEnvPolicy(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return s.foldProtectedEnvRules(ctx, policy)
+}
+
+func (s *Store) foldProtectedEnvRules(ctx context.Context, policy *EnvPolicy) (int, error) {
+	if policy == nil || len(policy.Environments) == 0 {
+		return 0, nil
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, repo, name, required_approvals, approval_timeout_hours, approver_roles,
+		        allow_self_approval, required_group, required_group_approvals
+		 FROM protected_environments ORDER BY repo, id`)
+	if err != nil {
+		return 0, err
+	}
+	var all []proto.ProtectedEnvironment
+	for rows.Next() {
+		var pe proto.ProtectedEnvironment
+		if err := rows.Scan(&pe.ID, &pe.Repo, &pe.Name, &pe.RequiredApprovals, &pe.ApprovalTimeoutHours,
+			&pe.ApproverRoles, &pe.AllowSelfApproval, &pe.RequiredGroup, &pe.RequiredGroupApprovals); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		all = append(all, pe)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	byKey := map[string]*proto.ProtectedEnvironment{} // repo|canonical name → the rule already using the canonical name
+	for i := range all {
+		if all[i].Name == policy.Canonical(all[i].Name) {
+			byKey[all[i].Repo+"|"+all[i].Name] = &all[i]
+		}
+	}
+	folded := 0
+	for i := range all {
+		pe := all[i]
+		canonical := policy.Canonical(pe.Name)
+		if canonical == pe.Name {
+			continue
+		}
+		target, exists := byKey[pe.Repo+"|"+canonical]
+		if !exists {
+			if _, err := s.pool.Exec(ctx, `UPDATE protected_environments SET name=$2 WHERE id=$1`, pe.ID, canonical); err != nil {
+				return folded, err
+			}
+			all[i].Name = canonical
+			byKey[pe.Repo+"|"+canonical] = &all[i]
+			folded++
+			continue
+		}
+		// Merge into the canonical rule: strictest of each setting.
+		if pe.RequiredApprovals > target.RequiredApprovals {
+			target.RequiredApprovals = pe.RequiredApprovals
+		}
+		if pe.ApprovalTimeoutHours > 0 && (target.ApprovalTimeoutHours == 0 || pe.ApprovalTimeoutHours < target.ApprovalTimeoutHours) {
+			target.ApprovalTimeoutHours = pe.ApprovalTimeoutHours
+		}
+		target.AllowSelfApproval = target.AllowSelfApproval && pe.AllowSelfApproval
+		if target.RequiredGroup == "" && pe.RequiredGroup != "" {
+			target.RequiredGroup, target.RequiredGroupApprovals = pe.RequiredGroup, pe.RequiredGroupApprovals
+		} else if pe.RequiredGroup == target.RequiredGroup && pe.RequiredGroupApprovals > target.RequiredGroupApprovals {
+			target.RequiredGroupApprovals = pe.RequiredGroupApprovals
+		}
+		if _, err := s.pool.Exec(ctx,
+			`UPDATE protected_environments SET required_approvals=$2, approval_timeout_hours=$3,
+			        allow_self_approval=$4, required_group=$5, required_group_approvals=$6 WHERE id=$1`,
+			target.ID, target.RequiredApprovals, target.ApprovalTimeoutHours, target.AllowSelfApproval,
+			target.RequiredGroup, target.RequiredGroupApprovals); err != nil {
+			return folded, err
+		}
+		if _, err := s.pool.Exec(ctx, `DELETE FROM protected_environments WHERE id=$1`, pe.ID); err != nil {
+			return folded, err
+		}
+		folded++
+	}
+	return folded, nil
 }
 
 // UpsertProtectedEnv creates or updates a repo-scoped approval rule.
@@ -308,16 +431,19 @@ func (s *Store) UpsertProtectedEnv(ctx context.Context, pe proto.ProtectedEnviro
 	pe.ApproverRoles = effectiveApproverRoles(pe.ApproverRoles)
 	err := s.pool.QueryRow(ctx,
 		`INSERT INTO protected_environments
-		     (repo, name, required_approvals, approval_timeout_hours, approver_roles, allow_self_approval)
-		 VALUES ($1,$2,$3,$4,$5,$6)
+		     (repo, name, required_approvals, approval_timeout_hours, approver_roles, allow_self_approval,
+		      required_group, required_group_approvals)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
 		 ON CONFLICT (repo, name) DO UPDATE SET
 		     required_approvals = EXCLUDED.required_approvals,
 		     approval_timeout_hours = EXCLUDED.approval_timeout_hours,
 		     approver_roles = EXCLUDED.approver_roles,
-		     allow_self_approval = EXCLUDED.allow_self_approval
+		     allow_self_approval = EXCLUDED.allow_self_approval,
+		     required_group = EXCLUDED.required_group,
+		     required_group_approvals = EXCLUDED.required_group_approvals
 		 RETURNING id`,
 		pe.Repo, pe.Name, pe.RequiredApprovals, pe.ApprovalTimeoutHours,
-		pe.ApproverRoles, pe.AllowSelfApproval).Scan(&pe.ID)
+		pe.ApproverRoles, pe.AllowSelfApproval, pe.RequiredGroup, pe.RequiredGroupApprovals).Scan(&pe.ID)
 	return &pe, err
 }
 
@@ -331,7 +457,21 @@ func (s *Store) RepoAccess(ctx context.Context, repo, username string) (role str
 		                  WHERE repo=$1 AND lower(username)=lower($2) LIMIT 1), ''),
 		        EXISTS (SELECT 1 FROM repo_members WHERE repo=$1)`,
 		repo, username).Scan(&role, &hasMembers)
-	return role, hasMembers, err
+	if err != nil {
+		return "", false, err
+	}
+	// Roles granted through IdP group mappings count like direct membership.
+	g, err := s.groupRole(ctx, repo, username)
+	if err != nil {
+		return "", false, err
+	}
+	role = higherRole(role, g)
+	if !hasMembers {
+		if hasMembers, err = s.repoHasGroupGrants(ctx, repo); err != nil {
+			return "", false, err
+		}
+	}
+	return role, hasMembers, nil
 }
 
 // JobRepo returns the repo of the pipeline a job belongs to.
@@ -354,4 +494,24 @@ func (s *Store) PipelineRepo(ctx context.Context, pipelineID int64) (string, err
 		return "", ErrNotFound
 	}
 	return repo, err
+}
+
+// DeleteProtectedEnv removes an approval rule. Deleting the global default
+// production rule is remembered, so startup doesn't re-create it.
+func (s *Store) DeleteProtectedEnv(ctx context.Context, id int64) (*proto.ProtectedEnvironment, error) {
+	var pe proto.ProtectedEnvironment
+	err := s.pool.QueryRow(ctx,
+		`DELETE FROM protected_environments WHERE id=$1 RETURNING id, repo, name`, id).Scan(&pe.ID, &pe.Repo, &pe.Name)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if pe.Repo == "" && pe.Name == "production" {
+		_, err = s.pool.Exec(ctx,
+			`INSERT INTO platform_settings (key, value) VALUES ('default_production_rule_removed', 'true')
+			 ON CONFLICT (key) DO NOTHING`)
+	}
+	return &pe, err
 }

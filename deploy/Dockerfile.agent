@@ -1,0 +1,17 @@
+FROM golang:1.25-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd ./cmd
+COPY internal ./internal
+ARG VERSION=dev
+RUN CGO_ENABLED=0 go build -ldflags "-s -w -X github.com/priytamjeepandey/forge-ci/internal/buildinfo.Version=${VERSION}" -o /out/forge-agent ./cmd/agent
+
+# git, kustomize and helm render applications' desired state from their
+# GitOps repository (Forge Live Diff and Sync); the rest of the agent needs
+# only CA certificates to reach the Kubernetes API, Google's APIs and Forge.
+FROM alpine:3
+RUN apk add --no-cache ca-certificates git kustomize helm && adduser -D -u 10001 forge
+USER 10001
+COPY --from=build /out/forge-agent /usr/local/bin/forge-agent
+ENTRYPOINT ["forge-agent"]

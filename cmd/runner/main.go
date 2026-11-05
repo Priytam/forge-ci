@@ -7,10 +7,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"github.com/priytamjeepandey/forge-ci/internal/buildinfo"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -27,6 +31,7 @@ import (
 
 	"github.com/priytamjeepandey/forge-ci/internal/executor"
 	"github.com/priytamjeepandey/forge-ci/internal/proto"
+	"github.com/priytamjeepandey/forge-ci/internal/secrets"
 	"github.com/priytamjeepandey/forge-ci/internal/vcs"
 )
 
@@ -74,8 +79,14 @@ func main() {
 		tagsFlag = flag.String("tags", envOr("RUNNER_TAGS", ""), "comma-separated runner tags (jobs route by tag)")
 		token    = flag.String("token", envOr("RUNNER_TOKEN", ""), "runner auth token (required when the server runs RUNNER_AUTH=on)")
 		conc     = flag.Int("concurrency", concFromEnv(), "jobs to run in parallel (each forks its own executor)")
+		poolName = flag.String("pool", envOr("RUNNER_POOL", os.Getenv("FORGE_POOL")), "autoscaled pool this runner belongs to (shown on the Runners page)")
+		showVer  = flag.Bool("version", false, "print the runner version and exit")
 	)
 	flag.Parse()
+	if *showVer {
+		fmt.Println(buildinfo.Version)
+		return
+	}
 	if *conc < 1 {
 		*conc = 1
 	}
@@ -122,6 +133,13 @@ func main() {
 	slog.Info("forge-runner started", "id", *runnerID, "server", *server,
 		"executor", exec.Name(), "tags", tags, "concurrency", *conc, "drain_grace", grace)
 
+	// Runner tasks (diffs from a git mirror) run beside the job slots.
+	go taskLoop(drainCtx, c, *runnerID)
+
+	// Disk janitor: tidies Docker's disk before and after every job.
+	janitor = newDiskJanitor()
+	janitor.sweep(context.Background(), "at runner start")
+
 	// The manager stays resident; each slot forks work per acquired job
 	// (with the kubernetes executor, that fork is an ephemeral pod).
 	var wg sync.WaitGroup
@@ -129,9 +147,9 @@ func main() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			req := proto.AcquireRequest{RunnerID: *runnerID, Executor: exec.Name(), Tags: tags}
+			req := proto.AcquireRequest{RunnerID: *runnerID, Executor: exec.Name(), Tags: tags, Version: buildinfo.Version, Concurrency: *conc, Pool: *poolName}
 			for drainCtx.Err() == nil {
-				job, err := acquire(drainCtx, c, req)
+				job, action, err := acquire(drainCtx, c, req)
 				if err != nil {
 					if drainCtx.Err() == nil {
 						slog.Warn("acquire failed, retrying", "err", err)
@@ -140,9 +158,12 @@ func main() {
 					continue
 				}
 				if job == nil {
+					handleServerAction(drainCtx, c, action)
 					continue // long-poll timed out, poll again
 				}
+				inFlight.Add(1)
 				runJob(execCtx, drainCtx, c, exec, job)
+				inFlight.Add(-1)
 			}
 		}()
 	}
@@ -187,23 +208,85 @@ func concFromEnv() int {
 	return 1
 }
 
-func acquire(ctx context.Context, c *client, req proto.AcquireRequest) (*proto.RunnerJob, error) {
+// inFlight counts jobs this runner is executing across its slots, so a
+// self-update only happens when the whole runner is idle.
+var inFlight atomic.Int32
+
+// serverAction is what the server asked for on an empty acquire.
+type serverAction struct {
+	Action        string // "" | update | drain
+	ServerVersion string
+	Maintenance   bool
+}
+
+func acquire(ctx context.Context, c *client, req proto.AcquireRequest) (*proto.RunnerJob, serverAction, error) {
 	resp, err := c.postJSON(ctx, "/api/v1/runner/acquire", req)
 	if err != nil {
-		return nil, err
+		return nil, serverAction{}, err
 	}
 	defer resp.Body.Close()
 	switch resp.StatusCode {
 	case http.StatusNoContent:
-		return nil, nil
+		return nil, serverAction{
+			Action: resp.Header.Get("X-Forge-Runner-Action"), ServerVersion: resp.Header.Get("X-Forge-Server-Version"),
+			Maintenance: resp.Header.Get("X-Forge-Maintenance") == "on",
+		}, nil
 	case http.StatusOK:
 		var job proto.RunnerJob
 		if err := json.NewDecoder(resp.Body).Decode(&job); err != nil {
-			return nil, err
+			return nil, serverAction{}, err
 		}
-		return &job, nil
+		return &job, serverAction{}, nil
 	default:
-		return nil, fmt.Errorf("acquire: unexpected status %d", resp.StatusCode)
+		return nil, serverAction{}, fmt.Errorf("acquire: unexpected status %d", resp.StatusCode)
+	}
+}
+
+var (
+	lastActionLog = map[string]time.Time{}
+	actionMu      sync.Mutex
+	updating      atomic.Bool
+)
+
+// logOnce logs an action at most once a minute (the runner polls every few
+// seconds while draining).
+func logOnce(key string, level slog.Level, msg string, args ...any) {
+	actionMu.Lock()
+	defer actionMu.Unlock()
+	if time.Since(lastActionLog[key]) < time.Minute {
+		return
+	}
+	lastActionLog[key] = time.Now()
+	slog.Log(context.Background(), level, msg, args...)
+}
+
+// handleServerAction reacts to what the server asked for on an empty poll.
+func handleServerAction(ctx context.Context, c *client, a serverAction) {
+	switch {
+	case a.Maintenance:
+		logOnce("maintenance", slog.LevelInfo, "server is in maintenance mode; not taking jobs")
+	case a.Action == "drain":
+		logOnce("drain", slog.LevelInfo, "draining (asked by the server); finishing in-flight jobs", "in_flight", inFlight.Load())
+	case a.Action == "update":
+		if inFlight.Load() > 0 {
+			logOnce("update-wait", slog.LevelInfo, "update requested; waiting for in-flight jobs", "in_flight", inFlight.Load())
+			return
+		}
+		if !selfUpdateEnabled() {
+			logOnce("update-off", slog.LevelWarn, "update requested but RUNNER_SELF_UPDATE is not on; update this runner the way it was installed")
+			return
+		}
+		if a.ServerVersion != "" && a.ServerVersion == buildinfo.Version {
+			return // already there; the next poll clears the request
+		}
+		if !updating.CompareAndSwap(false, true) {
+			return
+		}
+		slog.Info("self-update: starting", "from", buildinfo.Version, "to", a.ServerVersion)
+		if err := selfUpdate(ctx, c, a.ServerVersion); err != nil {
+			slog.Error("self-update failed; keeping the current binary", "err", err)
+			updating.Store(false)
+		}
 	}
 }
 
@@ -292,12 +375,27 @@ func runJob(execCtx, drainCtx context.Context, c *client, exec executor.Executor
 		}
 	}
 
+	if line := janitor.sweep(jobCtx, "before the job"); line != "" {
+		logs.printf("%s", line)
+	}
+	// After the job, tidy again without holding the slot or the report.
+	defer func() { go janitor.sweep(context.Background(), "after the job") }()
+
 	status, exitCode := "success", 0
 	workdir, err := os.MkdirTemp("", "forge-job-*")
 	if err != nil {
 		workdir = "."
 	} else {
 		defer os.RemoveAll(workdir)
+	}
+	// Per-job run directory: the OIDC token file, fetched secrets and the
+	// Docker config live here. Mounted read-only into containers.
+	if runDir, err := os.MkdirTemp("", "forge-run-*"); err == nil {
+		_ = os.Chmod(runDir, 0o755) // readable by a non-root container user
+		job.RunDir = runDir
+		defer os.RemoveAll(runDir)
+	} else {
+		logs.printf("warning: could not create the run directory (%v)\n", err)
 	}
 
 	if job.CloneURL != "" {
@@ -327,7 +425,28 @@ func runJob(execCtx, drainCtx context.Context, c *client, exec executor.Executor
 		restoreCache(jobCtx, c, logs, job, workdir, restoreCacheKeys)
 	}
 
+	// Registry logins (registry_login: + DOCKER_AUTH_CONFIG) and external
+	// secrets (secrets:) come before the script, from the job's identity. A
+	// failure here fails the job: it must not run with half its secrets.
+	if err := prepareRegistryAuth(jobCtx, logs, exec, job); err != nil {
+		logs.printf("registry login failed: %v\n", err)
+		st, code := resolveInterruption("failed", 1)
+		finish(st, code)
+		return
+	}
+	if err := fetchSecrets(jobCtx, logs, exec, job); err != nil {
+		logs.printf("fetching secrets failed: %v\n", err)
+		st, code := resolveInterruption("failed", 1)
+		finish(st, code)
+		return
+	}
+
 	logs.printf("$ %s\n", job.Script)
+	// Refreshable OIDC token: keep the job's token in a file and rewrite it
+	// before it expires, so credentials built on the file outlive it.
+	stopTokens := startTokenRefresh(jobCtx, c, logs, exec, job)
+	defer stopTokens()
+
 	out, wait, err := exec.Start(jobCtx, job, workdir)
 	if err != nil {
 		status, exitCode = resolveInterruption("failed", 1)
@@ -377,6 +496,15 @@ func runJob(execCtx, drainCtx context.Context, c *client, exec executor.Executor
 	// them after a successful job so the server can parse pass/fail counts.
 	if status == "success" && len(job.ReportJUnitPaths) > 0 {
 		uploadJUnitReports(c, logs, job, workdir)
+	}
+	// Job outputs: the dotenv report (deploy URL/version/digest and variables
+	// for later jobs) and a coverage file. Sent before completion, which is
+	// when the server writes the deployment record.
+	if status == "success" && job.ReportDotenvPath != "" {
+		uploadWorkspaceFile(c, logs, job, workdir, job.ReportDotenvPath, "dotenv", "text/plain")
+	}
+	if status == "success" && job.CoverageReportPath != "" {
+		uploadWorkspaceFile(c, logs, job, workdir, job.CoverageReportPath, "coverage", "application/xml")
 	}
 	finish(status, exitCode)
 }
@@ -836,6 +964,136 @@ func uploadJUnitReports(c *client, logs *logStreamer, job *proto.RunnerJob, work
 	logs.printf("reports: uploaded %d junit file(s)\n", matched)
 }
 
+// prepareRegistryAuth writes the job's Docker config.json (DOCKER_AUTH_CONFIG
+// merged with cloud registry logins) into the run directory. The docker
+// executor pulls with it; the job sees it as DOCKER_CONFIG, so docker push /
+// buildx / crane / skopeo inside the job authenticate too.
+func prepareRegistryAuth(ctx context.Context, logs *logStreamer, ex executor.Executor, job *proto.RunnerJob) error {
+	if len(job.RegistryLogins) == 0 && job.Env["DOCKER_AUTH_CONFIG"] == "" {
+		return nil
+	}
+	if job.RunDir == "" {
+		return errors.New("no run directory for the Docker config")
+	}
+	cfg, err := secrets.DockerConfig(ctx, secrets.Env(job.Env), job.RegistryLogins)
+	if err != nil {
+		return err
+	}
+	if cfg == nil {
+		return nil
+	}
+	dir := filepath.Join(job.RunDir, "docker")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), cfg, 0o644); err != nil {
+		return err
+	}
+	// The minted passwords are secrets: mask them (and their base64 auth forms).
+	var parsed struct {
+		Auths map[string]struct {
+			Auth string `json:"auth"`
+		} `json:"auths"`
+	}
+	_ = json.Unmarshal(cfg, &parsed)
+	for _, a := range parsed.Auths {
+		logs.redact(a.Auth)
+		if raw, err := base64.StdEncoding.DecodeString(a.Auth); err == nil {
+			if _, pass, ok := strings.Cut(string(raw), ":"); ok && len(pass) >= 8 {
+				logs.redact(pass)
+			}
+		}
+	}
+	job.DockerConfigDir = dir
+	job.Env["DOCKER_CONFIG"] = executor.RunPath(ex, job, "docker")
+	delete(job.Env, "DOCKER_AUTH_CONFIG") // consumed; don't hand the raw JSON to the script
+	names := make([]string, 0, len(parsed.Auths))
+	for r := range parsed.Auths {
+		names = append(names, r)
+	}
+	sort.Strings(names)
+	logs.printf("registry login: %s\n", strings.Join(names, ", "))
+	return nil
+}
+
+// fetchSecrets resolves the job's secrets: block into variables (or files in
+// the run directory) and masks every value in the log.
+func fetchSecrets(ctx context.Context, logs *logStreamer, ex executor.Executor, job *proto.RunnerJob) error {
+	if len(job.Secrets) == 0 {
+		return nil
+	}
+	values, err := secrets.Resolve(ctx, secrets.Env(job.Env), job.Secrets)
+	if err != nil {
+		return err
+	}
+	names := make([]string, 0, len(values))
+	for name, v := range values {
+		names = append(names, name)
+		// Same rule as masked variables: a value under 8 characters would
+		// redact every occurrence of that string and mangle the log.
+		if len(v) >= 8 {
+			logs.redact(v)
+			job.RedactValues = append(job.RedactValues, v)
+		} else if v != "" {
+			logs.printf("secrets: %s is shorter than 8 characters and will not be masked in this log\n", name)
+		}
+		if job.Secrets[name].File {
+			if job.RunDir == "" {
+				return errors.New("no run directory for secret files")
+			}
+			dir := filepath.Join(job.RunDir, "secrets")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				return err
+			}
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(v), 0o644); err != nil {
+				return err
+			}
+			job.Env[name] = executor.RunPath(ex, job, "secrets/"+name)
+			continue
+		}
+		job.Env[name] = v
+	}
+	sort.Strings(names)
+	logs.printf("secrets: resolved %s\n", strings.Join(names, ", "))
+	return nil
+}
+
+// uploadWorkspaceFile posts one workspace file to /runner/jobs/{id}/<kind>.
+// A missing file or rejected upload is logged, never a job failure.
+func uploadWorkspaceFile(c *client, logs *logStreamer, job *proto.RunnerJob, workdir, rel, kind, contentType string) {
+	clean := filepath.Clean(strings.TrimSpace(rel))
+	if clean == "." || filepath.IsAbs(clean) || strings.HasPrefix(clean, "..") {
+		logs.printf("reports: skipping unsafe %s path %q\n", kind, rel)
+		return
+	}
+	data, err := os.ReadFile(filepath.Join(workdir, clean))
+	if err != nil {
+		logs.printf("reports: %s file %q not found\n", kind, rel)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		fmt.Sprintf("%s/api/v1/runner/jobs/%d/%s", c.base, job.ID, kind), bytes.NewReader(data))
+	if err != nil {
+		logs.printf("reports: %s request error: %v\n", kind, err)
+		return
+	}
+	req.Header.Set("Content-Type", contentType)
+	resp, err := c.do(req)
+	if err != nil {
+		logs.printf("reports: %s upload failed: %v\n", kind, err)
+		return
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode >= 300 {
+		logs.printf("reports: %s rejected (%d): %s\n", kind, resp.StatusCode, strings.TrimSpace(string(body)))
+		return
+	}
+	logs.printf("reports: %s uploaded: %s\n", kind, strings.TrimSpace(string(body)))
+}
+
 // logStreamer batches log bytes and flushes them to the server periodically.
 type logStreamer struct {
 	c     *client
@@ -936,4 +1194,105 @@ func sleep(ctx context.Context, d time.Duration) {
 	case <-ctx.Done():
 	case <-time.After(d):
 	}
+}
+
+// tokenRefreshEvery re-mints the per-job OIDC token well inside its
+// 15-minute lifetime.
+var tokenRefreshEvery = 5 * time.Minute
+
+const oidcTokenFile = "oidc-token"
+
+// startTokenRefresh writes the job's OIDC token to a file in a per-job run
+// directory, points FORGE_OIDC_TOKEN_FILE (and AWS_WEB_IDENTITY_TOKEN_FILE,
+// unless the job set it) at it, and refreshes it until the job ends. GCP
+// Workload Identity cred-configs (--credential-source-file) and the AWS SDKs
+// re-read the file whenever they refresh, so builds longer than the token's
+// lifetime keep working. Returns a stop function; a no-op when the job has no
+// token (OIDC disabled on the server).
+func startTokenRefresh(ctx context.Context, c *client, logs *logStreamer, ex executor.Executor, job *proto.RunnerJob) func() {
+	tok := job.Env["FORGE_OIDC_TOKEN"]
+	if tok == "" {
+		return func() {}
+	}
+	runDir := job.RunDir
+	if runDir == "" { // callers outside runJob (tests): make one here
+		dir, err := os.MkdirTemp("", "forge-run-*")
+		if err != nil {
+			logs.printf("warning: could not create the token directory (%v); FORGE_OIDC_TOKEN_FILE is unavailable\n", err)
+			return func() {}
+		}
+		_ = os.Chmod(dir, 0o755)
+		runDir, job.RunDir = dir, dir
+	}
+	write := func(t string) error {
+		tmp := filepath.Join(runDir, oidcTokenFile+".tmp")
+		if err := os.WriteFile(tmp, []byte(t), 0o644); err != nil {
+			return err
+		}
+		return os.Rename(tmp, filepath.Join(runDir, oidcTokenFile))
+	}
+	if err := write(tok); err != nil {
+		logs.printf("warning: could not write the token file (%v)\n", err)
+		return func() {}
+	}
+	path := executor.RunPath(ex, job, oidcTokenFile)
+	job.Env["FORGE_OIDC_TOKEN_FILE"] = path
+	if _, set := job.Env["AWS_WEB_IDENTITY_TOKEN_FILE"]; !set {
+		job.Env["AWS_WEB_IDENTITY_TOKEN_FILE"] = path
+	}
+
+	rctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		t := time.NewTicker(tokenRefreshEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-rctx.Done():
+				return
+			case <-t.C:
+			}
+			fresh, err := fetchJobToken(rctx, c, job.ID)
+			if err != nil {
+				slog.Warn("oidc token refresh failed", "job", job.ID, "err", err)
+				continue
+			}
+			logs.redact(fresh)
+			if err := write(fresh); err != nil {
+				slog.Warn("oidc token file write failed", "job", job.ID, "err", err)
+				continue
+			}
+			if u, ok := ex.(executor.RunFileUpdater); ok {
+				if err := u.UpdateRunFile(rctx, job, oidcTokenFile, []byte(fresh)); err != nil {
+					slog.Warn("oidc token push into job failed", "job", job.ID, "err", err)
+				}
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+		os.RemoveAll(runDir)
+	}
+}
+
+// fetchJobToken asks the server to re-mint the running job's OIDC token.
+func fetchJobToken(ctx context.Context, c *client, jobID int64) (string, error) {
+	resp, err := c.postJSON(ctx, fmt.Sprintf("/api/v1/runner/jobs/%d/oidc-token", jobID), nil)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("server returned %d", resp.StatusCode)
+	}
+	var out proto.OIDCTokenResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", err
+	}
+	if out.Token == "" {
+		return "", errors.New("empty token")
+	}
+	return out.Token, nil
 }

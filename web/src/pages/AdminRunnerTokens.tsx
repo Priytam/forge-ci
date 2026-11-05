@@ -1,3 +1,4 @@
+import Skeleton from "../components/ui/Skeleton";
 import { useCallback, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import {
@@ -150,16 +151,11 @@ export default function AdminRunnerTokens() {
 
   return (
     <div>
-      <div className="breadcrumbs">
-        <Link to="/">Repos</Link> <span className="crumb-sep">/</span>{" "}
-        <span>admin</span> <span className="crumb-sep">/</span> <span>runner tokens</span>
-      </div>
-
       <div className="page-head">
         <h1>Runner tokens</h1>
       </div>
 
-      <p className="muted">
+      <p className="muted page-lede">
         A runner needs one of these when the server is running with{" "}
         <code>RUNNER_AUTH=on</code> — pass it as <code>--token</code> (or
         <code> RUNNER_TOKEN</code>) when registering it. See{" "}
@@ -170,7 +166,7 @@ export default function AdminRunnerTokens() {
         <RevealPanel token={revealed} onDismiss={() => setRevealed(null)} />
       )}
 
-      <form className="inline-form" onSubmit={(e) => void onCreate(e)}>
+      <form className="card inline-form" onSubmit={(e) => void onCreate(e)}>
         <label className="field">
           <span>Description</span>
           <input
@@ -186,7 +182,7 @@ export default function AdminRunnerTokens() {
 
       {createError && <div className="error-banner">{createError}</div>}
       {error && <div className="error-banner">Failed to load tokens: {error}</div>}
-      {loading && !tokens && <div className="muted">Loading…</div>}
+      {loading && !tokens && <Skeleton />}
 
       {tokens && tokens.length === 0 && (
         <div className="empty card">No runner tokens yet.</div>
@@ -225,7 +221,7 @@ export default function AdminRunnerTokens() {
                     {!t.revoked && (
                       <button
                         type="button"
-                        className="btn btn-icon"
+                        className="btn btn-danger-quiet"
                         onClick={() => void onRevoke(t)}
                       >
                         Revoke

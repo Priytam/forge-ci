@@ -63,9 +63,18 @@ ALTER TABLE protected_environments
 ALTER TABLE protected_environments DROP CONSTRAINT IF EXISTS protected_environments_name_key;
 CREATE UNIQUE INDEX IF NOT EXISTS protected_env_repo_name_idx
     ON protected_environments (repo, name);
+-- platform_settings is defined here as well as below (same idempotent
+-- definition) so this seed can honour an admin having deleted the default
+-- rule: deleting it records 'default_production_rule_removed'.
+CREATE TABLE IF NOT EXISTS platform_settings (
+    key        TEXT        PRIMARY KEY,
+    value      JSONB       NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 INSERT INTO protected_environments (repo, name, required_approvals)
 SELECT '', 'production', 1
-WHERE NOT EXISTS (SELECT 1 FROM protected_environments WHERE repo='' AND name='production');
+WHERE NOT EXISTS (SELECT 1 FROM protected_environments WHERE repo='' AND name='production')
+  AND NOT EXISTS (SELECT 1 FROM platform_settings WHERE key='default_production_rule_removed');
 
 -- Repo membership: who is what on a repo. Enforced at the approval endpoint.
 -- When SSO is enforced the approver identity comes from the session (see
@@ -94,7 +103,7 @@ CREATE TABLE IF NOT EXISTS repo_configs (
 -- write-only through the API. While NO provider is enabled the API runs in
 -- open bootstrap mode; enabling any provider turns on session enforcement.
 CREATE TABLE IF NOT EXISTS sso_providers (
-    provider       TEXT PRIMARY KEY CHECK (provider IN ('google','microsoft','github')),
+    provider       TEXT PRIMARY KEY CHECK (provider IN ('google','microsoft','github','oidc','ldap')),
     enabled        BOOLEAN     NOT NULL DEFAULT FALSE,
     client_id      TEXT        NOT NULL DEFAULT '',
     client_secret  TEXT        NOT NULL DEFAULT '',
@@ -224,7 +233,7 @@ ALTER TABLE repo_registry ADD COLUMN IF NOT EXISTS github_app_installation_id TE
 -- because the new value only widens the allowed set.
 ALTER TABLE repo_registry DROP CONSTRAINT IF EXISTS repo_registry_provider_check;
 ALTER TABLE repo_registry ADD CONSTRAINT repo_registry_provider_check
-    CHECK (provider IN ('github','bitbucket','codecommit','other'));
+    CHECK (provider IN ('github','gitlab','bitbucket','gitea','codecommit','git','other'));
 ALTER TABLE repo_registry ADD COLUMN IF NOT EXISTS aws_region   TEXT NOT NULL DEFAULT '';
 ALTER TABLE repo_registry ADD COLUMN IF NOT EXISTS aws_profile  TEXT NOT NULL DEFAULT '';
 ALTER TABLE repo_registry ADD COLUMN IF NOT EXISTS aws_role_arn TEXT NOT NULL DEFAULT '';
@@ -743,3 +752,900 @@ ALTER TABLE pipelines ALTER COLUMN status SET NOT NULL;
 -- pipeline list filters by status across repos.
 CREATE INDEX IF NOT EXISTS pipelines_repo_status_idx ON pipelines (repo, status, id);
 CREATE INDEX IF NOT EXISTS pipelines_status_idx ON pipelines (status, id DESC);
+
+-- Environment registry (admin-managed, per server). Each row is one real
+-- environment: its canonical name, display order, tier (colour/meaning),
+-- aliases that mean the same environment (e.g. prd, prod → production), and
+-- the branches allowed to deploy to it (glob patterns, '*' matches anything;
+-- empty = any branch). An empty registry means "no policy": names are used as
+-- pipelines write them and any branch may deploy anywhere, as before.
+CREATE TABLE IF NOT EXISTS environment_registry (
+    name         TEXT    PRIMARY KEY,
+    position     INT     NOT NULL DEFAULT 0,
+    tier         TEXT    NOT NULL DEFAULT 'other'
+        CHECK (tier IN ('dev','staging','prod','other')),
+    aliases      TEXT[]  NOT NULL DEFAULT '{}',
+    allowed_refs TEXT[]  NOT NULL DEFAULT '{}',
+    description  TEXT    NOT NULL DEFAULT ''
+);
+
+-- Why a job ended without running (e.g. its branch may not deploy to its
+-- environment). Shown on the job and pipeline pages.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS status_reason TEXT NOT NULL DEFAULT '';
+
+-- Approval notifications: when a job starts waiting for environment approval
+-- the scheduler notifies the eligible approvers once (Slack and/or email, per
+-- the 'notifications' platform setting) and stamps this column. NULL = not
+-- notified yet; jobs blocked long ago are never back-filled.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS approval_notified_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS jobs_approval_unnotified_idx
+    ON jobs (blocked_at) WHERE status = 'blocked' AND NOT manual AND approval_notified_at IS NULL;
+
+-- resource_group: at most one job per (repo, resource_group) runs at a time
+-- (e.g. one production deploy). '' = no group. Enforced at acquire.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS resource_group TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS jobs_resource_group_active_idx
+    ON jobs (resource_group) WHERE resource_group <> '' AND status = 'running';
+
+-- Retry a single job within its pipeline: the retried job (and the downstream
+-- jobs that did not succeed) get NEW rows — fresh log, fresh attempt — and
+-- the old rows stay as history with superseded = TRUE and retry_of linking
+-- new → old. Only live (non-superseded) rows count for a pipeline's jobs, so
+-- the per-pipeline name uniqueness moves to a partial index.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS superseded BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS retry_of BIGINT REFERENCES jobs(id) ON DELETE SET NULL;
+ALTER TABLE jobs DROP CONSTRAINT IF EXISTS jobs_pipeline_id_name_key;
+CREATE UNIQUE INDEX IF NOT EXISTS jobs_pipeline_name_live_idx ON jobs (pipeline_id, name) WHERE NOT superseded;
+
+CREATE OR REPLACE FUNCTION forge_pipeline_status(pid BIGINT) RETURNS TEXT
+LANGUAGE sql STABLE AS $$
+    SELECT CASE
+        WHEN count(*) = 0 THEN 'created'
+        WHEN bool_or(j.status = 'failed' AND NOT j.allow_failure) THEN 'failed'
+        WHEN bool_or(j.status = 'canceled') THEN 'canceled'
+        WHEN bool_or(j.status IN ('running','pending')) THEN 'running'
+        WHEN bool_or(j.status = 'blocked') THEN 'blocked'
+        WHEN bool_or(j.status = 'created') THEN 'running'
+        ELSE 'success' END
+    FROM jobs j WHERE j.pipeline_id = pid AND NOT j.superseded
+$$;
+
+-- Approver groups: named lists of people (emails), admin-managed. An approval
+-- rule can require "N approvals, at least M from group X"; members of X may
+-- vote on that environment even without the repo role.
+CREATE TABLE IF NOT EXISTS approver_groups (
+    name        TEXT        PRIMARY KEY,
+    description TEXT        NOT NULL DEFAULT '',
+    members     TEXT[]      NOT NULL DEFAULT '{}',
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+ALTER TABLE protected_environments ADD COLUMN IF NOT EXISTS required_group TEXT NOT NULL DEFAULT '';
+ALTER TABLE protected_environments ADD COLUMN IF NOT EXISTS required_group_approvals INT NOT NULL DEFAULT 0;
+
+-- Service accounts: non-human identities for automation, owned by the org and
+-- managed by admins. Identity string is 'svc:<name>' — add it as a repo
+-- member to grant repo access. Their API tokens live in api_tokens with
+-- service_account_id set; a disabled account's tokens stop working at once.
+CREATE TABLE IF NOT EXISTS service_accounts (
+    id          BIGSERIAL   PRIMARY KEY,
+    name        TEXT        NOT NULL UNIQUE,
+    description TEXT        NOT NULL DEFAULT '',
+    is_admin    BOOLEAN     NOT NULL DEFAULT FALSE,
+    disabled    BOOLEAN     NOT NULL DEFAULT FALSE,
+    created_by  TEXT        NOT NULL DEFAULT '',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+ALTER TABLE api_tokens ADD COLUMN IF NOT EXISTS service_account_id BIGINT
+    REFERENCES service_accounts(id) ON DELETE CASCADE;
+
+-- Queue visibility: when a job last entered the queue (status → pending), by
+-- whichever path (promotion, approval, retry requeue, drain requeue). Feeds
+-- the runner load page and the forge_queue_* metrics.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS queued_at TIMESTAMPTZ;
+CREATE OR REPLACE FUNCTION forge_jobs_stamp_queued() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.status = 'pending' AND (TG_OP = 'INSERT' OR OLD.status IS DISTINCT FROM 'pending') THEN
+        NEW.queued_at := now();
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE OR REPLACE TRIGGER jobs_stamp_queued BEFORE INSERT OR UPDATE OF status ON jobs
+    FOR EACH ROW EXECUTE FUNCTION forge_jobs_stamp_queued();
+CREATE INDEX IF NOT EXISTS jobs_pending_queue_idx ON jobs (queued_at) WHERE status = 'pending';
+
+-- Runner cache affinity (opt-in per job: runner_affinity: true). A job's
+-- affinity_key ('' = none) names the work whose local caches it benefits
+-- from (repo + job name). After a successful run, runner_affinity remembers
+-- which runner did it; the next such job prefers that runner while it is
+-- online, and any runner may take it once it has waited the affinity window.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS affinity_key TEXT NOT NULL DEFAULT '';
+CREATE TABLE IF NOT EXISTS runner_affinity (
+    key        TEXT        PRIMARY KEY,
+    runner_id  TEXT        NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Template catalog: org-wide, versioned pipeline templates any repo can
+-- include as `template: name@version` (or `template: name` for the newest).
+-- Versions are immutable once published; a fix is a new version.
+CREATE TABLE IF NOT EXISTS template_catalog (
+    name         TEXT        NOT NULL,
+    version      TEXT        NOT NULL,
+    yaml         TEXT        NOT NULL,
+    description  TEXT        NOT NULL DEFAULT '',
+    published_by TEXT        NOT NULL DEFAULT '',
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (name, version)
+);
+
+-- Deploy records and promotion. A job's environment may carry a URL
+-- (environment: {name, url}); a job may write a dotenv report whose variables
+-- flow to the jobs that need it and whose DEPLOY_URL / DEPLOY_VERSION /
+-- DEPLOY_DIGEST fill the deployment record. A promotion pipeline redeploys an
+-- earlier deployment's build to another environment (pipelines.promoted_from
+-- = that deployment), and its deployment remembers where it came from.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS environment_url TEXT NOT NULL DEFAULT '';
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS report_dotenv   TEXT NOT NULL DEFAULT '';
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS dotenv          JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE deployments ADD COLUMN IF NOT EXISTS url     TEXT NOT NULL DEFAULT '';
+ALTER TABLE deployments ADD COLUMN IF NOT EXISTS version TEXT NOT NULL DEFAULT '';
+ALTER TABLE deployments ADD COLUMN IF NOT EXISTS digest  TEXT NOT NULL DEFAULT '';
+ALTER TABLE deployments ADD COLUMN IF NOT EXISTS promoted_from BIGINT REFERENCES deployments(id) ON DELETE SET NULL;
+ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS promoted_from BIGINT REFERENCES deployments(id) ON DELETE SET NULL;
+
+-- Coverage: from a coverage: /regex/ over the job log, or a Cobertura report.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS coverage_regex  TEXT NOT NULL DEFAULT '';
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS coverage_report TEXT NOT NULL DEFAULT '';
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS coverage        NUMERIC(6,2);
+
+-- Per environment: cancel a waiting deploy once a newer pipeline has started
+-- or finished deploying there (opt-in; see Store.CancelSupersededDeploys).
+ALTER TABLE environment_registry ADD COLUMN IF NOT EXISTS cancel_superseded BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- Identity: any OpenID Connect IdP ('oidc') and LDAP / Active Directory
+-- ('ldap') next to the built-in Google/Microsoft/GitHub buttons. The provider
+-- CHECK only WIDENS (existing rows stay valid); it is re-stated on every start
+-- so a database created before this change accepts the new providers.
+-- settings holds provider-specific, non-secret config (OIDC issuer, groups
+-- claim; LDAP URL, base DN, filters); client_secret holds the OIDC client
+-- secret or the LDAP bind password, encrypted.
+ALTER TABLE sso_providers DROP CONSTRAINT IF EXISTS sso_providers_provider_check;
+ALTER TABLE sso_providers ADD CONSTRAINT sso_providers_provider_check
+    CHECK (provider IN ('google','microsoft','github','oidc','ldap'));
+ALTER TABLE sso_providers ADD COLUMN IF NOT EXISTS settings JSONB NOT NULL DEFAULT '{}';
+
+-- The groups an identity provider last reported for a user, refreshed at
+-- every sign-in. Role resolution reads it by email, so group-granted roles
+-- apply to approvals and notifications too, not only to the signed-in request.
+CREATE TABLE IF NOT EXISTS user_groups (
+    email      TEXT        PRIMARY KEY,   -- lower-cased
+    provider   TEXT        NOT NULL,
+    groups     TEXT[]      NOT NULL DEFAULT '{}',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- IdP group → Forge role. A mapping either makes the group's members platform
+-- admins, or gives them a role on every repo matching repo_pattern ('*' = all,
+-- 'acme/*' = a namespace). provider '' matches a group from any provider.
+CREATE TABLE IF NOT EXISTS idp_group_mappings (
+    id             BIGSERIAL   PRIMARY KEY,
+    provider       TEXT        NOT NULL DEFAULT '',
+    idp_group      TEXT        NOT NULL,
+    platform_admin BOOLEAN     NOT NULL DEFAULT FALSE,
+    repo_pattern   TEXT        NOT NULL DEFAULT '',
+    role           TEXT        NOT NULL DEFAULT '',
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (platform_admin OR (repo_pattern <> '' AND role IN ('admin','owner','developer'))),
+    UNIQUE (provider, idp_group, platform_admin, repo_pattern)
+);
+
+-- External secrets and registry logins a job asks the runner for (batch 10).
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS secrets         JSONB  NOT NULL DEFAULT '{}';
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS registry_logins TEXT[] NOT NULL DEFAULT '{}';
+
+-- Notification routes (batch 11): where events go. kind is a notifier
+-- (slack | teams | webhook | email | ...), target its address (webhook URL
+-- or comma-separated emails; "approvers" = each eligible approver), secret
+-- the HMAC key for webhook signatures. Both encrypted at rest. events lists
+-- the event kinds the route takes; repo_pattern limits it ('*' = every repo).
+CREATE TABLE IF NOT EXISTS notification_routes (
+    id           BIGSERIAL   PRIMARY KEY,
+    name         TEXT        NOT NULL,
+    kind         TEXT        NOT NULL,
+    target       TEXT        NOT NULL DEFAULT '',
+    secret       TEXT        NOT NULL DEFAULT '',
+    events       TEXT[]      NOT NULL DEFAULT '{}',
+    repo_pattern TEXT        NOT NULL DEFAULT '*',
+    enabled      BOOLEAN     NOT NULL DEFAULT TRUE,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- Pipeline-level events are claimed once per (pipeline, event), like commit
+-- statuses; deploy events once per job.
+CREATE TABLE IF NOT EXISTS pipeline_notifications (
+    pipeline_id BIGINT      NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
+    event       TEXT        NOT NULL,
+    sent_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (pipeline_id, event)
+);
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS deploy_notified_at TIMESTAMPTZ;
+
+-- Runner autoscaling (batch 12): a pool is a set of identical runners
+-- (same tags) that a provider — kubernetes, docker, exec (any cloud via a
+-- command) — can grow and shrink. settings is provider config, encrypted
+-- (it may hold a Kubernetes token or the runner token); the status columns
+-- are what the loop last observed and did.
+CREATE TABLE IF NOT EXISTS runner_pools (
+    id                 BIGSERIAL   PRIMARY KEY,
+    name               TEXT        NOT NULL UNIQUE,
+    provider           TEXT        NOT NULL,
+    tags               TEXT[]      NOT NULL DEFAULT '{}',
+    min_runners        INT         NOT NULL DEFAULT 0,
+    max_runners        INT         NOT NULL DEFAULT 5,
+    jobs_per_runner    INT         NOT NULL DEFAULT 1,
+    scale_down_after_s INT         NOT NULL DEFAULT 600,
+    settings           TEXT        NOT NULL DEFAULT '',
+    enabled            BOOLEAN     NOT NULL DEFAULT TRUE,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- status
+    current_runners    INT         NOT NULL DEFAULT 0,
+    desired_runners    INT         NOT NULL DEFAULT 0,
+    pending_jobs       INT         NOT NULL DEFAULT 0,
+    last_action        TEXT        NOT NULL DEFAULT '',
+    last_error         TEXT        NOT NULL DEFAULT '',
+    last_scaled_at     TIMESTAMPTZ,
+    last_busy_at       TIMESTAMPTZ,
+    checked_at         TIMESTAMPTZ
+);
+
+-- Runner operations (batch 15): version reporting, drain, self-update
+-- requests; per-job retry conditions (retry: {max, when}).
+ALTER TABLE runners ADD COLUMN IF NOT EXISTS version             TEXT NOT NULL DEFAULT '';
+ALTER TABLE runners ADD COLUMN IF NOT EXISTS draining            BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE runners ADD COLUMN IF NOT EXISTS drain_requested_at  TIMESTAMPTZ;
+ALTER TABLE runners ADD COLUMN IF NOT EXISTS update_requested_at TIMESTAMPTZ;
+ALTER TABLE jobs    ADD COLUMN IF NOT EXISTS retry_when          TEXT[] NOT NULL DEFAULT '{always}';
+
+-- Observability (batch 16): webhook delivery log, hourly rollups for long
+-- history ranges.
+CREATE TABLE IF NOT EXISTS webhook_log (
+    id          BIGSERIAL   PRIMARY KEY,
+    received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    provider    TEXT        NOT NULL,
+    repo        TEXT        NOT NULL DEFAULT '',
+    event       TEXT        NOT NULL DEFAULT '',
+    status      INT         NOT NULL,
+    reason      TEXT        NOT NULL DEFAULT '',
+    delivery_id TEXT        NOT NULL DEFAULT '',
+    source_ip   TEXT        NOT NULL DEFAULT '',
+    pipeline_id BIGINT
+);
+CREATE INDEX IF NOT EXISTS webhook_log_repo_idx ON webhook_log (repo, id DESC);
+CREATE INDEX IF NOT EXISTS webhook_log_received_idx ON webhook_log (received_at);
+CREATE TABLE IF NOT EXISTS job_stats_hourly (
+    hour         TIMESTAMPTZ NOT NULL,
+    runner_id    TEXT        NOT NULL DEFAULT '',   -- '' = all runners
+    jobs_started INT         NOT NULL DEFAULT 0,
+    busy_seconds INT         NOT NULL DEFAULT 0,
+    wait_p50     DOUBLE PRECISION NOT NULL DEFAULT 0,
+    wait_p95     DOUBLE PRECISION NOT NULL DEFAULT 0,
+    dur_p50      DOUBLE PRECISION NOT NULL DEFAULT 0,
+    dur_p95      DOUBLE PRECISION NOT NULL DEFAULT 0,
+    finished     INT         NOT NULL DEFAULT 0,
+    failed       INT         NOT NULL DEFAULT 0,
+    PRIMARY KEY (hour, runner_id)
+);
+CREATE TABLE IF NOT EXISTS pipeline_stats_hourly (
+    hour    TIMESTAMPTZ NOT NULL,
+    repo    TEXT        NOT NULL,
+    success INT         NOT NULL DEFAULT 0,
+    failed  INT         NOT NULL DEFAULT 0,
+    other   INT         NOT NULL DEFAULT 0,
+    PRIMARY KEY (hour, repo)
+);
+CREATE INDEX IF NOT EXISTS jobs_started_at_idx ON jobs (started_at) WHERE started_at IS NOT NULL;
+
+-- Runners page (batch 8): a runner's job slots, so capacity is online ×
+-- concurrency rather than a runner count.
+ALTER TABLE runners ADD COLUMN IF NOT EXISTS concurrency INT NOT NULL DEFAULT 1;
+CREATE INDEX IF NOT EXISTS audit_log_target_idx ON audit_log (target);
+
+-- Runners page: the pool that launched a runner (RUNNER_POOL), and a
+-- per-minute snapshot of capacity and queue depth, so those have history.
+ALTER TABLE runners ADD COLUMN IF NOT EXISTS pool TEXT NOT NULL DEFAULT '';
+CREATE TABLE IF NOT EXISTS runner_capacity_snapshots (
+    at              TIMESTAMPTZ PRIMARY KEY,           -- the minute
+    total_slots     INT    NOT NULL DEFAULT 0,         -- slots on non-stale runners
+    available_slots INT    NOT NULL DEFAULT 0,         -- online, not paused or draining
+    busy_slots      INT    NOT NULL DEFAULT 0,         -- available slots running a job
+    paused_slots    INT    NOT NULL DEFAULT 0,
+    draining_slots  INT    NOT NULL DEFAULT 0,
+    offline_slots   INT    NOT NULL DEFAULT 0,
+    pending         INT    NOT NULL DEFAULT 0,         -- jobs waiting for a runner
+    oldest_wait_s   INT    NOT NULL DEFAULT 0,
+    starved_tags    TEXT[] NOT NULL DEFAULT '{}'       -- tags with runners but no available slot
+);
+
+-- Code review (batch 7, phase A): pull/merge requests from every host in one
+-- model. Webhooks keep rows current; a refresh is claimed with a lease (like
+-- a job) and coalesced per change: requests while one is due or in flight
+-- ride along with it. Pages read only these tables — never the host.
+-- state is open | merged | closed; draft is separate (an open change can be
+-- a draft). number is the host's per-repo id (or Forge's, for native changes).
+CREATE TABLE IF NOT EXISTS changes (
+    id                   BIGSERIAL   PRIMARY KEY,
+    repo                 TEXT        NOT NULL,
+    provider             TEXT        NOT NULL,
+    number               TEXT        NOT NULL,
+    title                TEXT        NOT NULL DEFAULT '',
+    body                 TEXT        NOT NULL DEFAULT '',
+    author               TEXT        NOT NULL DEFAULT '',
+    source_branch        TEXT        NOT NULL DEFAULT '',
+    target_branch        TEXT        NOT NULL DEFAULT '',
+    state                TEXT        NOT NULL DEFAULT 'open'
+        CHECK (state IN ('open','merged','closed')),
+    draft                BOOLEAN     NOT NULL DEFAULT FALSE,
+    head_sha             TEXT        NOT NULL DEFAULT '',
+    base_sha             TEXT        NOT NULL DEFAULT '',
+    merge_base_sha       TEXT        NOT NULL DEFAULT '',
+    labels               TEXT[]      NOT NULL DEFAULT '{}',
+    url                  TEXT        NOT NULL DEFAULT '',
+    created_at           TIMESTAMPTZ,
+    updated_at           TIMESTAMPTZ,          -- the host's last update
+    synced_at            TIMESTAMPTZ,          -- last write from the host (NULL: placeholder)
+    last_event_at        TIMESTAMPTZ,          -- last webhook for this change
+    refresh_due_at       TIMESTAMPTZ,
+    refresh_requested_at TIMESTAMPTZ,
+    refresh_priority     INT         NOT NULL DEFAULT 0,
+    refresh_lease_until  TIMESTAMPTZ,
+    refresh_attempts     INT         NOT NULL DEFAULT 0,
+    refresh_error        TEXT        NOT NULL DEFAULT '',
+    UNIQUE (repo, number)
+);
+CREATE INDEX IF NOT EXISTS changes_inbox_idx ON changes (state, updated_at DESC);
+CREATE INDEX IF NOT EXISTS changes_refresh_idx ON changes (refresh_due_at) WHERE refresh_due_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS pipelines_repo_sha_idx ON pipelines (repo, sha, id DESC);
+
+-- Every push is a revision, even on hosts that don't model one, so "changes
+-- since revision N" works everywhere.
+CREATE TABLE IF NOT EXISTS change_revisions (
+    change_id BIGINT      NOT NULL REFERENCES changes(id) ON DELETE CASCADE,
+    number    INT         NOT NULL,
+    head_sha  TEXT        NOT NULL,
+    base_sha  TEXT        NOT NULL DEFAULT '',
+    pushed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (change_id, number),
+    UNIQUE (change_id, head_sha)
+);
+
+-- Reviews: source 'host' rows mirror the host's list (replaced on each
+-- refresh); 'forge' rows are verdicts given in Forge.
+CREATE TABLE IF NOT EXISTS change_reviews (
+    id           BIGSERIAL   PRIMARY KEY,
+    change_id    BIGINT      NOT NULL REFERENCES changes(id) ON DELETE CASCADE,
+    source       TEXT        NOT NULL DEFAULT 'host',
+    external_id  TEXT        NOT NULL DEFAULT '',
+    reviewer     TEXT        NOT NULL,
+    verdict      TEXT        NOT NULL
+        CHECK (verdict IN ('approve','request_changes','comment','dismissed')),
+    body         TEXT        NOT NULL DEFAULT '',
+    commit_sha   TEXT        NOT NULL DEFAULT '',
+    submitted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (change_id, source, external_id)
+);
+
+-- Per-repo reconcile: the conditional list's validators and when to run it
+-- next (15 min while the repo has open changes, hours otherwise).
+CREATE TABLE IF NOT EXISTS change_sync (
+    repo               TEXT        PRIMARY KEY,
+    etag               TEXT        NOT NULL DEFAULT '',
+    last_modified      TEXT        NOT NULL DEFAULT '',
+    next_reconcile_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_reconciled_at TIMESTAMPTZ,
+    last_result        TEXT        NOT NULL DEFAULT '',
+    lease_until        TIMESTAMPTZ
+);
+
+-- Provider budget per credential (an App installation, a token, an IAM
+-- role): a token bucket in Postgres, row-locked, refilled continuously and
+-- overwritten by the host's own rate-limit headers when it sends them.
+CREATE TABLE IF NOT EXISTS provider_budgets (
+    credential TEXT             PRIMARY KEY,
+    provider   TEXT             NOT NULL,
+    capacity   INT              NOT NULL,
+    tokens     DOUBLE PRECISION NOT NULL,
+    window_s   INT              NOT NULL DEFAULT 3600,
+    reset_at   TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ      NOT NULL DEFAULT now()
+);
+
+-- Provider calls per hour by provider, class and result. read_path rows are
+-- calls refused while serving a page: the count must stay 0.
+CREATE TABLE IF NOT EXISTS provider_call_stats (
+    hour      TIMESTAMPTZ NOT NULL,
+    provider  TEXT        NOT NULL,
+    class     TEXT        NOT NULL,
+    result    TEXT        NOT NULL,
+    read_path BOOLEAN     NOT NULL DEFAULT FALSE,
+    calls     BIGINT      NOT NULL DEFAULT 0,
+    PRIMARY KEY (hour, provider, class, result, read_path)
+);
+
+-- Code review (batch 7, phase B): merge rules, the gate, provider writes.
+-- A rule applies to changes of one repo ('' = every repo) whose target
+-- branch matches branch_pattern (glob). No matching rule = no gate: nothing
+-- is published, so turning code review on never changes a host's checks.
+CREATE TABLE IF NOT EXISTS merge_policies (
+    id                         BIGSERIAL   PRIMARY KEY,
+    repo                       TEXT        NOT NULL DEFAULT '',
+    branch_pattern             TEXT        NOT NULL DEFAULT '*',
+    required_approvals         INT         NOT NULL DEFAULT 1,
+    approver_roles             TEXT[]      NOT NULL DEFAULT '{admin,owner,developer}',
+    required_group             TEXT        NOT NULL DEFAULT '',
+    required_group_approvals   INT         NOT NULL DEFAULT 0,
+    allow_self_approval        BOOLEAN     NOT NULL DEFAULT FALSE,
+    dismiss_on_push            BOOLEAN     NOT NULL DEFAULT TRUE,
+    block_on_changes_requested BOOLEAN     NOT NULL DEFAULT TRUE,
+    require_ci                 BOOLEAN     NOT NULL DEFAULT TRUE,
+    required_jobs              TEXT[]      NOT NULL DEFAULT '{}',
+    required_labels            TEXT[]      NOT NULL DEFAULT '{}',
+    blocked_labels             TEXT[]      NOT NULL DEFAULT '{}',
+    ticket_pattern             TEXT        NOT NULL DEFAULT '',
+    freeze_windows             JSONB       NOT NULL DEFAULT '[]',
+    timezone                   TEXT        NOT NULL DEFAULT 'UTC',
+    updated_by                 TEXT        NOT NULL DEFAULT '',
+    updated_at                 TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (repo, branch_pattern)
+);
+
+-- Who a host login is in Forge (admin-maintained until accounts can be
+-- linked by OAuth): makes self-approval, approver groups and roles work for
+-- reviews given on the host. login is stored lowercased.
+CREATE TABLE IF NOT EXISTS host_identities (
+    provider   TEXT        NOT NULL,
+    login      TEXT        NOT NULL,
+    email      TEXT        NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (provider, login)
+);
+
+-- The gate's verdict per change and head commit; written only when it
+-- changes. published_state is what the host's forge/merge-gate shows.
+CREATE TABLE IF NOT EXISTS gate_results (
+    change_id       BIGINT      NOT NULL REFERENCES changes(id) ON DELETE CASCADE,
+    head_sha        TEXT        NOT NULL,
+    policy_id       BIGINT,
+    state           TEXT        NOT NULL CHECK (state IN ('pass','pending','fail')),
+    summary         TEXT        NOT NULL DEFAULT '',
+    rules           JSONB       NOT NULL DEFAULT '[]',
+    evaluated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    published_state TEXT        NOT NULL DEFAULT '',
+    published_at    TIMESTAMPTZ,
+    PRIMARY KEY (change_id, head_sha)
+);
+
+-- Re-evaluate a change's gate when its inputs move (webhook, review, CI,
+-- rule edit) or when a freeze window opens/closes (gate_recheck_at).
+ALTER TABLE changes ADD COLUMN IF NOT EXISTS gate_dirty_at   TIMESTAMPTZ;
+ALTER TABLE changes ADD COLUMN IF NOT EXISTS gate_recheck_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS changes_head_idx ON changes (repo, head_sha) WHERE state = 'open';
+CREATE INDEX IF NOT EXISTS changes_gate_due_idx ON changes (gate_dirty_at) WHERE gate_dirty_at IS NOT NULL;
+
+-- A CI job changing state marks the open changes on that commit dirty.
+-- Statement-level and a no-op while no change is open.
+CREATE OR REPLACE FUNCTION forge_jobs_mark_gates() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM changes WHERE state = 'open' LIMIT 1) THEN
+        RETURN NULL;
+    END IF;
+    UPDATE changes c SET gate_dirty_at = now()
+    FROM (SELECT DISTINCT p.repo, p.sha FROM changed j JOIN pipelines p ON p.id = j.pipeline_id) x
+    WHERE c.state = 'open' AND c.repo = x.repo AND c.head_sha = x.sha;
+    RETURN NULL;
+END
+$$;
+CREATE OR REPLACE TRIGGER jobs_mark_gates_ins AFTER INSERT ON jobs
+    REFERENCING NEW TABLE AS changed
+    FOR EACH STATEMENT EXECUTE FUNCTION forge_jobs_mark_gates();
+CREATE OR REPLACE TRIGGER jobs_mark_gates_upd AFTER UPDATE ON jobs
+    REFERENCING NEW TABLE AS changed
+    FOR EACH STATEMENT EXECUTE FUNCTION forge_jobs_mark_gates();
+
+-- Every provider write goes through this outbox: saved at once, sent by a
+-- worker under the credential's budget, retried with backoff. idem_key
+-- makes a double click or a retry one row; a newer gate publish for the
+-- same change supersedes an unsent older one.
+CREATE TABLE IF NOT EXISTS provider_outbox (
+    id              BIGSERIAL   PRIMARY KEY,
+    idem_key        TEXT        NOT NULL UNIQUE,
+    kind            TEXT        NOT NULL,            -- publish_gate | merge
+    repo            TEXT        NOT NULL,
+    change_id       BIGINT      REFERENCES changes(id) ON DELETE CASCADE,
+    class           TEXT        NOT NULL,            -- user | webhook | reconcile
+    payload         JSONB       NOT NULL DEFAULT '{}',
+    state           TEXT        NOT NULL DEFAULT 'pending'
+        CHECK (state IN ('pending','done','failed','superseded')),
+    attempts        INT         NOT NULL DEFAULT 0,
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    lease_until     TIMESTAMPTZ,
+    last_error      TEXT        NOT NULL DEFAULT '',
+    result          JSONB       NOT NULL DEFAULT '{}',
+    requested_by    TEXT        NOT NULL DEFAULT '',
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    done_at         TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS provider_outbox_due_idx ON provider_outbox (next_attempt_at) WHERE state = 'pending';
+CREATE INDEX IF NOT EXISTS provider_outbox_change_idx ON provider_outbox (change_id, id DESC);
+
+-- Code review (batch 7, phase C): diffs from runner-held git mirrors.
+-- runner_tasks is a queue of small system work runners do in-process (not
+-- jobs: no pipeline, no executor, no job slot). affinity_key keeps a repo's
+-- mirror on the runner that holds it (runner_affinity, as for job caches).
+CREATE TABLE IF NOT EXISTS runner_tasks (
+    id           BIGSERIAL   PRIMARY KEY,
+    kind         TEXT        NOT NULL,
+    repo         TEXT        NOT NULL,
+    affinity_key TEXT        NOT NULL DEFAULT '',
+    dedupe_key   TEXT        NOT NULL UNIQUE,
+    payload      JSONB       NOT NULL DEFAULT '{}',
+    state        TEXT        NOT NULL DEFAULT 'pending'
+        CHECK (state IN ('pending','running','done','failed')),
+    runner_id    TEXT        NOT NULL DEFAULT '',
+    attempts     INT         NOT NULL DEFAULT 0,
+    queued_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    not_before   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    started_at   TIMESTAMPTZ,
+    finished_at  TIMESTAMPTZ,
+    lease_until  TIMESTAMPTZ,
+    error        TEXT        NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS runner_tasks_pending_idx ON runner_tasks (queued_at) WHERE state IN ('pending','running');
+
+-- One row per diff Forge knows: (from, to, mode) as asked — mode 'change'
+-- diffs from the merge base of from (target tip) and to (head), 'range'
+-- diffs the two commits. The bytes live in the blob store under blob_prefix
+-- (immutable: commits never change), the row says where and how big.
+CREATE TABLE IF NOT EXISTS change_diffs (
+    repo         TEXT        NOT NULL,
+    from_sha     TEXT        NOT NULL,
+    to_sha       TEXT        NOT NULL,
+    mode         TEXT        NOT NULL CHECK (mode IN ('change','range')),
+    state        TEXT        NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','ready','failed')),
+    merge_base   TEXT        NOT NULL DEFAULT '',
+    blob_prefix  TEXT        NOT NULL DEFAULT '',
+    chunks       INT         NOT NULL DEFAULT 0,
+    files        INT         NOT NULL DEFAULT 0,
+    additions    INT         NOT NULL DEFAULT 0,
+    deletions    INT         NOT NULL DEFAULT 0,
+    bytes        BIGINT      NOT NULL DEFAULT 0,
+    fetched      BOOLEAN     NOT NULL DEFAULT FALSE,
+    compute_ms   INT         NOT NULL DEFAULT 0,
+    error        TEXT        NOT NULL DEFAULT '',
+    requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    ready_at     TIMESTAMPTZ,
+    last_read_at TIMESTAMPTZ,
+    PRIMARY KEY (repo, from_sha, to_sha, mode)
+);
+CREATE INDEX IF NOT EXISTS change_diffs_ready_idx ON change_diffs (ready_at) WHERE state = 'ready';
+
+-- Diff page opens per hour: served ready (hit), had to compute (miss),
+-- still computing (pending) or failed.
+CREATE TABLE IF NOT EXISTS diff_read_stats (
+    hour   TIMESTAMPTZ NOT NULL,
+    result TEXT        NOT NULL,
+    reads  BIGINT      NOT NULL DEFAULT 0,
+    PRIMARY KEY (hour, result)
+);
+
+-- Code review (batch 7, phase D): threads and comments, synced both ways.
+-- A thread is on a line of the diff (path set) or is the change's
+-- conversation (path '', external_id 'conversation'). Host threads and
+-- comments are mirrored on each refresh; Forge comments are saved at once
+-- (state pending) and sent through the outbox carrying a hidden marker
+-- (forge_uid), which is how the host's echo is matched instead of duplicated.
+CREATE TABLE IF NOT EXISTS change_threads (
+    id                  BIGSERIAL   PRIMARY KEY,
+    change_id           BIGINT      NOT NULL REFERENCES changes(id) ON DELETE CASCADE,
+    external_id         TEXT        NOT NULL DEFAULT '',
+    root_comment_ext    TEXT        NOT NULL DEFAULT '', -- host id of the first comment (replies go to it)
+    path                TEXT        NOT NULL DEFAULT '',
+    side                TEXT        NOT NULL DEFAULT 'new' CHECK (side IN ('new','old')),
+    line                INT         NOT NULL DEFAULT 0,  -- 0: not on a line, or outdated
+    start_line          INT         NOT NULL DEFAULT 0,
+    original_line       INT         NOT NULL DEFAULT 0,
+    commit_sha          TEXT        NOT NULL DEFAULT '',
+    original_commit     TEXT        NOT NULL DEFAULT '',
+    anchor_head         TEXT        NOT NULL DEFAULT '', -- head the line was last placed on (Forge re-anchoring)
+    fingerprint         TEXT        NOT NULL DEFAULT '', -- the anchored line's text
+    resolved            BOOLEAN     NOT NULL DEFAULT FALSE,
+    outdated            BOOLEAN     NOT NULL DEFAULT FALSE,
+    resolve_pending     BOOLEAN     NOT NULL DEFAULT FALSE, -- Forge changed resolved; the host does not know yet
+    resolved_by         TEXT        NOT NULL DEFAULT '',
+    source              TEXT        NOT NULL DEFAULT 'host',
+    created_by          TEXT        NOT NULL DEFAULT '',
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS change_threads_ext_idx ON change_threads (change_id, external_id) WHERE external_id <> '';
+CREATE INDEX IF NOT EXISTS change_threads_change_idx ON change_threads (change_id);
+
+CREATE TABLE IF NOT EXISTS change_comments (
+    id           BIGSERIAL   PRIMARY KEY,
+    thread_id    BIGINT      NOT NULL REFERENCES change_threads(id) ON DELETE CASCADE,
+    external_id  TEXT        NOT NULL DEFAULT '',
+    forge_uid    TEXT        NOT NULL DEFAULT '',
+    author       TEXT        NOT NULL DEFAULT '',
+    author_email TEXT        NOT NULL DEFAULT '',
+    body         TEXT        NOT NULL DEFAULT '',
+    source       TEXT        NOT NULL DEFAULT 'host',
+    state        TEXT        NOT NULL DEFAULT 'sent' CHECK (state IN ('pending','sent','failed','local')),
+    error        TEXT        NOT NULL DEFAULT '',
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS change_comments_ext_idx ON change_comments (thread_id, external_id) WHERE external_id <> '';
+CREATE UNIQUE INDEX IF NOT EXISTS change_comments_uid_idx ON change_comments (forge_uid) WHERE forge_uid <> '';
+CREATE INDEX IF NOT EXISTS change_comments_thread_idx ON change_comments (thread_id, id);
+
+-- Host accounts people link from Forge (OAuth): their comments, reviews and
+-- merges are then made as them, with their own rate budget. The token is
+-- encrypted at rest. A verified link also maps the login in host_identities.
+CREATE TABLE IF NOT EXISTS user_host_tokens (
+    email      TEXT        NOT NULL,
+    provider   TEXT        NOT NULL,
+    login      TEXT        NOT NULL,
+    token      TEXT        NOT NULL,
+    scopes     TEXT        NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (email, provider)
+);
+ALTER TABLE host_identities ADD COLUMN IF NOT EXISTS verified BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- Code review (batch 7, phase F): code owners, the merge queue, merges done
+-- by runners.
+-- A rule can require code owners' approval (CODEOWNERS read from the target
+-- branch by the runner that computes the diff) and send merges through the
+-- queue.
+ALTER TABLE merge_policies ADD COLUMN IF NOT EXISTS require_code_owners BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE merge_policies ADD COLUMN IF NOT EXISTS merge_queue BOOLEAN NOT NULL DEFAULT FALSE;
+-- What a 'change' diff touched (renames count both paths; NULL for diffs
+-- stored before phase F) and the CODEOWNERS file at its target tip
+-- (owners_read false: computed by a runner too old to look).
+ALTER TABLE change_diffs ADD COLUMN IF NOT EXISTS paths TEXT[];
+ALTER TABLE change_diffs ADD COLUMN IF NOT EXISTS owners_read BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE change_diffs ADD COLUMN IF NOT EXISTS codeowners_path TEXT NOT NULL DEFAULT '';
+ALTER TABLE change_diffs ADD COLUMN IF NOT EXISTS codeowners TEXT NOT NULL DEFAULT '';
+-- A task's answer (a merge's commit, or why it did not merge).
+ALTER TABLE runner_tasks ADD COLUMN IF NOT EXISTS result JSONB;
+
+-- The merge queue: per repo and target branch, one change at a time is
+-- merged onto the target's tip by a runner, pushed to forge-queue/<target>,
+-- tested by a Forge pipeline, and merged only if that passes — so two
+-- changes that pass alone cannot break the target together.
+CREATE TABLE IF NOT EXISTS merge_queue (
+    id            BIGSERIAL   PRIMARY KEY,
+    change_id     BIGINT      NOT NULL REFERENCES changes(id) ON DELETE CASCADE,
+    repo          TEXT        NOT NULL,
+    target_branch TEXT        NOT NULL,
+    head_sha      TEXT        NOT NULL,
+    method        TEXT        NOT NULL,
+    state         TEXT        NOT NULL DEFAULT 'queued'
+        CHECK (state IN ('queued','testing','merging','merged','failed','removed')),
+    base_sha      TEXT        NOT NULL DEFAULT '',
+    test_sha      TEXT        NOT NULL DEFAULT '',
+    pipeline_id   BIGINT,
+    outbox_id     BIGINT,
+    error         TEXT        NOT NULL DEFAULT '',
+    requested_by  TEXT        NOT NULL DEFAULT '',
+    enqueued_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    started_at    TIMESTAMPTZ,
+    finished_at   TIMESTAMPTZ,
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS merge_queue_active_change_idx ON merge_queue (change_id)
+    WHERE state IN ('queued','testing','merging');
+CREATE INDEX IF NOT EXISTS merge_queue_active_idx ON merge_queue (repo, target_branch, id)
+    WHERE state IN ('queued','testing','merging');
+
+-- Forge Live (batch 9). A target is where applications run — a Kubernetes
+-- cluster, a Cloud Run project — reported by one forge-agent whose token is
+-- scoped to it. Forge never calls a target: it stores what the agent sends.
+-- Per application the indexable status lives here; the resource tree
+-- (content-addressed, one blob per version) and each resource's live
+-- manifest live in the blob store.
+CREATE TABLE IF NOT EXISTS live_targets (
+    id            BIGSERIAL   PRIMARY KEY,
+    name          TEXT        NOT NULL UNIQUE,
+    environment   TEXT        NOT NULL DEFAULT '',
+    repo          TEXT        NOT NULL DEFAULT '',
+    token_hash    TEXT        NOT NULL UNIQUE,
+    token_suffix  TEXT        NOT NULL,
+    provider      TEXT        NOT NULL DEFAULT '',
+    capabilities  JSONB       NOT NULL DEFAULT '{}',
+    agent_version TEXT        NOT NULL DEFAULT '',
+    -- The agent's resume token: its current epoch (one full report) and the
+    -- last batch applied in it. synced: the epoch's initial report is in.
+    epoch         TEXT        NOT NULL DEFAULT '',
+    seq           BIGINT      NOT NULL DEFAULT 0,
+    synced        BOOLEAN     NOT NULL DEFAULT FALSE,
+    stats         JSONB       NOT NULL DEFAULT '{}',
+    bytes_in      BIGINT      NOT NULL DEFAULT 0,
+    last_seen_at  TIMESTAMPTZ,
+    created_by    TEXT        NOT NULL DEFAULT '',
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS live_apps (
+    id             BIGSERIAL   PRIMARY KEY,
+    target_id      BIGINT      NOT NULL REFERENCES live_targets(id) ON DELETE CASCADE,
+    key            TEXT        NOT NULL,
+    name           TEXT        NOT NULL,
+    namespace      TEXT        NOT NULL DEFAULT '',
+    app_group      TEXT        NOT NULL DEFAULT '',
+    health         TEXT        NOT NULL DEFAULT 'Unknown',
+    health_message TEXT        NOT NULL DEFAULT '',
+    health_since   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- Compared with Git from phase B on; until then Unknown.
+    sync           TEXT        NOT NULL DEFAULT 'Unknown',
+    resources      INT         NOT NULL DEFAULT 0,
+    pods           INT         NOT NULL DEFAULT 0,
+    pods_ready     INT         NOT NULL DEFAULT 0,
+    images         TEXT[]      NOT NULL DEFAULT '{}',
+    tree           TEXT        NOT NULL DEFAULT '', -- blob key of the current tree
+    version        BIGINT      NOT NULL DEFAULT 0,
+    epoch          TEXT        NOT NULL DEFAULT '',
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (target_id, key)
+);
+CREATE INDEX IF NOT EXISTS live_apps_name_idx ON live_apps (name, id);
+
+-- What the platform said about an app's resources (Kubernetes events);
+-- the newest 200 per app are kept.
+CREATE TABLE IF NOT EXISTS live_app_events (
+    app_id       BIGINT      NOT NULL REFERENCES live_apps(id) ON DELETE CASCADE,
+    uid          TEXT        NOT NULL,
+    resource_uid TEXT        NOT NULL,
+    kind         TEXT        NOT NULL DEFAULT '',
+    name         TEXT        NOT NULL DEFAULT '',
+    type         TEXT        NOT NULL DEFAULT '',
+    reason       TEXT        NOT NULL DEFAULT '',
+    message      TEXT        NOT NULL DEFAULT '',
+    count        INT         NOT NULL DEFAULT 1,
+    first_seen   TIMESTAMPTZ NOT NULL,
+    last_seen    TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (app_id, uid)
+);
+CREATE INDEX IF NOT EXISTS live_app_events_recent_idx ON live_app_events (app_id, last_seen DESC);
+
+-- Blobs nothing references any more (an older tree, a deleted resource's
+-- manifest), deleted after a grace period so a page mid-read still finds them.
+CREATE TABLE IF NOT EXISTS live_blob_gc (
+    key    TEXT        PRIMARY KEY,
+    due_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS live_blob_gc_due_idx ON live_blob_gc (due_at);
+
+-- Forge Live (batch 9, phase B): desired state and operations. An app's
+-- desired state is its directory in the target's source, rendered by the
+-- agent at a revision; its manifests are blobs (one per resource key).
+ALTER TABLE live_apps ADD COLUMN IF NOT EXISTS revision TEXT NOT NULL DEFAULT '';
+ALTER TABLE live_apps ADD COLUMN IF NOT EXISTS revision_message TEXT NOT NULL DEFAULT '';
+ALTER TABLE live_apps ADD COLUMN IF NOT EXISTS revision_author TEXT NOT NULL DEFAULT '';
+ALTER TABLE live_apps ADD COLUMN IF NOT EXISTS revision_at TIMESTAMPTZ;
+ALTER TABLE live_apps ADD COLUMN IF NOT EXISTS source_path TEXT NOT NULL DEFAULT '';
+ALTER TABLE live_apps ADD COLUMN IF NOT EXISTS source_tool TEXT NOT NULL DEFAULT '';
+ALTER TABLE live_apps ADD COLUMN IF NOT EXISTS source_error TEXT NOT NULL DEFAULT '';
+ALTER TABLE live_apps ADD COLUMN IF NOT EXISTS desired_keys TEXT[] NOT NULL DEFAULT '{}';
+
+-- Operations Forge asks an agent to run: sync, rollback, refresh, logs.
+-- One sync or rollback per app at a time; a sync to a protected
+-- environment waits in 'approval' for the environment's approvals.
+CREATE TABLE IF NOT EXISTS live_ops (
+    id           BIGSERIAL   PRIMARY KEY,
+    app_id       BIGINT      NOT NULL REFERENCES live_apps(id) ON DELETE CASCADE,
+    target_id    BIGINT      NOT NULL REFERENCES live_targets(id) ON DELETE CASCADE,
+    kind         TEXT        NOT NULL CHECK (kind IN ('sync','rollback','refresh','logs')),
+    state        TEXT        NOT NULL DEFAULT 'pending'
+        CHECK (state IN ('approval','pending','running','succeeded','failed','canceled')),
+    params       JSONB       NOT NULL DEFAULT '{}',
+    result       JSONB,
+    message      TEXT        NOT NULL DEFAULT '',
+    revision     TEXT        NOT NULL DEFAULT '',
+    requested_by TEXT        NOT NULL DEFAULT '',
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    started_at   TIMESTAMPTZ,
+    finished_at  TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX IF NOT EXISTS live_ops_one_change_idx ON live_ops (app_id)
+    WHERE kind IN ('sync','rollback') AND state IN ('approval','pending','running');
+CREATE INDEX IF NOT EXISTS live_ops_pending_idx ON live_ops (target_id, id) WHERE state = 'pending';
+CREATE INDEX IF NOT EXISTS live_ops_app_idx ON live_ops (app_id, id DESC);
+
+CREATE TABLE IF NOT EXISTS live_op_approvals (
+    op_id      BIGINT      NOT NULL REFERENCES live_ops(id) ON DELETE CASCADE,
+    approver   TEXT        NOT NULL,
+    verdict    TEXT        NOT NULL CHECK (verdict IN ('approved','rejected')),
+    comment    TEXT        NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (op_id, approver)
+);
+
+-- An operation's output as the agent streams it (logs); kept an hour.
+CREATE TABLE IF NOT EXISTS live_op_output (
+    op_id      BIGINT      NOT NULL REFERENCES live_ops(id) ON DELETE CASCADE,
+    seq        BIGSERIAL,
+    chunk      BYTEA       NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (op_id, seq)
+);
+
+-- Forge Live (batch 9, phase C): auto-sync, drift counts, orphaned resources.
+-- An app's orphans row holds its namespace's top-level objects no
+-- application claims (key "<namespace>/"); it is never listed as an app.
+ALTER TABLE live_apps ADD COLUMN IF NOT EXISTS orphans BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE live_apps ADD COLUMN IF NOT EXISTS drifted INT NOT NULL DEFAULT 0;
+ALTER TABLE live_apps ADD COLUMN IF NOT EXISTS prunable INT NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS live_apps_out_of_sync_idx ON live_apps (target_id, key) WHERE sync = 'OutOfSync';
+
+-- An application's sync policy. Keyed by target and app key, not the app's
+-- row, so it outlives the row (an app whose resources all go and come back).
+-- status says what auto-sync is doing, or why it is waiting.
+CREATE TABLE IF NOT EXISTS live_app_policies (
+    target_id  BIGINT      NOT NULL REFERENCES live_targets(id) ON DELETE CASCADE,
+    app_key    TEXT        NOT NULL,
+    auto_sync  BOOLEAN     NOT NULL DEFAULT FALSE,
+    prune      BOOLEAN     NOT NULL DEFAULT FALSE,
+    self_heal  BOOLEAN     NOT NULL DEFAULT FALSE,
+    status     TEXT        NOT NULL DEFAULT '',
+    updated_by TEXT        NOT NULL DEFAULT '',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (target_id, app_key)
+);
+CREATE INDEX IF NOT EXISTS live_app_policies_auto_idx ON live_app_policies (target_id, app_key) WHERE auto_sync;
+
+-- Forge Live (batch 9, phase D): canary rollouts. Promote and abort reach a
+-- running rollout as operations of their own; a rollout can outlast the
+-- 20-minute expiry, so an operation is alive while its agent still reports
+-- (heartbeat_at moves with each output chunk).
+ALTER TABLE live_ops DROP CONSTRAINT IF EXISTS live_ops_kind_check;
+ALTER TABLE live_ops ADD CONSTRAINT live_ops_kind_check
+    CHECK (kind IN ('sync','rollback','refresh','logs','promote','abort'));
+ALTER TABLE live_ops ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ;
+
+-- Forge Live (batch 9, phase D): app templates across clusters. A template
+-- declares one application on every target it matches (by name or
+-- environment); {target}, {environment} and {name} in its path and
+-- namespace are filled in per target. Agents fetch their declared apps and
+-- render them before anything exists; the template's sync policy seeds each
+-- app's (a policy someone changed by hand is left alone).
+CREATE TABLE IF NOT EXISTS live_templates (
+    id               BIGSERIAL   PRIMARY KEY,
+    name             TEXT        NOT NULL UNIQUE,
+    app_name         TEXT        NOT NULL,
+    namespace        TEXT        NOT NULL,
+    app_group        TEXT        NOT NULL DEFAULT '',
+    path             TEXT        NOT NULL,
+    targets          TEXT[]      NOT NULL DEFAULT '{}',
+    environments     TEXT[]      NOT NULL DEFAULT '{}',
+    create_namespace BOOLEAN     NOT NULL DEFAULT TRUE,
+    auto_sync        BOOLEAN     NOT NULL DEFAULT FALSE,
+    prune            BOOLEAN     NOT NULL DEFAULT FALSE,
+    self_heal        BOOLEAN     NOT NULL DEFAULT FALSE,
+    created_by       TEXT        NOT NULL DEFAULT '',
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+ALTER TABLE live_apps ADD COLUMN IF NOT EXISTS template TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS live_apps_template_idx ON live_apps (template) WHERE template <> '';
+ALTER TABLE live_apps ADD COLUMN IF NOT EXISTS desired_digest TEXT NOT NULL DEFAULT '';
+
+-- Platform admins granted from the Admin UI, alongside ADMIN_EMAILS (the
+-- bootstrap / break-glass list, which stays read-only in the UI) and IdP
+-- groups mapped to platform admin. Emails are stored lower-cased.
+CREATE TABLE IF NOT EXISTS platform_admins (
+    email      TEXT        PRIMARY KEY CHECK (email = lower(email) AND email <> ''),
+    added_by   TEXT        NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);

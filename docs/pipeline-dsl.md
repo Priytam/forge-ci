@@ -57,7 +57,7 @@ jobs:
 | `when:` | `on_success` (default), `manual`, `never`, or `always`. `never` excludes the job. |
 | `allow_failure:` | `true`/`false`; overrides the job-level `allow_failure`. |
 | `variables:` | Extra variables injected into the job when this rule matches. |
-| `changes: [globs]` | **Documented no-op** — see limitations. |
+| `changes: [globs]` | Matches when the pipeline's commit changed a file matching any glob — see *`changes:`* below. |
 | `exists: [globs]` | **Documented no-op** — see limitations. |
 
 A rule with multiple clauses matches only when **all** its clauses are
@@ -101,13 +101,15 @@ The base context exposes:
 | Variable | Value |
 | --- | --- |
 | `CI_COMMIT_REF`, `CI_COMMIT_REF_NAME` | the pipeline ref |
-| `CI_COMMIT_BRANCH` | the pipeline ref (see limitation below) |
-| `CI_PIPELINE_SOURCE` | `api` \| `webhook` \| `schedule` \| `push` |
+| `CI_COMMIT_BRANCH` | the branch — **undefined for a tag push** |
+| `CI_COMMIT_TAG` | the tag — **defined only for a tag push** |
+| `CI_PIPELINE_SOURCE` | `api` \| `webhook` \| `schedule` \| `push` \| `merge_request` |
 
 Plus the job's own `variables:` (and any variables set by an earlier resolved
-rule). **Limitation:** Forge cannot distinguish a tag ref from a branch ref at
-compile time (a webhook carries only the ref string), so `CI_COMMIT_BRANCH` is
-set to the ref and `CI_COMMIT_TAG` is left undefined.
+rule), and on merge-request pipelines the `CI_MERGE_REQUEST_*` set. Every git
+host's push webhook (GitHub, GitLab, Bitbucket, Gitea/Forgejo, CodeCommit) says
+whether a tag or a branch moved, so `rules: - if: $CI_COMMIT_TAG` works the same
+everywhere. A pipeline started from the API or a schedule is a branch pipeline.
 
 ### `when: manual` — the manual gate
 
@@ -130,30 +132,111 @@ canceled like any other dead-ended job.
 
 ## 2. `include:` — reusable templates
 
-Forge does not host a repo file tree, and webhooks carry no file contents, so
-there is no filesystem path to `include: local:` against. Instead, reusable YAML
-fragments are **registered per repo** and referenced by name:
+An include pulls YAML in from somewhere else and merges it **under** the main
+config. Four sources, all through the same list:
+
+```yaml
+include:
+  - template: go-common                 # a template registered for this repo, or a built-in
+  - template: deploy/kubernetes@1.4.0   # the org template catalog, pinned to a version
+  - project: platform/ci-templates      # a file from another connected repo (any git host)
+    ref: v2.1.0                         # tag, branch or commit: required; pin a tag or sha
+    file: templates/lint.yml
+  - remote: https://ci.example.com/audit.yml
+    integrity: sha256-q1w2e3...          # optional: refuse anything but this exact content
+```
+
+Each entry names exactly one of `template:`, `project:` or `remote:`.
+
+### Repo templates
+
+Named fragments registered for one repo:
 
 ```bash
-# Register a template
-curl -X PUT /api/v1/repo-templates -d '{
+curl -X PUT $FORGE/api/v1/repo-templates -d '{
   "repo": "org/app",
   "name": "go-common",
   "yaml": "stages: [lint, build]\njobs:\n  lint:\n    stage: lint\n    script: [golangci-lint run]\n"
 }'
+curl $FORGE/api/v1/repo-templates?repo=org/app
+```
 
-# List a repo's templates
-curl /api/v1/repo-templates?repo=org/app
+### The template catalog — `template: name@version`
+
+Org-wide templates with immutable versions, browsable on the **Template
+catalog** page (admins publish there, or with the API). `name@1.4.0` is that
+exact version; a bare `name` that isn't a repo template or built-in resolves to
+the catalog's newest version (`1.10.0` sorts after `1.9.2`; `1.0.0-rc1` before
+`1.0.0`). Pin a version for anything that deploys.
+
+```bash
+curl -X POST $FORGE/api/v1/template-catalog -H "Authorization: Bearer $FORGE_TOKEN" -d "$(jq -n \
+  --arg y "$(cat deploy.yml)" '{name:"deploy/kubernetes", version:"1.4.0", description:"Rolling deploy", yaml:$y}')"
+curl $FORGE/api/v1/template-catalog                                  # every version
+curl "$FORGE/api/v1/template-catalog?name=deploy/kubernetes&version=1.4.0"
+curl -X DELETE "$FORGE/api/v1/template-catalog?name=deploy/kubernetes&version=1.4.0"   # admin
+```
+
+Republishing an existing version is refused (409): a fix is a new version.
+
+### `project:` — a file from another repo
+
+Reads `file` at `ref` from another **connected** repository, through that
+repo's own connection, so it works on every git host Forge supports (API hosts
+and plain git alike). `ref` is required — pin a tag or a commit sha so a change
+to the template repo can't silently change your pipeline.
+
+Because the read uses Forge's credential for the other repo, a pipeline may
+only include from repos with the **same owner/namespace** (`acme/api` →
+`acme/ci-templates`). To share a template repo across owners, list it in
+`FORGE_INCLUDE_SHARED_PROJECTS` on the server (comma-separated; `platform/*`
+for a whole namespace, `*` for every connected repo).
+
+### `remote:` — a URL
+
+Fetched over **https only**, at compile time, from the server:
+
+- Internal addresses (loopback, private ranges, link-local and cloud metadata,
+  carrier-grade NAT) are refused, checked at connect time so DNS tricks can't
+  get round it. `FORGE_INCLUDE_REMOTE_ALLOW_PRIVATE=true` lifts this for an
+  internal template server.
+- `FORGE_INCLUDE_REMOTE_HOSTS=templates.example.com,*.example.org` restricts
+  remote includes to those hosts.
+- `integrity:` (`sha256-<base64>` as in browser SRI, or `sha256:<hex>`) pins the
+  exact bytes; `FORGE_INCLUDE_REMOTE_REQUIRE_INTEGRITY=true` makes it mandatory.
+- Redirects must stay on https; bodies over 1 MiB are refused; credentials in
+  the URL are refused.
+
+### Template inputs — `spec: inputs:`
+
+A template (from any source) can declare inputs in a header document, then use
+them as `$[[ inputs.name ]]`:
+
+```yaml
+spec:
+  inputs:
+    environment: {default: staging, options: [staging, production]}
+    replicas:    {default: 2}
+    cluster:     {description: "Where to deploy"}    # no default = required
+---
+jobs:
+  deploy:
+    stage: deploy
+    environment: $[[ inputs.environment ]]
+    script:
+      - ./deploy.sh --cluster $[[ inputs.cluster ]] --replicas $[[ inputs.replicas ]]
 ```
 
 ```yaml
 include:
-  - template: go-common          # merged UNDER the main config
-stages: [build, test]
-jobs:
-  build:
-    image: golang:1.23           # overrides any build.image from the template
+  - template: deploy/kubernetes@1.4.0
+    inputs: {cluster: eu-west, environment: production}
 ```
+
+A missing required input, an unknown input, or a value outside `options` is a
+compile error naming the input. A template without a `spec:` header takes no
+inputs. Inputs are substituted into the template text before it is parsed, so
+they can appear anywhere — job names, images, scripts, rules.
 
 ### Merge semantics
 
@@ -166,12 +249,8 @@ then the **main config overrides all includes** on any conflict.
 - **default / auto_cancel / fail_fast** — main wins when it sets them.
 
 Nested includes (a template that itself has `include:`) are supported up to a
-depth bound that guards against include cycles.
-
-**Limitation:** remote/URL includes are intentionally **not** supported — the
-compiler does no network fetch. An `include:` form other than `{template: name}`
-is a clear compile error, as is a template name that is neither registered for
-the repo nor a shipped built-in.
+depth bound that guards against include cycles. Compile errors name the include
+that failed (`include: project platform/ci@v2:lint.yml not found`).
 
 ### Built-in security templates
 
@@ -515,6 +594,43 @@ failure**: the server records no report and the job still reports `success`.
 `reports.junit` is independent of `paths` — a job can publish a test report
 without archiving any other artifact.
 
+### `reports.dotenv` and `environment: url:`
+
+```yaml
+build:
+  artifacts:
+    reports:
+      dotenv: build.env        # KEY=VALUE file the job writes
+deploy:
+  needs: [build]
+  environment: {name: staging, url: "https://staging.$APP_DOMAIN"}
+```
+
+Dotenv variables are passed to the jobs that need the reporting job;
+`DEPLOY_URL`, `DEPLOY_VERSION` and `DEPLOY_DIGEST` fill in the deployment
+record. Details and limits: [environments.md](environments.md#url-version-and-digest).
+
+### Coverage — `coverage:` and `reports.coverage_report`
+
+```yaml
+unit:
+  script: [go test -coverprofile=c.out ./... && go tool cover -func=c.out]
+  coverage: '/total:\s+\(statements\)\s+(\d+\.\d+)%/'    # last match in the log wins
+python:
+  script: [pytest --cov --cov-report=xml]
+  artifacts:
+    reports:
+      coverage_report: {coverage_format: cobertura, path: coverage.xml}
+```
+
+`coverage:` is a `/regex/` applied to the job's (masked) log when it finishes;
+the first capture group (or the whole match) holds the percentage. A
+`coverage_report` in Cobertura XML — which coverage.py, gocover-cobertura,
+JaCoCo and Istanbul converters write — sets it from the report's overall
+`line-rate` instead. The pipeline shows the mean of its jobs; the repo's
+**Tests** page charts it over recent pipelines
+(`GET /api/v1/coverage?repo=&ref=&limit=`).
+
 ### Merge (`extends` / `include`)
 
 Each artifacts sub-field merges independently (child overrides when it sets it):
@@ -690,15 +806,49 @@ Semantics and scope:
 
 ---
 
-## `changes:` / `exists:` — honest limitations
+## `changes:` — run jobs only when their files changed
 
-Both are **parsed and validated** but always treated as **satisfied (true)** —
-they are documented no-ops. Forge compiles pipelines **without a repo checkout
-or a file diff**: a webhook delivers only `repo`, `ref`, and `sha`, and Forge
-does not clone at compile time. There is therefore no honest way to know which
-files changed (`changes:`) or which files exist in the tree (`exists:`), so
-Forge does **not** fake them. A rule that relies solely on `changes:`/`exists:`
-will always match; combine them with an `if:` clause to get meaningful gating.
+```yaml
+web-build:
+  stage: build
+  rules:
+    - changes: ["web/**/*", "package-lock.json"]
+  script: [npm ci, npm run build]
+api-deploy:
+  stage: deploy
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes: ["api/**", "go.mod", "go.sum"]
+  script: [./deploy-api.sh]
+```
+
+A `changes:` clause matches when **any file the pipeline's commit changed**
+matches any of its globs (`**` = any directories, `*` = within one directory,
+`?` = one character, `{a,b}` = alternatives, a trailing `/` = everything
+under that directory). It combines with `if:` by AND, like every clause.
+
+What "changed" is compared against:
+
+| Pipeline | Compared with |
+|---|---|
+| push to a branch with an earlier **successful** pipeline | that pipeline's commit (so a fix after a red run still rebuilds what the red run touched) |
+| push to a branch with no successful pipeline yet | the repo's default branch, from the merge base |
+| merge request / pull request | the target commit of the merge request |
+
+The file list comes from the provider (GitHub compare, Bitbucket diffstat,
+CodeCommit GetDifferences) for repos connected under Repos → Add repository.
+
+**When Forge can't tell, nothing is skipped:** the change set is *unknown* and
+every `changes:` clause matches for API / manual runs, schedules, the first
+run on the default branch, repos that aren't connected, a provider error, or a
+diff too large for the provider to list (GitHub: 300 files). That's the safe
+direction — a job runs rather than silently not running.
+
+Preview it: `POST /api/v1/lint {"config": …, "ref": "main", "changed_files":
+["web/src/App.tsx"]}` shows which jobs that change would run.
+
+`exists:` is still a documented no-op (always true): Forge compiles without a
+checkout of the tree.
 
 ---
 
@@ -716,3 +866,130 @@ The compiler rejects, with clear messages:
   over-deep include nesting.
 - `cache:` with `paths` but no `key`, a `key`/`policy` with no `paths`, an empty
   `key.files` list, or an invalid `policy` (not `pull`/`push`/`pull-push`).
+
+## Predefined variables in jobs
+
+Every job's environment carries these, set by the server when a runner picks
+the job up (all executors). Repo variables and the job's own `variables:`
+override them, as in GitLab.
+
+| Variable | Value |
+|---|---|
+| `CI`, `FORGE_CI` | `true` |
+| `CI_COMMIT_SHA` / `CI_COMMIT_SHORT_SHA` | full / first 8 characters of the commit |
+| `CI_COMMIT_REF_NAME` | branch or tag name (`refs/heads/` / `refs/tags/` stripped) |
+| `CI_COMMIT_BRANCH` | branch name — **unset for tag pipelines** |
+| `CI_COMMIT_TAG` | tag name — **set only for tag pushes** (every git host) |
+| `CI_COMMIT_REF_SLUG` | ref name lowercased, non-alphanumerics → `-`, max 63 chars (for image tags, hostnames) |
+| `CI_COMMIT_MESSAGE` / `CI_COMMIT_TITLE` | full message / first line |
+| `CI_COMMIT_AUTHOR` | who wrote the commit, when the provider says |
+| `CI_TRIGGERED_BY` (alias `GITLAB_USER_LOGIN`) | who started the run |
+| `CI_PIPELINE_ID`, `CI_PIPELINE_SOURCE` | pipeline id; `api` / `push` / `webhook` / `merge_request` / `schedule` |
+| `CI_JOB_ID`, `CI_JOB_NAME` | the job |
+| `CI_PROJECT_PATH`, `CI_PROJECT_NAMESPACE`, `CI_PROJECT_NAME` | `acme/cos`, `acme`, `cos` |
+| `CI_ENVIRONMENT_NAME` | the job's environment (registered name), when it has one |
+| `CI_DEFAULT_BRANCH` | the repo's default branch, when it is connected |
+| `CI_REPOSITORY_URL` | the repo's clone URL as registered — **never carries credentials** (the runner's checkout does its own auth) |
+| `CI_SERVER_URL`, `CI_API_V1_URL` | this Forge server (`EXTERNAL_URL`, else `FRONTEND_URL`) and its API |
+| `CI_PIPELINE_URL`, `CI_JOB_URL` | links to the pipeline / job page (`FRONTEND_URL`, else `EXTERNAL_URL`) |
+| `CI_MERGE_REQUEST_ID`, `CI_MERGE_REQUEST_IID` | the merge/pull request number (hosts without a separate global id use the number for both) |
+| `CI_MERGE_REQUEST_SOURCE_BRANCH`, `CI_MERGE_REQUEST_TARGET_BRANCH`, `CI_MERGE_REQUEST_TITLE` | merge-request pipelines |
+| `CI_MERGE_REQUEST_PROJECT_PATH`, `CI_MERGE_REQUEST_SOURCE_BRANCH_SHA` | the repo and head commit of the merge request |
+| `CI_MERGE_REQUEST_DIFF_BASE_SHA` | the target commit the diff is against, when the host sends it |
+| `CI_DEBUG_TRACE` | `true` on a **debug rerun** (below) |
+| `FORGE_OIDC_TOKEN` (`CI_JOB_JWT`) | per-job OIDC token for keyless cloud auth (docs/oidc.md) |
+
+The URL variables are unset when neither `EXTERNAL_URL` nor `FRONTEND_URL` is
+configured.
+
+## `retry:` — how many times, and for which failures
+
+```yaml
+flaky-tests:
+  retry: 2                            # any failure, up to twice (as before)
+deploy:
+  retry:
+    max: 1
+    when: [runner_system_failure]     # only when the runner was lost, never for a failing script
+```
+
+`when:` takes `always` (default), `script_failure` (the script exited
+non-zero) and `runner_system_failure` (the runner stopped heart-beating mid-
+job — reboot, power, network). A timeout kill is never retried. The
+pipeline-wide `default: {retry: …}` accepts the same forms.
+
+## Debug reruns — `CI_DEBUG_TRACE`
+
+**Retry with debug trace** on a failed or canceled job (or
+`POST /api/v1/jobs/{id}/retry {"debug": true}`) reruns that job with
+`CI_DEBUG_TRACE=true`, and every executor (shell, docker, kubernetes) then runs
+the script with `sh -x`, so the log shows each command as it is executed, with
+variables expanded. Only the job you asked for gets the trace; the jobs after it
+rerun normally. You can also set `CI_DEBUG_TRACE: "true"` in a job's
+`variables:`.
+
+Masked variables stay masked in traced output. The trace prints a value as
+the shell re-quotes it — bash writes `it's` as `it'\''s`, busybox ash (Alpine)
+as `it'"'"'s`, dash as is — and Forge masks every one of those forms, on the
+shell, docker and kubernetes executors alike (masking happens on the server as
+log chunks arrive, whichever executor produced them). What masking cannot
+catch is a value *derived* from a secret — base64-encoded, URL-encoded, sliced
+— which the trace will show once the script computes it. Use debug reruns
+deliberately on jobs that transform credentials.
+
+## Validating a config without running it
+
+`POST /api/v1/lint {"config": "<yaml>", "ref": "main", "repo": "acme/cos"}`
+compiles the YAML exactly as a run on `ref` would — includes from the repo's
+templates, `rules:` evaluated for that branch, and this server's environment
+branch rules — and returns `{valid, error, stages, jobs}`. Each job lists its
+stage, environment, needs and, if the environment rules would refuse it on
+that branch, why (`refused`). Nothing is started. The **Validate** button on
+Run pipeline and on Settings → Pipeline config calls it.
+
+```sh
+curl -s -H "Authorization: Bearer $FORGE_TOKEN" -X POST $FORGE/api/v1/lint \
+  -d "$(jq -n --rawfile c .forge-ci.yml '{config:$c, ref:"main"}')"
+```
+
+## `resource_group:` — one deploy at a time
+
+```yaml
+deploy:
+  stage: deploy
+  environment: production
+  resource_group: deploy-$CI_ENVIRONMENT_NAME   # → "deploy-production"
+  script: [./deploy.sh]
+```
+
+At most **one job per (repo, `resource_group`) runs at a time**. Other jobs of
+the same group wait in the queue (status *pending*) and start, oldest first, as
+soon as the running one finishes. Different repos and different groups don't
+wait on each other. `$CI_ENVIRONMENT_NAME` (or `${CI_ENVIRONMENT_NAME}`)
+resolves to the job's registered environment name, so one line gives "one
+deploy per environment". Enforced when a runner picks the job up, under a
+database lock, so it holds across server replicas and for jobs released by an
+approval. Allowed characters: letters, digits, `_ . - /`.
+
+## Retrying one job
+
+**Retry job** on a failed or canceled job (UI, or `POST /api/v1/jobs/{id}/retry`)
+re-runs it **inside the same pipeline**, together with every job after it (via
+`needs`, transitively) that did not succeed. Jobs that succeeded are not re-run.
+
+- Each re-run job is a **new job** (its own log and attempt count) with
+  `retry_of` pointing at the attempt it replaces; the old attempt stays
+  visible from the job page ("retry of job N") but no longer counts towards
+  the pipeline's status.
+- The scheduler runs the new jobs normally: approvals, deploy freezes,
+  resource groups and environment branch rules all apply again — a job the
+  branch rules refuse can't be brought back by a retry (`403`).
+- Same permission as retrying a whole pipeline: anyone with a role on the
+  repo. The pipeline-level **Retry** still starts a fresh copy of the whole
+  pipeline.
+
+## `runner_affinity:` — prefer the runner with warm caches
+
+`runner_affinity: true` on a job makes its next run prefer the runner that
+last ran it successfully, for up to `RUNNER_AFFINITY_WAIT` (default 1m) before
+any runner may take it. See docs/runners.md → *Cache affinity*.

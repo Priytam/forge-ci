@@ -15,6 +15,8 @@ var downloadableFiles = map[string]string{
 	"forge-runner-darwin-arm64":      "application/octet-stream",
 	"forge-runner-darwin-amd64":      "application/octet-stream",
 	"forge-runner-linux-amd64":       "application/octet-stream",
+	"forge-runner-linux-arm64":       "application/octet-stream",
+	"VERSION":                        "text/plain; charset=utf-8",
 	"forge-runner-windows-amd64.exe": "application/octet-stream",
 	"install-runner.sh":              "text/x-shellscript; charset=utf-8",
 	"install-runner.ps1":             "text/plain; charset=utf-8",
