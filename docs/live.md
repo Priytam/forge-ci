@@ -349,6 +349,27 @@ An application's environment and repo are its target's. That links a
 cluster deployed from one GitOps repo — the common case — to that repo's
 pipelines and Applications tab.
 
+### One cluster, several environments
+
+A cluster that runs staging and prod in different namespaces needs one
+target and one agent, not two. Under **Settings → Live agents → Edit**, map
+namespaces to environments, one per line (`travafa-staging = staging`,
+`travafa-prod = production`); apps in any other namespace keep the
+target's environment. Or through the API:
+
+```bash
+curl -X PATCH https://forge.example.com/api/v1/live/targets/<id> \
+  -H "Authorization: Bearer $FORGE_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"namespace_environments": {"travafa-staging": "staging", "travafa-prod": "production"}}'
+```
+
+(`POST /api/v1/live/targets` takes the same field.) The app's environment
+then decides everything an environment decides: the Applications filter and
+facet, the repo's environment cards, which deployment the app is compared
+with, and the freeze and approval rules for its syncs and rollbacks.
+Namespaces are matched exactly. App templates still pick targets by the
+target's own environment.
+
 ## Numbers
 
 **Agent footprint, 100,000 watched objects** — `LIVE_LOAD=100000 go test

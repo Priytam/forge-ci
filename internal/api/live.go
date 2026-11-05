@@ -50,6 +50,7 @@ func (s *Server) registerLiveRoutes() {
 		s.mux.HandleFunc(pattern, readPath(h))
 	}
 	s.mux.HandleFunc("POST /api/v1/live/targets", s.createLiveTarget)
+	s.mux.HandleFunc("PATCH /api/v1/live/targets/{id}", s.updateLiveTarget)
 	s.mux.HandleFunc("DELETE /api/v1/live/targets/{id}", s.deleteLiveTarget)
 	s.mux.HandleFunc("POST /api/v1/live/agent/batches", s.liveAgentBatch)
 	s.mux.HandleFunc("POST /api/v1/live/apps/{id}/ops", s.createLiveOp)
@@ -293,22 +294,61 @@ func (s *Server) createLiveTarget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Name        string `json:"name"`
-		Environment string `json:"environment"`
-		Repo        string `json:"repo"`
+		Name                  string            `json:"name"`
+		Environment           string            `json:"environment"`
+		Repo                  string            `json:"repo"`
+		NamespaceEnvironments map[string]string `json:"namespace_environments"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Name) == "" {
 		writeErr(w, http.StatusBadRequest, "name is required")
 		return
 	}
 	t, token, err := s.store.CreateLiveTarget(r.Context(), strings.TrimSpace(req.Name), strings.TrimSpace(req.Environment),
-		strings.TrimSpace(req.Repo), s.actorLabel(r))
+		strings.TrimSpace(req.Repo), s.actorLabel(r), req.NamespaceEnvironments)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.audit(r, "live.target.create", t.Name, t.Repo, "success", map[string]any{"environment": t.Environment})
+	s.audit(r, "live.target.create", t.Name, t.Repo, "success", map[string]any{"environment": t.Environment,
+		"namespace_environments": t.NamespaceEnvironments})
 	writeJSON(w, http.StatusCreated, map[string]any{"target": t, "token": token})
+}
+
+// updateLiveTarget is PATCH /api/v1/live/targets/{id}: change the target's
+// environment and its namespace → environment overrides. Admin only.
+func (s *Server) updateLiveTarget(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid target id")
+		return
+	}
+	var req struct {
+		Environment           *string           `json:"environment"`
+		NamespaceEnvironments map[string]string `json:"namespace_environments"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if req.Environment != nil {
+		e := strings.TrimSpace(*req.Environment)
+		req.Environment = &e
+	}
+	t, err := s.store.SetLiveTargetEnvironments(r.Context(), id, req.Environment, req.NamespaceEnvironments)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "target not found")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.audit(r, "live.target.update", t.Name, t.Repo, "success", map[string]any{"environment": t.Environment,
+		"namespace_environments": t.NamespaceEnvironments})
+	writeJSON(w, http.StatusOK, t)
 }
 
 // deleteLiveTarget removes a target (its token stops working at once).

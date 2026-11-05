@@ -1653,3 +1653,7 @@ CREATE TABLE IF NOT EXISTS platform_admins (
 -- Runner log chunks carry a per-claim sequence number; a resent chunk whose
 -- number is not above log_seq is a duplicate and is skipped. Reset on claim.
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS log_seq BIGINT NOT NULL DEFAULT 0;
+
+-- One target, several environments: a namespace → environment map that
+-- overrides the target's environment for the apps in those namespaces.
+ALTER TABLE live_targets ADD COLUMN IF NOT EXISTS namespace_environments JSONB NOT NULL DEFAULT '{}';

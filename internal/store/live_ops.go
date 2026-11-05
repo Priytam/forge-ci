@@ -175,7 +175,7 @@ func (s *Store) ApproveLiveOp(ctx context.Context, id int64, approver, verdict, 
 	defer tx.Rollback(ctx)
 	var state, requester, repo, env string
 	var target int64
-	err = tx.QueryRow(ctx, `SELECT o.state, o.requested_by, t.repo, t.environment, o.target_id
+	err = tx.QueryRow(ctx, `SELECT o.state, o.requested_by, t.repo, `+liveAppEnv+`, o.target_id
 		FROM live_ops o JOIN live_apps a ON a.id = o.app_id JOIN live_targets t ON t.id = a.target_id
 		WHERE o.id=$1 FOR UPDATE OF o`, id).Scan(&state, &requester, &repo, &env, &target)
 	if errors.Is(err, pgx.ErrNoRows) {

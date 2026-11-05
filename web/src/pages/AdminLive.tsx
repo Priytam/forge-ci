@@ -1,12 +1,32 @@
 import { useCallback, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
-import { createLiveTarget, deleteLiveTarget, listLiveTargets, relativeTime, type LiveTarget } from "../api";
+import { createLiveTarget, deleteLiveTarget, listLiveTargets, relativeTime, updateLiveTarget, type LiveTarget } from "../api";
 import ConfirmDialog from "../components/ui/ConfirmDialog";
 import { Pill, Skeleton } from "../components/ui/Pill";
 import { usePoll } from "../hooks/usePoll";
 
 /** An agent is connected when it reported within twice its heartbeat. */
 const CONNECTED_MS = 75_000;
+
+/** "namespace = environment" lines ⇄ the target's override map. */
+function formatNsEnvs(m: Record<string, string> | null): string {
+  return Object.entries(m ?? {})
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([ns, env]) => `${ns} = ${env}`)
+    .join("\n");
+}
+
+function parseNsEnvs(text: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    const i = line.indexOf("=");
+    if (i < 0) throw new Error(`"${line}": write namespace = environment`);
+    out[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+  }
+  return out;
+}
 
 function bytes(n: number): string {
   if (n >= 1 << 30) return `${(n / (1 << 30)).toFixed(1)} GB`;
@@ -28,6 +48,26 @@ export default function AdminLive() {
   const [busy, setBusy] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [removing, setRemoving] = useState<LiveTarget | null>(null);
+  const [editing, setEditing] = useState<{ target: LiveTarget; environment: string; nsEnvs: string } | null>(null);
+  const [editError, setEditError] = useState<string | null>(null);
+
+  const saveEdit = async () => {
+    if (!editing) return;
+    setBusy(true);
+    setEditError(null);
+    try {
+      await updateLiveTarget(editing.target.id, {
+        environment: editing.environment,
+        namespace_environments: parseNsEnvs(editing.nsEnvs),
+      });
+      setEditing(null);
+      refresh();
+    } catch (err) {
+      setEditError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const create = async (e: FormEvent) => {
     e.preventDefault();
@@ -127,7 +167,14 @@ kubectl apply -f deploy/live/agent.yaml   # from a Forge checkout`}</pre>
                         <Pill tone="neutral" icon="offline">{t.last_seen_at ? `Last seen ${relativeTime(t.last_seen_at)}` : "Never connected"}</Pill>
                       )}
                     </td>
-                    <td className="muted">{[t.environment, t.repo].filter(Boolean).join(" · ") || "—"}</td>
+                    <td className="muted">
+                      {[t.environment, t.repo].filter(Boolean).join(" · ") || "—"}
+                      {Object.entries(t.namespace_environments ?? {}).map(([ns, env]) => (
+                        <div key={ns}>
+                          {ns} → {env}
+                        </div>
+                      ))}
+                    </td>
                     <td className="num">{t.apps}</td>
                     <td className="num">{t.stats.objects?.toLocaleString() ?? "—"}</td>
                     <td className="num">{t.stats.heap_bytes ? bytes(t.stats.heap_bytes) : "—"}</td>
@@ -135,6 +182,16 @@ kubectl apply -f deploy/live/agent.yaml   # from a Forge checkout`}</pre>
                       {up > 0 ? `${bytes(Math.round((t.stats.bytes_sent || 0) / up))}/s` : "—"}
                     </td>
                     <td>
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        onClick={() => {
+                          setEditError(null);
+                          setEditing({ target: t, environment: t.environment, nsEnvs: formatNsEnvs(t.namespace_environments) });
+                        }}
+                      >
+                        Edit
+                      </button>{" "}
                       <button type="button" className="btn btn-sm" onClick={() => setRemoving(t)}>Remove</button>
                     </td>
                   </tr>
@@ -145,6 +202,31 @@ kubectl apply -f deploy/live/agent.yaml   # from a Forge checkout`}</pre>
         </div>
       )}
       {data && data.length === 0 && !created && <div className="empty card">No clusters or projects yet.</div>}
+
+      {editing && (
+        <ConfirmDialog
+          title={`Environments of ${editing.target.name}`}
+          confirmLabel="Save"
+          busy={busy}
+          onCancel={() => setEditing(null)}
+          onConfirm={() => void saveEdit()}
+        >
+          <label className="lv-admin-field">
+            Environment (apps in any other namespace)
+            <input value={editing.environment} onChange={(e) => setEditing({ ...editing, environment: e.target.value })} />
+          </label>
+          <label className="lv-admin-field">
+            Per namespace, one per line: <code>namespace = environment</code>
+            <textarea
+              rows={5}
+              placeholder={"travafa-staging = staging\ntravafa-prod = production"}
+              value={editing.nsEnvs}
+              onChange={(e) => setEditing({ ...editing, nsEnvs: e.target.value })}
+            />
+          </label>
+          {editError && <div className="error-banner">{editError}</div>}
+        </ConfirmDialog>
+      )}
 
       {removing && (
         <ConfirmDialog

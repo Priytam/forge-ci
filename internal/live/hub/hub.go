@@ -247,7 +247,7 @@ func (h *Hub) apply(ctx context.Context, tx *store.LiveTx, d live.Delta) (*Tree,
 	}
 	if t := tx.Target; !t.Capabilities.Diff && t.Repo != "" && d.Status != nil {
 		// No Git (Cloud Run): the desired state is what Forge last deployed.
-		digest, err := h.st.LatestDeployDigest(ctx, t.Repo, t.Environment)
+		digest, err := h.st.LatestDeployDigest(ctx, t.Repo, t.EnvironmentFor(a.Namespace))
 		if err != nil {
 			return nil, 0, err
 		}

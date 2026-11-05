@@ -474,6 +474,19 @@ async function requestVoid(
   }
 }
 
+async function patchJSON<T>(path: string, body: unknown): Promise<T> {
+  mutated();
+  const res = await fetch(`${BASE}${path}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    throw await parseError(res);
+  }
+  return (await res.json()) as T;
+}
+
 async function putJSON<T>(path: string, body: unknown): Promise<T> {
   mutated();
   const res = await fetch(`${BASE}${path}`, {
@@ -3002,6 +3015,8 @@ export interface LiveTarget {
   id: number;
   name: string;
   environment: string;
+  /** Overrides `environment` for the apps in a namespace. */
+  namespace_environments: Record<string, string> | null;
   repo: string;
   provider: string;
   capabilities: LiveCapabilities;
@@ -3118,6 +3133,13 @@ export function listLiveTargets(): Promise<LiveTarget[]> {
 
 export function createLiveTarget(t: { name: string; environment: string; repo: string }): Promise<{ target: LiveTarget; token: string }> {
   return postJSON("/live/targets", t);
+}
+
+export function updateLiveTarget(
+  id: number,
+  patch: { environment?: string; namespace_environments?: Record<string, string> }
+): Promise<LiveTarget> {
+  return patchJSON(`/live/targets/${id}`, patch);
 }
 
 export function deleteLiveTarget(id: number): Promise<void> {
