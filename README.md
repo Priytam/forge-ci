@@ -361,7 +361,7 @@ the dev experience):
 | `RUNNER_AUTH` | `off` \| `on` — require a bearer token on the runner protocol + artifact upload | `off` |
 | `RUNNER_TOKEN` | (runner) token sent to an `RUNNER_AUTH=on` server | — |
 | `FORGE_SECRET_KEY` | base64 32-byte AES-256-GCM key; encrypts variables, VCS tokens and SSO secrets at rest | — (passthrough) |
-| `ADMIN_EMAILS` | comma-separated platform-admin emails (enforced once SSO is on); more admins can be added in Admin → Platform admins | — |
+| `ADMIN_EMAILS` | comma-separated platform-admin emails (enforced once SSO is on); more admins can be added in Admin → People & roles | — |
 | `EXTERNAL_URL` | server's public origin (SSO redirect + CSRF allow-list; commit-status `target_url` fallback; **OIDC token issuer + JWKS origin**) | `http://localhost:8080` |
 | `OIDC_PRIVATE_KEY` | RSA PEM (PKCS#1/PKCS#8) signing the per-job OIDC ID tokens; when unset Forge generates one on first start and persists it encrypted (stable JWKS across restarts) — see [docs/oidc.md](docs/oidc.md) | — (generated) |
 | `OIDC_AUDIENCE` | `aud` claim of minted OIDC tokens (set per cloud, e.g. `sts.amazonaws.com` for AWS) | `forge-ci` |
