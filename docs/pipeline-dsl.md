@@ -942,15 +942,51 @@ deliberately on jobs that transform credentials.
 `POST /api/v1/lint {"config": "<yaml>", "ref": "main", "repo": "acme/cos"}`
 compiles the YAML exactly as a run on `ref` would — includes from the repo's
 templates, `rules:` evaluated for that branch, and this server's environment
-branch rules — and returns `{valid, error, stages, jobs}`. Each job lists its
-stage, environment, needs and, if the environment rules would refuse it on
-that branch, why (`refused`). Nothing is started. The **Validate** button on
+branch rules — and returns `{valid, error, stages, jobs, warnings}`. Each job
+lists its stage, environment, needs, the `shell` that will run its script and,
+if the environment rules would refuse it on that branch, why (`refused`).
+`warnings` flags bash-only syntax in jobs that run under `sh` (see
+[`shell:`](#shell--which-shell-runs-the-script)); they do not make the config
+invalid. Nothing is started. The **Validate** button on
 Run pipeline and on Settings → Pipeline config calls it.
 
 ```sh
 curl -s -H "Authorization: Bearer $FORGE_TOKEN" -X POST $FORGE/api/v1/lint \
   -d "$(jq -n --rawfile c .forge-ci.yml '{config:$c, ref:"main"}')"
 ```
+
+## `shell:` — which shell runs the script
+
+A job's `script` lines are joined and run by **`sh -ce`** (stop at the first
+failing command) unless the job says otherwise. `sh` is POSIX: on Debian and
+Ubuntu images it is `dash`, on Alpine BusyBox `ash`. They have no
+`${VAR:0:7}` substrings, `${VAR/a/b}`, `${VAR^^}`, `[[ … ]]`, arrays, `<(…)`
+or `$'…'`; using one fails at run time, often as `Bad substitution`.
+
+```yaml
+default:
+  shell: bash            # every job without its own shell:
+
+jobs:
+  tag:
+    image: debian:12
+    script:
+      - echo "short sha ${CI_COMMIT_SHA:0:7}"
+  alpine-check:
+    image: alpine:3
+    shell: sh            # back to POSIX for an image without bash
+    script: [./check.sh]
+```
+
+- Values: `sh` (default) or `bash`; anything else is a compile error.
+  Precedence: the job's `shell:` > `default: shell:` > `sh`. `extends:` and
+  `include:` merge it like other fields.
+- `bash` must exist in the job's image (docker and kubernetes executors) or
+  on the runner host (shell executor); the flags are the same (`-ce`, plus
+  `-x` on a debug rerun).
+- The job log's first line says which shell ran it, and **Validate** (lint)
+  shows each job's shell and warns about bash syntax in a job that runs
+  under `sh`.
 
 ## `resource_group:` — one deploy at a time
 
@@ -987,6 +1023,32 @@ re-runs it **inside the same pipeline**, together with every job after it (via
 - Same permission as retrying a whole pipeline: anyone with a role on the
   repo. The pipeline-level **Retry** still starts a fresh copy of the whole
   pipeline.
+
+## Retrying many failed jobs after an outage
+
+**Pipelines → Retry failed…** (on the all-pipelines page or a repo's) retries
+every failed job that matches a **job name** (contains, case-insensitive)
+and/or an **error text** — matched against the job's status reason and the
+last 256 KiB of its log — and failed in a recent window. **Preview** lists the
+jobs first; **Retry** re-runs each exactly as **Retry job** would (with its
+downstream jobs), so jobs of one pipeline are retried once.
+
+```bash
+curl -X POST https://forge.example.com/api/v1/jobs/retry-failed \
+  -H "Authorization: Bearer $FORGE_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name": "deploy", "error": "i/o timeout", "since": "6h", "repo": "acme/api", "dry_run": true}'
+```
+
+- `since` is required: an RFC 3339 time or a duration back from now (`"6h"`).
+  At least one of `name` and `error` is required; `repo` is optional. At most
+  200 failed jobs are considered (narrow the filter otherwise). Only the
+  latest attempt of a job counts; a job already retried is not retried again.
+- The answer lists `matched`, `retried` (old and new job ids) and `skipped`
+  with the reason — a repo you have no role on (the same rule as a single
+  retry), branch rules refusing the job, or a job already re-queued as a
+  dependent of an earlier match.
+- Each retry is audited as `job.retry` (with `bulk: true`), and the run as one
+  `job.retry.bulk` entry with the filter and counts.
 
 ## `runner_affinity:` — prefer the runner with warm caches
 

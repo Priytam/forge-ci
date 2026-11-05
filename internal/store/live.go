@@ -23,23 +23,77 @@ import (
 
 // LiveTarget is a cluster or cloud project reported by one forge-agent.
 type LiveTarget struct {
-	ID           int64             `json:"id"`
-	Name         string            `json:"name"`
-	Environment  string            `json:"environment"`
-	Repo         string            `json:"repo"`
-	Provider     string            `json:"provider"`
-	Capabilities live.Capabilities `json:"capabilities"`
-	AgentVersion string            `json:"agent_version"`
-	Epoch        string            `json:"-"`
-	Seq          int64             `json:"-"`
-	Synced       bool              `json:"synced"`
-	Stats        live.AgentStats   `json:"stats"`
-	BytesIn      int64             `json:"bytes_in"`
-	LastSeenAt   *time.Time        `json:"last_seen_at"`
-	CreatedBy    string            `json:"created_by"`
-	CreatedAt    time.Time         `json:"created_at"`
-	TokenSuffix  string            `json:"token_suffix"`
-	Apps         int               `json:"apps"`
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	Environment string `json:"environment"`
+	// NamespaceEnvironments overrides Environment for the apps in a
+	// namespace: one agent can report a cluster's staging and prod.
+	NamespaceEnvironments map[string]string `json:"namespace_environments"`
+	// DefaultPolicy, when set, is the sync policy apps first seen on this
+	// target start with.
+	DefaultPolicy *LivePolicy       `json:"default_policy"`
+	Repo          string            `json:"repo"`
+	Provider      string            `json:"provider"`
+	Capabilities  live.Capabilities `json:"capabilities"`
+	AgentVersion  string            `json:"agent_version"`
+	Epoch         string            `json:"-"`
+	Seq           int64             `json:"-"`
+	Synced        bool              `json:"synced"`
+	Stats         live.AgentStats   `json:"stats"`
+	BytesIn       int64             `json:"bytes_in"`
+	LastSeenAt    *time.Time        `json:"last_seen_at"`
+	CreatedBy     string            `json:"created_by"`
+	CreatedAt     time.Time         `json:"created_at"`
+	TokenSuffix   string            `json:"token_suffix"`
+	Apps          int               `json:"apps"`
+}
+
+// Where an app's environment comes from, strongest first.
+const (
+	EnvFromApp       = "app"       // set on the app in Forge
+	EnvFromLabel     = "label"     // the environment label on its objects
+	EnvFromNamespace = "namespace" // the target's namespace → environment map
+	EnvFromTarget    = "target"    // the target's environment
+)
+
+// EnvironmentOf is app a's environment on this target and where it comes
+// from: the app's own setting, else its label (when its objects agree),
+// else its namespace's mapping, else the target's environment.
+func (t *LiveTarget) EnvironmentOf(a *LiveApp) (env, source string) {
+	switch {
+	case a.EnvironmentOverride != "":
+		return a.EnvironmentOverride, EnvFromApp
+	case a.LabelEnvironment != "":
+		return a.LabelEnvironment, EnvFromLabel
+	case t.NamespaceEnvironments[a.Namespace] != "":
+		return t.NamespaceEnvironments[a.Namespace], EnvFromNamespace
+	}
+	return t.Environment, EnvFromTarget
+}
+
+// liveAppOverride is an app's explicit environment ("" when none).
+const liveAppOverride = `COALESCE((SELECT e.environment FROM live_app_environments e
+	WHERE e.target_id = a.target_id AND e.app_key = a.key), '')`
+
+// liveAppEnv is EnvironmentOf in SQL, for queries joining live_apps a and
+// live_targets t; liveAppEnvSource says which rule gave it.
+const liveAppEnv = `COALESCE(NULLIF(` + liveAppOverride + `, ''), NULLIF(a.label_environment, ''),
+	NULLIF(t.namespace_environments->>a.namespace, ''), t.environment)`
+
+const liveAppEnvSource = `CASE WHEN ` + liveAppOverride + ` <> '' THEN 'app' WHEN a.label_environment <> '' THEN 'label'
+	WHEN COALESCE(t.namespace_environments->>a.namespace, '') <> '' THEN 'namespace' ELSE 'target' END`
+
+// ValidNamespaceEnvironments checks a namespace → environment map.
+func ValidNamespaceEnvironments(m map[string]string) error {
+	for ns, env := range m {
+		if strings.TrimSpace(ns) == "" || ns != strings.TrimSpace(ns) {
+			return fmt.Errorf("namespace_environments: invalid namespace %q", ns)
+		}
+		if strings.TrimSpace(env) == "" {
+			return fmt.Errorf("namespace_environments: namespace %q needs an environment", ns)
+		}
+	}
+	return nil
 }
 
 // LiveDeploy is the latest successful Forge deployment to an app's
@@ -75,19 +129,29 @@ type LiveApp struct {
 	Epoch         string    `json:"-"`
 	UpdatedAt     time.Time `json:"updated_at"`
 	// The desired state's revision and where it was rendered from.
-	Revision        string      `json:"revision"`
-	RevisionMessage string      `json:"revision_message"`
-	RevisionAuthor  string      `json:"revision_author"`
-	RevisionAt      *time.Time  `json:"revision_at"`
-	SourcePath      string      `json:"source_path"`
-	SourceTool      string      `json:"source_tool"`
-	SourceError     string      `json:"source_error"`
-	DesiredKeys     []string    `json:"-"`
-	Target          string      `json:"target"`
-	Environment     string      `json:"environment"`
-	Repo            string      `json:"repo"`
-	Provider        string      `json:"provider"`
-	Deployed        *LiveDeploy `json:"deployed"`
+	Revision        string     `json:"revision"`
+	RevisionMessage string     `json:"revision_message"`
+	RevisionAuthor  string     `json:"revision_author"`
+	RevisionAt      *time.Time `json:"revision_at"`
+	SourcePath      string     `json:"source_path"`
+	SourceTool      string     `json:"source_tool"`
+	SourceError     string     `json:"source_error"`
+	DesiredKeys     []string   `json:"-"`
+	Target          string     `json:"target"`
+	Environment     string     `json:"environment"`
+	// EnvironmentSource says where Environment comes from: app, label,
+	// namespace or target (see EnvironmentOf).
+	EnvironmentSource string `json:"environment_source"`
+	// EnvironmentOverride is the environment set on the app in Forge ("" =
+	// none); LabelEnvironment the one its objects' label gives.
+	EnvironmentOverride string `json:"environment_override"`
+	LabelEnvironment    string `json:"label_environment"`
+	// EnvironmentConflict lists the label's values when the app's objects
+	// disagree; no label environment applies then and the app is flagged.
+	EnvironmentConflict []string    `json:"environment_conflict"`
+	Repo                string      `json:"repo"`
+	Provider            string      `json:"provider"`
+	Deployed            *LiveDeploy `json:"deployed"`
 	// Drifted and Prunable count the resources behind an OutOfSync.
 	Drifted  int    `json:"drifted"`
 	Prunable int    `json:"prunable"`
@@ -136,16 +200,22 @@ func newLiveToken() (string, error) {
 
 // CreateLiveTarget registers a target and returns its agent token — the only
 // time the raw token exists; Forge keeps its hash.
-func (s *Store) CreateLiveTarget(ctx context.Context, name, environment, repo, by string) (*LiveTarget, string, error) {
+func (s *Store) CreateLiveTarget(ctx context.Context, name, environment, repo, by string, nsEnvs map[string]string) (*LiveTarget, string, error) {
+	if err := ValidNamespaceEnvironments(nsEnvs); err != nil {
+		return nil, "", err
+	}
+	if nsEnvs == nil {
+		nsEnvs = map[string]string{}
+	}
 	tok, err := newLiveToken()
 	if err != nil {
 		return nil, "", err
 	}
-	t := LiveTarget{Name: name, Environment: environment, Repo: repo, CreatedBy: by, TokenSuffix: tok[len(tok)-4:]}
+	t := LiveTarget{Name: name, Environment: environment, NamespaceEnvironments: nsEnvs, Repo: repo, CreatedBy: by, TokenSuffix: tok[len(tok)-4:]}
 	err = s.pool.QueryRow(ctx,
-		`INSERT INTO live_targets (name, environment, repo, token_hash, token_suffix, created_by)
-		 VALUES ($1,$2,$3,$4,$5,$6) RETURNING id, created_at`,
-		name, environment, repo, hashAPIToken(tok), t.TokenSuffix, by).Scan(&t.ID, &t.CreatedAt)
+		`INSERT INTO live_targets (name, environment, repo, token_hash, token_suffix, created_by, namespace_environments)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, created_at`,
+		name, environment, repo, hashAPIToken(tok), t.TokenSuffix, by, nsEnvs).Scan(&t.ID, &t.CreatedAt)
 	if err != nil {
 		if strings.Contains(err.Error(), "live_targets_name_key") {
 			return nil, "", fmt.Errorf("a target named %q exists", name)
@@ -156,13 +226,13 @@ func (s *Store) CreateLiveTarget(ctx context.Context, name, environment, repo, b
 }
 
 const liveTargetCols = `t.id, t.name, t.environment, t.repo, t.provider, t.capabilities, t.agent_version, t.epoch, t.seq,
-	t.synced, t.stats, t.bytes_in, t.last_seen_at, t.created_by, t.created_at, t.token_suffix`
+	t.synced, t.stats, t.bytes_in, t.last_seen_at, t.created_by, t.created_at, t.token_suffix, t.namespace_environments, t.default_policy`
 
 func scanLiveTarget(row pgx.Row, extra ...any) (*LiveTarget, error) {
 	var t LiveTarget
-	var caps, stats []byte
+	var caps, stats, policy []byte
 	dest := append([]any{&t.ID, &t.Name, &t.Environment, &t.Repo, &t.Provider, &caps, &t.AgentVersion, &t.Epoch, &t.Seq,
-		&t.Synced, &stats, &t.BytesIn, &t.LastSeenAt, &t.CreatedBy, &t.CreatedAt, &t.TokenSuffix}, extra...)
+		&t.Synced, &stats, &t.BytesIn, &t.LastSeenAt, &t.CreatedBy, &t.CreatedAt, &t.TokenSuffix, &t.NamespaceEnvironments, &policy}, extra...)
 	if err := row.Scan(dest...); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
@@ -171,7 +241,36 @@ func scanLiveTarget(row pgx.Row, extra ...any) (*LiveTarget, error) {
 	}
 	_ = json.Unmarshal(caps, &t.Capabilities)
 	_ = json.Unmarshal(stats, &t.Stats)
+	if len(policy) > 0 {
+		_ = json.Unmarshal(policy, &t.DefaultPolicy)
+	}
 	return &t, nil
+}
+
+// SetLiveTargetEnvironments changes a target's environment and its
+// namespace → environment overrides (nil leaves either as it is).
+func (s *Store) SetLiveTargetEnvironments(ctx context.Context, id int64, environment *string, nsEnvs map[string]string) (*LiveTarget, error) {
+	if err := ValidNamespaceEnvironments(nsEnvs); err != nil {
+		return nil, err
+	}
+	var raw []byte
+	if nsEnvs != nil {
+		raw, _ = json.Marshal(nsEnvs)
+	}
+	tag, err := s.pool.Exec(ctx, `UPDATE live_targets SET environment = COALESCE($2, environment),
+		namespace_environments = COALESCE($3::jsonb, namespace_environments) WHERE id = $1`, id, environment, raw)
+	if err != nil {
+		return nil, err
+	}
+	if tag.RowsAffected() == 0 {
+		return nil, ErrNotFound
+	}
+	return s.LiveTarget(ctx, id)
+}
+
+// LiveTarget reads one target.
+func (s *Store) LiveTarget(ctx context.Context, id int64) (*LiveTarget, error) {
+	return scanLiveTarget(s.pool.QueryRow(ctx, `SELECT `+liveTargetCols+` FROM live_targets t WHERE t.id = $1`, id))
 }
 
 // LiveTargetByToken resolves an agent token (ErrNotFound when unknown).
@@ -331,14 +430,16 @@ func (s *Store) LiveIngest(ctx context.Context, targetID int64, fn func(*LiveTx)
 const liveAppCols = `a.id, a.target_id, a.key, a.name, a.namespace, a.app_group, a.health, a.health_message, a.health_since,
 	a.sync, a.resources, a.pods, a.pods_ready, a.images, a.tree, a.version, a.epoch, a.updated_at,
 	a.revision, a.revision_message, a.revision_author, a.revision_at, a.source_path, a.source_tool, a.source_error, a.desired_keys,
-	a.orphans, a.drifted, a.prunable, a.template, a.desired_digest`
+	a.orphans, a.drifted, a.prunable, a.template, a.desired_digest,
+	a.label_environment, a.environment_conflict, ` + liveAppOverride
 
 func scanLiveApp(row pgx.Row, extra ...any) (*LiveApp, error) {
 	var a LiveApp
 	dest := append([]any{&a.ID, &a.TargetID, &a.Key, &a.Name, &a.Namespace, &a.Group, &a.Health, &a.HealthMessage, &a.HealthSince,
 		&a.Sync, &a.Resources, &a.Pods, &a.PodsReady, &a.Images, &a.Tree, &a.Version, &a.Epoch, &a.UpdatedAt,
 		&a.Revision, &a.RevisionMessage, &a.RevisionAuthor, &a.RevisionAt, &a.SourcePath, &a.SourceTool, &a.SourceError, &a.DesiredKeys,
-		&a.Orphans, &a.Drifted, &a.Prunable, &a.Template, &a.DesiredDigest}, extra...)
+		&a.Orphans, &a.Drifted, &a.Prunable, &a.Template, &a.DesiredDigest,
+		&a.LabelEnvironment, &a.EnvironmentConflict, &a.EnvironmentOverride}, extra...)
 	if err := row.Scan(dest...); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
@@ -384,27 +485,41 @@ func (l *LiveTx) SaveApp(ctx context.Context, a *LiveApp, summary bool) error {
 	if a.DesiredKeys == nil {
 		a.DesiredKeys = []string{}
 	}
+	if a.EnvironmentConflict == nil {
+		a.EnvironmentConflict = []string{}
+	}
 	if a.Sync == "" {
 		a.Sync = "Unknown"
 	}
 	var err error
 	if a.ID == 0 {
 		err = l.tx.QueryRow(ctx, `INSERT INTO live_apps (target_id, key, name, namespace, app_group, health, health_message, health_since,
-			resources, pods, pods_ready, images, tree, version, epoch, orphans, template)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING id, updated_at`,
+			resources, pods, pods_ready, images, tree, version, epoch, orphans, template, label_environment, environment_conflict)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING id, updated_at`,
 			l.Target.ID, a.Key, a.Name, a.Namespace, a.Group, a.Health, a.HealthMessage, a.HealthSince,
-			a.Resources, a.Pods, a.PodsReady, a.Images, a.Tree, a.Version, a.Epoch, a.Orphans, a.Template).Scan(&a.ID, &a.UpdatedAt)
+			a.Resources, a.Pods, a.PodsReady, a.Images, a.Tree, a.Version, a.Epoch, a.Orphans, a.Template,
+			a.LabelEnvironment, a.EnvironmentConflict).Scan(&a.ID, &a.UpdatedAt)
 		summary = true
+		if err == nil && !a.Orphans {
+			// A new app starts with its target's default policy, if any.
+			_, err = l.tx.Exec(ctx, `INSERT INTO live_app_policies (target_id, app_key, auto_sync, prune, self_heal, updated_by)
+				SELECT id, $2, (default_policy->>'auto_sync')::boolean, (default_policy->>'prune')::boolean,
+				       (default_policy->>'self_heal')::boolean, $3
+				FROM live_targets WHERE id = $1 AND default_policy IS NOT NULL
+				ON CONFLICT (target_id, app_key) DO NOTHING`, l.Target.ID, a.Key, TargetDefaultPolicyActor)
+		}
 	} else {
 		err = l.tx.QueryRow(ctx, `UPDATE live_apps SET name=$2, namespace=$3, app_group=$4, health=$5, health_message=$6, health_since=$7,
 			resources=$8, pods=$9, pods_ready=$10, images=$11, tree=$12, version=$13, epoch=$14, sync=$15,
 			revision=$16, revision_message=$17, revision_author=$18, revision_at=$19, source_path=$20, source_tool=$21,
-			source_error=$22, desired_keys=$23, drifted=$24, prunable=$25, template=$26, desired_digest=$27, updated_at=now()
+			source_error=$22, desired_keys=$23, drifted=$24, prunable=$25, template=$26, desired_digest=$27,
+			label_environment=$28, environment_conflict=$29, updated_at=now()
 			WHERE id=$1 RETURNING updated_at`,
 			a.ID, a.Name, a.Namespace, a.Group, a.Health, a.HealthMessage, a.HealthSince,
 			a.Resources, a.Pods, a.PodsReady, a.Images, a.Tree, a.Version, a.Epoch, a.Sync,
 			a.Revision, a.RevisionMessage, a.RevisionAuthor, a.RevisionAt, a.SourcePath, a.SourceTool,
-			a.SourceError, a.DesiredKeys, a.Drifted, a.Prunable, a.Template, a.DesiredDigest).Scan(&a.UpdatedAt)
+			a.SourceError, a.DesiredKeys, a.Drifted, a.Prunable, a.Template, a.DesiredDigest,
+			a.LabelEnvironment, a.EnvironmentConflict).Scan(&a.UpdatedAt)
 	}
 	if err != nil {
 		return err
@@ -470,7 +585,7 @@ type LiveAppQuery struct {
 
 // liveDims maps each facet to its column.
 var liveDims = []struct{ name, col string }{
-	{"health", "a.health"}, {"sync", "a.sync"}, {"environment", "t.environment"}, {"repo", "t.repo"},
+	{"health", "a.health"}, {"sync", "a.sync"}, {"environment", liveAppEnv}, {"repo", "t.repo"},
 	{"target", "t.name"}, {"namespace", "a.namespace"}, {"group", "a.app_group"},
 }
 
@@ -504,10 +619,10 @@ const liveAppFrom = ` FROM live_apps a JOIN live_targets t ON t.id = a.target_id
 // repo to its environment (deployments_repo_env_id_idx).
 const liveDeployJoin = ` LEFT JOIN LATERAL (
 	SELECT d.sha, d.deployed_by, d.deployed_at, d.job_id, d.pipeline_id, d.digest FROM deployments d
-	WHERE t.repo <> '' AND d.repo = t.repo AND d.environment = t.environment AND d.status = 'success'
+	WHERE t.repo <> '' AND d.repo = t.repo AND d.environment = ` + liveAppEnv + ` AND d.status = 'success'
 	ORDER BY d.id DESC LIMIT 1) dep ON TRUE`
 
-const liveAppSelect = `SELECT ` + liveAppCols + `, t.name, t.environment, t.repo, t.provider,
+const liveAppSelect = `SELECT ` + liveAppCols + `, t.name, ` + liveAppEnv + `, ` + liveAppEnvSource + `, t.repo, t.provider,
 	dep.sha, dep.deployed_by, dep.deployed_at, dep.job_id, dep.pipeline_id, dep.digest,
 	p.auto_sync, p.prune, p.self_heal, p.status, p.updated_by, p.updated_at` + liveAppFrom + liveDeployJoin +
 	` LEFT JOIN live_app_policies p ON p.target_id = a.target_id AND p.app_key = a.key`
@@ -516,11 +631,11 @@ func scanLiveAppRow(row pgx.Row) (*LiveApp, error) {
 	var sha, by, digest *string
 	var at *time.Time
 	var job, pipe *int64
-	var target, env, repo, provider string
+	var target, env, envSource, repo, provider string
 	var auto, prune, heal *bool
 	var status, pby *string
 	var pat *time.Time
-	a, err := scanLiveApp(row, &target, &env, &repo, &provider, &sha, &by, &at, &job, &pipe, &digest,
+	a, err := scanLiveApp(row, &target, &env, &envSource, &repo, &provider, &sha, &by, &at, &job, &pipe, &digest,
 		&auto, &prune, &heal, &status, &pby, &pat)
 	if err != nil {
 		return nil, err
@@ -529,7 +644,7 @@ func scanLiveAppRow(row pgx.Row) (*LiveApp, error) {
 	if auto != nil {
 		a.Policy = &LivePolicy{AutoSync: *auto, Prune: *prune, SelfHeal: *heal, Status: *status, UpdatedBy: *pby, UpdatedAt: pat}
 	}
-	a.Target, a.Environment, a.Repo, a.Provider = target, env, repo, provider
+	a.Target, a.Environment, a.EnvironmentSource, a.Repo, a.Provider = target, env, envSource, repo, provider
 	if sha != nil {
 		a.Deployed = &LiveDeploy{SHA: *sha, By: *by, At: *at, JobID: *job, PipelineID: *pipe, Digest: *digest}
 	}
@@ -637,7 +752,7 @@ func (s *Store) LiveAppEvents(ctx context.Context, appID int64, resourceUID stri
 // LiveSummaries returns repo → environment → summary for the given repos
 // (all repos when nil).
 func (s *Store) LiveSummaries(ctx context.Context, repos []string) (map[string]map[string]*proto.LiveSummary, error) {
-	rows, err := s.pool.Query(ctx, `SELECT t.repo, t.environment, a.health, count(*)`+liveAppFrom+`
+	rows, err := s.pool.Query(ctx, `SELECT t.repo, `+liveAppEnv+`, a.health, count(*)`+liveAppFrom+`
 		WHERE t.repo <> '' AND NOT a.orphans AND ($1::text[] IS NULL OR t.repo = ANY($1)) GROUP BY 1, 2, 3`, repos)
 	if err != nil {
 		return nil, err
@@ -687,22 +802,7 @@ func (s *Store) LiveHealthCounts(ctx context.Context) (map[string]int, error) {
 }
 
 // ListenLive calls fn with each live notification's payload until ctx ends,
-// on one pooled connection; the caller fans out.
+// on the store's shared listener connection; the caller fans out.
 func (s *Store) ListenLive(ctx context.Context, fn func(payload string)) error {
-	conn, err := s.pool.Acquire(ctx)
-	if err != nil {
-		return err
-	}
-	defer conn.Release()
-	if _, err := conn.Exec(ctx, "LISTEN "+liveChannel); err != nil {
-		return err
-	}
-	defer func() { _, _ = conn.Exec(context.Background(), "UNLISTEN "+liveChannel) }()
-	for {
-		n, err := conn.Conn().WaitForNotification(ctx)
-		if err != nil {
-			return err
-		}
-		fn(n.Payload)
-	}
+	return s.listen(ctx, liveChannel, fn)
 }

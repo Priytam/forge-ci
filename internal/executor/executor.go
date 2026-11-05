@@ -124,6 +124,15 @@ func shellFlags(job *proto.RunnerJob) string {
 	return "-ce"
 }
 
+// Shell is the program a job's script runs under: sh unless the job asks
+// for bash (shell: bash).
+func Shell(job *proto.RunnerJob) string {
+	if job.Shell == "bash" {
+		return "bash"
+	}
+	return "sh"
+}
+
 func debugTrace(job *proto.RunnerJob) bool { return job.Env["CI_DEBUG_TRACE"] == "true" }
 
 type shellExecutor struct{}
@@ -137,7 +146,7 @@ func (shellExecutor) Start(ctx context.Context, job *proto.RunnerJob, workdir st
 		return nil, nil, fmt.Errorf("shell executor cannot run service containers: "+
 			"this job declares %d service(s); route it to a docker or kubernetes runner (add matching runner tags)", len(job.Services))
 	}
-	cmd := exec.CommandContext(ctx, "sh", shellFlags(job), job.Script)
+	cmd := exec.CommandContext(ctx, Shell(job), shellFlags(job), job.Script)
 	cmd.Dir = workdir
 	cmd.Env = append(os.Environ(), ciEnv(job)...)
 	return start(cmd)
@@ -173,7 +182,7 @@ func dockerRunArgs(job *proto.RunnerJob, workdir, image, name, network string, e
 	for _, kv := range extraEnv {
 		args = append(args, "-e", kv)
 	}
-	args = append(args, "--entrypoint", "sh", image, shellFlags(job), job.Script)
+	args = append(args, "--entrypoint", Shell(job), image, shellFlags(job), job.Script)
 	return args
 }
 

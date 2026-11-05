@@ -18,6 +18,7 @@ import {
 } from "../api";
 import { usePoll } from "../hooks/usePoll";
 import PipelineTable from "./PipelineTable";
+import RetryFailedDialog from "./RetryFailedDialog";
 import EnvTabs from "./EnvTabs";
 import { STATUS_LABEL } from "./StatusBadge";
 
@@ -128,6 +129,7 @@ export default function PipelineBrowser({ fixedRepo }: { fixedRepo?: string }) {
   useEffect(() => refresh(), [key, refresh]);
 
   const [facets, setFacets] = useState<PipelineFacets | null>(null);
+  const [retrying, setRetrying] = useState(false);
   const facetRepos = filter.repos ?? [];
   const facetKey = facetRepos.join(",");
   useEffect(() => {
@@ -229,9 +231,19 @@ export default function PipelineBrowser({ fixedRepo }: { fixedRepo?: string }) {
   const statuses = urlFilter.statuses ?? [];
   const anyFilter = filterToParams(urlFilter).toString() !== "";
   const total = data?.total ?? 0;
+  const retryRepo = fixedRepo ?? (urlFilter.repos?.length === 1 ? urlFilter.repos[0] : undefined);
 
   return (
     <div>
+      {retrying && (
+        <RetryFailedDialog
+          repo={retryRepo}
+          onClose={(changed) => {
+            setRetrying(false);
+            if (changed) refresh();
+          }}
+        />
+      )}
       <EnvTabs
         envs={facets?.environments ?? []}
         value={urlFilter.environment ?? ""}
@@ -295,6 +307,9 @@ export default function PipelineBrowser({ fixedRepo }: { fixedRepo?: string }) {
             </button>
           ))}
         </div>
+        <button type="button" className="btn" onClick={() => setRetrying(true)}>
+          Retry failed…
+        </button>
         {anyFilter && (
           <button type="button" className="btn btn-ghost" onClick={() => setFilter({})}>
             Clear filters

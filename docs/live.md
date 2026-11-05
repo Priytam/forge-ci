@@ -79,6 +79,15 @@ cluster / cloud                         Forge server                         bro
   `app.kubernetes.io/instance,app.kubernetes.io/name`; `--group-label`,
   default `app.kubernetes.io/part-of`; `--root-selector` to narrow);
   ReplicaSets and Pods follow their controller.
+- **Which namespaces.** `--exclude-namespaces` (default
+  `kube-system,kube-public,kube-node-lease`) are never watched.
+  `--include-namespaces`, when set, are the only ones watched, so a
+  namespace created later (a new system add-on) is not picked up by
+  surprise. The rule: a namespace is watched when the include list is empty
+  or names it, **and** the exclude list does not — exclude wins. With one
+  included namespace the API server filters (`metadata.namespace=`); with
+  several the agent drops other namespaces' objects as they arrive (the
+  ServiceAccount still needs cluster-wide `list/watch`).
 - **Compact, coalesced deltas with backpressure.** Changes wait at least
   250 ms per application and coalesce per resource (a pod that changes ten
   times is sent once, in its last state). One batch is in flight at a time;
@@ -130,6 +139,13 @@ cluster / cloud                         Forge server                         bro
   only the apps whose directory the new commits touched: `kustomize build`
   for a kustomization, `helm template` for a chart, the YAML files as they
   are otherwise. Git credentials stay in the cluster.
+- **How `GIT_TOKEN` is sent** (`--source-auth`, or `GIT_AUTH`): `auto`
+  (default) uses HTTP Basic for `github.com`, `*.ghe.com` and `gitlab.com`,
+  whose git-over-HTTPS rejects `Authorization: Bearer`, with the user
+  `x-access-token` (GitHub App installation tokens and PATs) or `oauth2`
+  (GitLab); any other host gets `Bearer`. Set `basic` or `bearer` to choose
+  yourself, and `GIT_USERNAME` to change the Basic user (`git` by default on
+  other hosts). The token is sent as a header, never put in a URL.
 - **Drift is computed where both sides meet.** The agent compares each live
   top-level object with its desired manifest whenever either changes:
   *Synced* when the live object has every field Git sets with the same value
@@ -195,6 +211,30 @@ cluster / cloud                         Forge server                         bro
     self-heal is refused there (a heal that waits for a person is not one);
   - when all that differs is what auto-sync would not prune, it does nothing.
   The panel shows what auto-sync is doing or why it waits.
+- **Many apps at once.** A target can have a **default policy** (Settings →
+  Live agents → Edit, or `PATCH /api/v1/live/targets/{id}` with
+  `"default_policy": {"auto_sync": true, "prune": true, "self_heal": true}`;
+  `null` clears it): every app first seen on that target starts with it.
+  Apps that already exist keep theirs, and an app template's own policy wins
+  for the apps it declares. For existing apps, **Applications → Sync
+  policy…** sets one policy on every app the current filters match;
+  **Preview** lists what would change and what would be skipped and why, then
+  **Apply**. The API is
+  `POST /api/v1/live/apps/policy` with the list filters (`target`,
+  `environment`, `namespace`, `group`, `repo`, `health`, `sync`, `q`; at least
+  one), `policy` and `dry_run`:
+
+  ```bash
+  curl -X POST https://forge.example.com/api/v1/live/apps/policy \
+    -H "Authorization: Bearer $FORGE_TOKEN" -H 'Content-Type: application/json' \
+    -d '{"target": ["travafa-gke"], "environment": ["staging"],
+         "policy": {"auto_sync": true, "prune": true, "self_heal": true}, "dry_run": true}'
+  ```
+
+  Each app gets the same checks as its own Auto-sync button — the operate
+  role on its repo, an agent that can sync, no self-heal where every change
+  needs approval — and is listed under `skipped` with the reason otherwise.
+  Each change is audited (`live.policy`), plus one `live.policy.bulk` entry.
 - **Rollback turns auto-sync off** (it would undo the rollback at once), and
   a sync to any revision other than Git's is refused while auto-sync is on.
 - **Prune only removes what Forge put there.** A live top-level object Git
@@ -341,6 +381,47 @@ FORGE_URL=https://forge.example.com FORGE_AGENT_TOKEN=<token> \
 An application's environment and repo are its target's. That links a
 cluster deployed from one GitOps repo — the common case — to that repo's
 pipelines and Applications tab.
+
+### One cluster, several environments
+
+A cluster that runs staging and prod needs one target and one agent, not
+two. An application's environment is decided, strongest first, by:
+
+1. **The app's own setting in Forge** — its page → *change environment*, or
+   `PUT /api/v1/live/apps/{id}/environment {"environment": "production"}`
+   (admin; `""` clears it). Kept per target and app key, so it survives the
+   app disappearing and coming back.
+2. **The environment label on its objects** — `forge.dev/environment:
+   production` on the app's top-level objects (Deployment, Service,
+   ConfigMap, …; pods and ReplicaSets do not count). The agent reads it; set
+   another key with `--environment-label=acme.io/env`, or turn it off with
+   `--environment-label=-`. Objects without the label do not count. **When
+   labelled objects disagree**, Forge does not pick one: the label is
+   ignored, the app falls through to the next rule, and the app is flagged
+   (*⚠ labels disagree* in the list, a banner on its page,
+   `environment_conflict` in the API) until the labels agree or the app's
+   environment is set in Forge.
+3. **The target's namespace map** — under **Settings → Live agents → Edit**,
+   one per line (`travafa-staging = staging`, `travafa-prod = production`),
+   or `PATCH /api/v1/live/targets/<id>` with `namespace_environments`
+   (`POST /api/v1/live/targets` takes the same field). Namespaces are matched
+   exactly.
+4. **The target's environment.**
+
+```bash
+curl -X PATCH https://forge.example.com/api/v1/live/targets/<id> \
+  -H "Authorization: Bearer $FORGE_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"namespace_environments": {"travafa-staging": "staging", "travafa-prod": "production"}}'
+```
+
+Each app in the API says which rule applied (`environment_source`: `app`,
+`label`, `namespace` or `target`; hover the environment in the UI). The app's
+environment then decides everything an environment decides: the
+Applications filter and facet, the repo's environment cards and the
+environments board, which deployment the app is compared with, the freeze
+and approval rules for its syncs and rollbacks, and whether it may
+self-heal. App templates still pick targets by the target's own
+environment.
 
 ## Numbers
 

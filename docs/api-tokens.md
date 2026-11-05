@@ -11,6 +11,39 @@ is treated exactly like that user's SSO session: same identity (`triggered_by`,
 audit `actor`), same admin and repo rights. Tokens only matter when SSO is
 enforced; in open mode the API needs no token.
 
+## Scopes
+
+A token can do at most what its owner can; its **scope** can limit that:
+
+| Scope | What it may do |
+|---|---|
+| `admin` (default) | Everything the owner may do, admin actions included if the owner is an admin |
+| `operate` | Everything the owner may do **except admin-only actions**: start, retry, cancel and play pipelines; Live sync, rollback and sync policy (on repos the owner may operate; an admin owner may operate any repo). Live targets, runners admin, settings and rules need `admin` |
+| `read` | `GET`/`HEAD` only; any change gets `403 this API token is read-only` |
+
+Pass `"scope"` when creating a token (personal or service account); tokens
+made before scopes existed are `admin`. The token list shows each one's scope.
+
+## Scripts and automation
+
+Use a token, not a copied browser cookie: SSO sessions expire (and a
+script's `forge_session` cookie with them), tokens last as long as you
+choose. Everything an operator script needs takes a token — Live targets
+(`POST/PATCH /api/v1/live/targets`), app and bulk sync policy
+(`PUT /api/v1/live/apps/{id}/policy`, `POST /api/v1/live/apps/policy`),
+runners (`POST /api/v1/runners/{id}/drain|resume|upgrade`), retries
+(`POST /api/v1/jobs/{id}/retry`, `POST /api/v1/jobs/retry-failed`) and
+pipelines. Only managing tokens, service accounts and platform admins needs a
+signed-in browser session, so a leaked token cannot mint more.
+
+When a request carries both an `Authorization: Bearer fci_…` header and a
+browser cookie, the token is what counts: an expired cookie riding along no
+longer turns the call into a 401 or a CSRF 403.
+
+For shared automation prefer a [service account](#service-accounts) with an
+`operate` token; give it `admin` only for scripts that change targets,
+runners or settings.
+
 ## Creating and revoking
 
 Signed-in users manage their own tokens at **(your email) ▾ → API tokens**
@@ -18,7 +51,7 @@ Signed-in users manage their own tokens at **(your email) ▾ → API tokens**
 
 | Call | Notes |
 |---|---|
-| `POST /api/v1/api-tokens {"description","expires_in_days"}` | Default 90 days |
+| `POST /api/v1/api-tokens {"description","expires_in_days","scope"}` | Default 90 days, scope `admin` |
 | `POST /api/v1/api-tokens {"description","no_expiry":true}` | Never expires (if policy allows) |
 | `GET /api/v1/api-tokens` | Your tokens: created, last used, expires (`null` = never), status |
 | `GET /api/v1/api-tokens?all=1` | Admins: everyone's tokens |

@@ -832,10 +832,10 @@ function MembersSection({ repo }: { repo: string }) {
             />
           </label>
           <label className="field">
-            <span>Required approvals</span>
+            <span>Required approvals (0 = no approval needed)</span>
             <input
               type="number"
-              min={1}
+              min={0}
               value={requiredApprovals}
               onChange={(e) => setRequiredApprovals(Number(e.target.value))}
             />

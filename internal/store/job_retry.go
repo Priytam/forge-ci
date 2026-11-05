@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -24,7 +25,7 @@ var (
 const jobSpecCols = `pipeline_id, name, stage, stage_idx, image, script, env, environment, tags,
 	artifact_paths, artifact_expire_seconds, report_junit, cache_paths, cache_key, cache_key_files,
 	cache_policy, services, network, timeout_seconds, max_attempts, allow_failure, resource_group, affinity_key,
-	environment_url, report_dotenv, coverage_regex, coverage_report, secrets, registry_logins, retry_when`
+	environment_url, report_dotenv, coverage_regex, coverage_report, secrets, registry_logins, retry_when, shell`
 
 // RetryResult says which jobs a retry re-queued: old id → new id.
 type RetryResult struct {
@@ -228,6 +229,50 @@ func (s *Store) SupersededJobs(ctx context.Context, pipelineID int64) ([]proto.J
 		}
 		j.Needs = []int64{}
 		out = append(out, j)
+	}
+	return out, rows.Err()
+}
+
+// FailedJobQuery selects failed jobs for a bulk retry.
+type FailedJobQuery struct {
+	Repo  string    // "" = every repo
+	Name  string    // case-insensitive substring of the job name ("" = any)
+	Since time.Time // finished at or after
+	Limit int
+}
+
+// FailedJob is a candidate for a bulk retry.
+type FailedJob struct {
+	JobID      int64     `json:"job_id"`
+	PipelineID int64     `json:"pipeline_id"`
+	Repo       string    `json:"repo"`
+	Ref        string    `json:"ref"`
+	Name       string    `json:"name"`
+	Reason     string    `json:"reason,omitempty"` // the job's status reason, if any
+	FinishedAt time.Time `json:"finished_at"`
+}
+
+// FailedJobs lists live (not yet retried) failed jobs matching q, oldest
+// first, at most q.Limit.
+func (s *Store) FailedJobs(ctx context.Context, q FailedJobQuery) ([]FailedJob, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT j.id, j.pipeline_id, p.repo, p.ref, j.name, j.status_reason, j.finished_at
+		 FROM jobs j JOIN pipelines p ON p.id = j.pipeline_id
+		 WHERE j.status = 'failed' AND NOT j.superseded AND j.finished_at >= $1
+		   AND ($2 = '' OR p.repo = $2)
+		   AND ($3 = '' OR j.name ILIKE '%' || $3 || '%')
+		 ORDER BY j.finished_at, j.id LIMIT $4`, q.Since, q.Repo, escapeLike(q.Name), q.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []FailedJob{}
+	for rows.Next() {
+		var f FailedJob
+		if err := rows.Scan(&f.JobID, &f.PipelineID, &f.Repo, &f.Ref, &f.Name, &f.Reason, &f.FinishedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, f)
 	}
 	return out, rows.Err()
 }

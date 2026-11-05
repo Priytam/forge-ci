@@ -135,12 +135,17 @@ func (s *Server) isAdmin(r *http.Request) bool {
 	if sess == nil {
 		return false
 	}
+	// A token below admin scope never carries its owner's admin rights.
+	if sess.Scope != "" && sess.Scope != store.ScopeAdmin {
+		return false
+	}
 	return s.sessionIsAdmin(r.Context(), sess)
 }
 
 // sessionIsAdmin reports whether an authenticated session belongs to a
-// platform admin, whatever the SSO mode. isAdmin adds the open-mode rule
-// (everyone is admin); approvals must not, so they call this directly.
+// platform admin, whatever the SSO mode or an API token's scope. isAdmin adds
+// the open-mode rule (everyone is admin) and the token scope; approvals must
+// not, so they call this directly.
 func (s *Server) sessionIsAdmin(ctx context.Context, sess *store.Session) bool {
 	if sess.Provider == serviceAccountProvider {
 		return sess.ServiceAdmin
@@ -195,8 +200,13 @@ func (s *Server) canOperate(r *http.Request, repo string) bool {
 		return true
 	}
 	sess := s.currentSession(r)
-	if sess == nil {
+	if sess == nil || sess.Scope == store.ScopeRead {
 		return false
+	}
+	// An operate-scoped token of an admin operates any repo, as its owner
+	// would; only admin-only actions need the admin scope.
+	if sess.Scope == store.ScopeOperate && s.sessionIsAdmin(r.Context(), sess) {
+		return true
 	}
 	role, hasMembers, err := s.store.RepoAccess(r.Context(), repo, sess.Email)
 	if err != nil {
@@ -282,6 +292,12 @@ func (s *Server) checkCSRF(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 	if s.hasValidRunnerToken(r) {
+		return true
+	}
+	// An API token in the Authorization header is what authenticates the
+	// request (a browser cannot send one cross-origin: CORS allows only
+	// Content-Type), so a stale cookie riding along is irrelevant.
+	if strings.HasPrefix(bearerToken(r), store.APITokenPrefix) && s.tokenSession(r) != nil {
 		return true
 	}
 

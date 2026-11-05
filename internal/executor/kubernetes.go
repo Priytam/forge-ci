@@ -243,7 +243,7 @@ func (k *kubeExecutor) Start(ctx context.Context, job *proto.RunnerJob, workdir 
 	if container != "" {
 		execArgs = append(execArgs, "-c", container)
 	}
-	execArgs = append(execArgs, "--", "sh", "-ce", sb.String())
+	execArgs = append(execArgs, "--", Shell(job), "-ce", sb.String())
 	cmd := k.kubectl(ctx, execArgs...)
 	pr, wait, err := start(cmd)
 	if err != nil {

@@ -8014,6 +8014,15 @@ textarea {
   font-size: var(--fs-sm);
   color: var(--text-muted);
 }
+.lv-admin-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 10px;
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+.lv-admin-field textarea { font-family: var(--mono); }
 .lv-snippet {
   padding: 10px 12px;
   border: 1px solid var(--border);
@@ -8339,3 +8348,21 @@ textarea {
   flex-wrap: wrap;
   gap: 4px;
 }
+
+.lint-warning {
+  margin-top: 6px;
+  font-size: var(--fs-sm);
+  color: var(--warning, #b7791f);
+}
+
+.lv-bulk-result {
+  margin-top: 10px;
+  font-size: var(--fs-sm);
+}
+.lv-bulk-result ul { margin: 6px 0 0; padding-left: 18px; }
+
+.dialog.dialog-wide { width: min(820px, calc(100vw - 32px)); }
+.retry-failed-list { margin-top: 10px; max-height: 50vh; overflow: auto; }
+.retry-failed-list table { margin-top: 6px; width: 100%; }
+
+.lv-env-conflict { color: var(--warning); font-size: var(--fs-sm); white-space: nowrap; }

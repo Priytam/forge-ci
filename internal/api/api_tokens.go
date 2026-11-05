@@ -66,7 +66,7 @@ func (s *Server) tokenSession(r *http.Request) *store.Session {
 		}
 		return nil
 	}
-	sess := &store.Session{Email: t.Owner, Name: t.OwnerName, Provider: apiTokenProvider}
+	sess := &store.Session{Email: t.Owner, Name: t.OwnerName, Provider: apiTokenProvider, Scope: t.Scope}
 	if t.ServiceAccountID != nil {
 		sess.Provider = serviceAccountProvider
 		sess.ServiceAdmin = t.ServiceAdmin
@@ -127,8 +127,13 @@ func (s *Server) createAPIToken(w http.ResponseWriter, r *http.Request) {
 		Description   string `json:"description"`
 		ExpiresInDays int    `json:"expires_in_days"`
 		NoExpiry      bool   `json:"no_expiry"`
+		Scope         string `json:"scope"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
+	if _, err := store.NormalizeScope(req.Scope); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	policy := s.tokenPolicy(r.Context())
 	expiresAt, err := tokenExpiry(req.NoExpiry, req.ExpiresInDays, policy, time.Now())
 	if err != nil {
@@ -136,7 +141,7 @@ func (s *Server) createAPIToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	t, err := s.store.CreateAPIToken(r.Context(), sess.Email, sess.Name,
-		strings.TrimSpace(req.Description), expiresAt)
+		strings.TrimSpace(req.Description), req.Scope, expiresAt)
 	if err != nil {
 		slog.Error("create api token", "err", err)
 		writeErr(w, http.StatusInternalServerError, "failed to create API token")
@@ -147,6 +152,7 @@ func (s *Server) createAPIToken(w http.ResponseWriter, r *http.Request) {
 		"description":  t.Description,
 		"token_suffix": t.TokenSuffix,
 		"no_expiry":    expiresAt == nil,
+		"scope":        t.Scope,
 	})
 	writeJSON(w, http.StatusCreated, t)
 }
@@ -246,4 +252,22 @@ func (s *Server) putTokenPolicy(w http.ResponseWriter, r *http.Request) {
 		"max_lifetime_days": p.MaxLifetimeDays,
 	})
 	writeJSON(w, http.StatusOK, p)
+}
+
+// requireTokenScope refuses a change made with a read-scoped API token.
+// (Admin-only actions check the scope through isAdmin.)
+func (s *Server) requireTokenScope(w http.ResponseWriter, r *http.Request) bool {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	}
+	if !strings.HasPrefix(bearerToken(r), store.APITokenPrefix) {
+		return true
+	}
+	if sess := s.tokenSession(r); sess != nil && sess.Scope == store.ScopeRead {
+		s.audit(r, "api-token.scope-denied", r.Method+" "+r.URL.Path, "", "denied", map[string]any{"scope": sess.Scope})
+		writeErr(w, http.StatusForbidden, "this API token is read-only (scope read)")
+		return false
+	}
+	return true
 }

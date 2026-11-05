@@ -144,6 +144,11 @@ func (s *Server) ssoEnforced(ctx context.Context) bool {
 // session, or else a pseudo-session for the owner of a personal API token
 // (Authorization: Bearer fci_…), which acts on that user's behalf.
 func (s *Server) currentSession(r *http.Request) *store.Session {
+	// An API token in the Authorization header wins over a cookie: a script
+	// that also carries a (possibly expired) browser cookie acts as the token.
+	if strings.HasPrefix(bearerToken(r), store.APITokenPrefix) {
+		return s.tokenSession(r)
+	}
 	c, err := r.Cookie(sessionCookie)
 	if err != nil || c.Value == "" {
 		return s.tokenSession(r)

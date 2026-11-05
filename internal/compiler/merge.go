@@ -67,6 +67,9 @@ func mergeSpec(parent, child jobSpec) jobSpec {
 	if child.Network != "" {
 		out.Network = child.Network
 	}
+	if child.Shell != "" {
+		out.Shell = child.Shell
+	}
 	if child.Retry.Max != nil {
 		out.Retry = child.Retry
 	}

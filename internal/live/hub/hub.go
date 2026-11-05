@@ -175,6 +175,7 @@ func (h *Hub) apply(ctx context.Context, tx *store.LiveTx, d live.Delta) (*Tree,
 		}
 	}
 	before := *a
+	a.LabelEnvironment, a.EnvironmentConflict = d.App.Environment, d.App.EnvironmentConflict
 	old, err := h.tree(ctx, a)
 	if err != nil {
 		return nil, 0, err
@@ -247,7 +248,7 @@ func (h *Hub) apply(ctx context.Context, tx *store.LiveTx, d live.Delta) (*Tree,
 	}
 	if t := tx.Target; !t.Capabilities.Diff && t.Repo != "" && d.Status != nil {
 		// No Git (Cloud Run): the desired state is what Forge last deployed.
-		digest, err := h.st.LatestDeployDigest(ctx, t.Repo, t.Environment)
+		digest, err := h.st.LatestDeployDigest(ctx, t.Repo, envOf(t, a))
 		if err != nil {
 			return nil, 0, err
 		}
@@ -313,7 +314,8 @@ func summaryChanged(a, b *store.LiveApp) bool {
 	return a.Name != b.Name || a.Namespace != b.Namespace || a.Group != b.Group || a.Health != b.Health ||
 		a.HealthMessage != b.HealthMessage || a.Resources != b.Resources || a.Pods != b.Pods ||
 		a.PodsReady != b.PodsReady || !slices.Equal(a.Images, b.Images) || a.Sync != b.Sync || a.Revision != b.Revision ||
-		a.SourceError != b.SourceError || a.Drifted != b.Drifted || a.Prunable != b.Prunable || a.Template != b.Template
+		a.SourceError != b.SourceError || a.Drifted != b.Drifted || a.Prunable != b.Prunable || a.Template != b.Template ||
+		a.LabelEnvironment != b.LabelEnvironment || !slices.Equal(a.EnvironmentConflict, b.EnvironmentConflict)
 }
 
 // remove deletes an app and queues its blobs.
@@ -810,4 +812,9 @@ func (h *Hub) listenOps(ctx context.Context) {
 			}
 		}
 	}
+}
+
+func envOf(t *store.LiveTarget, a *store.LiveApp) string {
+	env, _ := t.EnvironmentOf(a)
+	return env
 }

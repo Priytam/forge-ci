@@ -79,6 +79,7 @@ fail_fast: true              # optional (default false): the first genuine job
 default:
   timeout: 1h                # per-job TTL for jobs without their own
   retry: 0                   # per-job retry count for jobs without their own
+  shell: sh                  # sh (POSIX, default) or bash; a job's shell: wins
 stages: [build, test, deploy]
 jobs:
   build-app:
@@ -102,6 +103,10 @@ jobs:
     variables: {REGION: ap-south-1}
     script: [echo deploying]
 ```
+
+Scripts run under `sh -ce` (POSIX: dash or BusyBox ash, so no `${VAR:0:7}`
+or `[[ ]]`) unless the job or `default:` sets `shell: bash` — see
+[docs/pipeline-dsl.md](docs/pipeline-dsl.md#shell--which-shell-runs-the-script).
 
 `only`/`except` are glob patterns matched against the pipeline ref at compile
 time, so the same YAML yields different DAGs for dev branches vs main —
@@ -296,7 +301,11 @@ Full containerized stack instead: `make up` (dashboard on :3000).
 
 Public:
 
-- `POST /api/v1/pipelines` `{repo, ref, sha, config}` — compile YAML (for that ref) and enqueue
+- `POST /api/v1/pipelines` `{repo, ref, sha, config}` — compile YAML (for that ref) and enqueue.
+  Leave out `config` to run the repo's own pipeline config at the ref (its
+  `.forge-ci.yml` at the commit, or the registered config, as a push would);
+  `sha` is optional for connected repos. Replays a missed webhook:
+  `curl -X POST …/api/v1/pipelines -d '{"repo":"acme/api","ref":"main"}'`
 - `GET  /api/v1/repos` — per-repo rollup cards (counts, refs, recent statuses, last pipeline). `?q=` searches repo names, `?sort=activity|name`; with `?limit`/`?offset` it pages (`X-Total-Count`, `X-Has-More`), without `?limit` it returns every repo
 - `GET  /api/v1/pipelines[?repo=name][&limit=&offset=]` — newest first; array body plus
   `X-Total-Count` / `X-Has-More` headers. `limit` defaults to 50, capped at 200.

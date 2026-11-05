@@ -1671,3 +1671,39 @@ SELECT g.email,
 FROM user_groups g
 WHERE g.email <> ''
 ON CONFLICT (email) DO NOTHING;
+
+-- Runner log chunks carry a per-claim sequence number; a resent chunk whose
+-- number is not above log_seq is a duplicate and is skipped. Reset on claim.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS log_seq BIGINT NOT NULL DEFAULT 0;
+
+-- The shell a job's script runs under: sh (POSIX) or bash.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS shell TEXT NOT NULL DEFAULT 'sh';
+
+-- One target, several environments: a namespace → environment map that
+-- overrides the target's environment for the apps in those namespaces.
+ALTER TABLE live_targets ADD COLUMN IF NOT EXISTS namespace_environments JSONB NOT NULL DEFAULT '{}';
+
+-- A target's default sync policy: apps first seen on it inherit it (a
+-- template's own policy wins for the apps the template declares).
+ALTER TABLE live_targets ADD COLUMN IF NOT EXISTS default_policy JSONB;
+
+-- What an API token may do: read (GET only), operate (what its owner may do,
+-- except admin-only actions) or admin (everything its owner may do). Empty is
+-- admin: tokens made before scopes existed keep working as they did.
+ALTER TABLE api_tokens ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT '';
+
+-- An app's environment from a label on its top-level objects (the agent's
+-- --environment-label), and the values when they disagree (then no label
+-- environment applies and the app is flagged).
+ALTER TABLE live_apps ADD COLUMN IF NOT EXISTS label_environment TEXT NOT NULL DEFAULT '';
+ALTER TABLE live_apps ADD COLUMN IF NOT EXISTS environment_conflict TEXT[] NOT NULL DEFAULT '{}';
+-- An app's environment set explicitly in Forge; it wins over everything
+-- else and outlives the app's row, like its sync policy.
+CREATE TABLE IF NOT EXISTS live_app_environments (
+    target_id   BIGINT      NOT NULL REFERENCES live_targets(id) ON DELETE CASCADE,
+    app_key     TEXT        NOT NULL,
+    environment TEXT        NOT NULL,
+    updated_by  TEXT        NOT NULL DEFAULT '',
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (target_id, app_key)
+);

@@ -23,6 +23,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -298,7 +299,7 @@ func handleServerAction(ctx context.Context, c *client, a serverAction) {
 func runJob(execCtx, drainCtx context.Context, c *client, exec executor.Executor, job *proto.RunnerJob) {
 	slog.Info("job started", "job", job.ID, "name", job.Name)
 	logs := newLogStreamer(c, job.ID, job.RedactValues)
-	logs.printf("Running job #%d %q on %s executor\n", job.ID, job.Name, exec.Name())
+	logs.printf("Running job #%d %q on %s executor (script shell: %s)\n", job.ID, job.Name, exec.Name(), executor.Shell(job))
 
 	// Execution timeout: the context deadline kills the process (or the
 	// kubectl exec driving the pod) when it elapses. Derived from execCtx so a
@@ -344,20 +345,14 @@ func runJob(execCtx, drainCtx context.Context, c *client, exec executor.Executor
 	}()
 
 	finish := func(status string, exitCode int) {
+		logs.close()
+		// Keep heartbeating while the report is retried, so the server does
+		// not fail the job as stale in the meantime.
+		reportCompletion(c, job, proto.CompleteRequest{
+			Status: status, ExitCode: exitCode, Attempt: job.Attempt, RunnerID: job.RunnerID,
+		})
 		stopHB()
 		hbWG.Wait()
-		logs.close()
-		// Fresh context: execCtx/drainCtx may be canceled on shutdown.
-		rctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		resp, err := c.postJSON(rctx, fmt.Sprintf("/api/v1/runner/jobs/%d/complete", job.ID),
-			proto.CompleteRequest{Status: status, ExitCode: exitCode})
-		if err != nil {
-			slog.Error("failed to report completion", "job", job.ID, "err", err)
-			return
-		}
-		resp.Body.Close()
-		slog.Info("job finished", "job", job.ID, "status", status, "exit_code", exitCode)
 	}
 
 	// resolveInterruption maps a killed/failed execution to the right terminal
@@ -1095,6 +1090,75 @@ func uploadWorkspaceFile(c *client, logs *logStreamer, job *proto.RunnerJob, wor
 }
 
 // logStreamer batches log bytes and flushes them to the server periodically.
+// Report retry policy. A report whose POST times out or gets a 5xx is
+// retried with backoff; the server side is idempotent per claim (completion)
+// and per sequence number (log chunks). Variables so tests can shorten them.
+var (
+	reportTimeout    = 30 * time.Second
+	reportRetryFor   = 10 * time.Minute
+	reportBackoffMin = time.Second
+	reportBackoffMax = 30 * time.Second
+	// maxPendingLogBytes caps log chunks held for resending while the server
+	// is unreachable; past it the oldest are dropped (and the log says so).
+	maxPendingLogBytes = 16 << 20
+)
+
+// retryable reports whether a report attempt should be tried again.
+func retryable(resp *http.Response, err error) bool {
+	if err != nil {
+		return true
+	}
+	return resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests ||
+		resp.StatusCode == http.StatusRequestTimeout
+}
+
+// reportCompletion posts the job's result until the server takes it. A 409
+// means the job is no longer this claim's to complete (already recorded by
+// an earlier try whose response was lost, or failed as stale), so it stops.
+func reportCompletion(c *client, job *proto.RunnerJob, req proto.CompleteRequest) {
+	path := fmt.Sprintf("/api/v1/runner/jobs/%d/complete", job.ID)
+	deadline := time.Now().Add(reportRetryFor)
+	backoff := reportBackoffMin
+	for try := 1; ; try++ {
+		ctx, cancel := context.WithTimeout(context.Background(), reportTimeout)
+		resp, err := c.postJSON(ctx, path, req)
+		if resp != nil {
+			resp.Body.Close()
+		}
+		cancel()
+		switch {
+		case err == nil && resp.StatusCode < 300:
+			slog.Info("job finished", "job", job.ID, "status", req.Status, "exit_code", req.ExitCode, "tries", try)
+			return
+		case err == nil && resp.StatusCode == http.StatusConflict:
+			slog.Info("completion already recorded or job no longer ours", "job", job.ID, "status", req.Status, "tries", try)
+			return
+		case !retryable(resp, err):
+			slog.Error("completion rejected", "job", job.ID, "http_status", resp.StatusCode)
+			return
+		}
+		if time.Now().Add(backoff).After(deadline) {
+			slog.Error("failed to report completion; giving up", "job", job.ID, "tries", try, "err", err)
+			return
+		}
+		slog.Warn("completion report failed; retrying", "job", job.ID, "try", try, "in", backoff, "err", err, "http_status", statusOf(resp))
+		time.Sleep(backoff)
+		backoff = min(backoff*2, reportBackoffMax)
+	}
+}
+
+func statusOf(resp *http.Response) int {
+	if resp == nil {
+		return 0
+	}
+	return resp.StatusCode
+}
+
+type logChunk struct {
+	seq  int64
+	data []byte
+}
+
 type logStreamer struct {
 	c     *client
 	jobID int64
@@ -1105,6 +1169,14 @@ type logStreamer struct {
 	buf    bytes.Buffer
 	done   chan struct{}
 	wg     sync.WaitGroup
+
+	// sendMu serializes sends so chunks reach the server in order. pending
+	// holds numbered chunks not yet acknowledged, oldest first.
+	sendMu       sync.Mutex
+	seq          int64
+	pending      []logChunk
+	pendingBytes int
+	dropped      int
 }
 
 func newLogStreamer(c *client, jobID int64, redact []string) *logStreamer {
@@ -1149,37 +1221,88 @@ func (ls *logStreamer) redact(values ...string) {
 	}
 }
 
-func (ls *logStreamer) flush() {
+// flush numbers the buffered output as a new chunk and sends every pending
+// chunk in order. It stops at the first failure; what is left is resent on
+// the next flush with the same numbers.
+func (ls *logStreamer) flush() bool {
+	ls.sendMu.Lock()
+	defer ls.sendMu.Unlock()
 	ls.mu.Lock()
-	if ls.buf.Len() == 0 {
+	if ls.buf.Len() > 0 {
+		chunk := ls.buf.String()
+		ls.buf.Reset()
+		// Snapshot under the lock: redact() may append while a flush is in flight.
+		masked := make([]string, len(ls.masked))
+		copy(masked, ls.masked)
 		ls.mu.Unlock()
-		return
+		for _, v := range masked {
+			chunk = strings.ReplaceAll(chunk, v, "[REDACTED]")
+		}
+		ls.seq++
+		ls.pending = append(ls.pending, logChunk{seq: ls.seq, data: []byte(chunk)})
+		ls.pendingBytes += len(chunk)
+		for ls.pendingBytes > maxPendingLogBytes && len(ls.pending) > 1 {
+			ls.pendingBytes -= len(ls.pending[0].data)
+			ls.pending = ls.pending[1:]
+			ls.dropped++
+		}
+	} else {
+		ls.mu.Unlock()
 	}
-	chunk := ls.buf.String()
-	ls.buf.Reset()
-	// Snapshot under the lock: redact() may append while a flush is in flight.
-	masked := make([]string, len(ls.masked))
-	copy(masked, ls.masked)
-	ls.mu.Unlock()
-	for _, v := range masked {
-		chunk = strings.ReplaceAll(chunk, v, "[REDACTED]")
+	if ls.dropped > 0 && len(ls.pending) > 0 {
+		note := fmt.Sprintf("\n[forge] %d log chunk(s) were dropped while the server was unreachable\n", ls.dropped)
+		ls.pending[0].data = append([]byte(note), ls.pending[0].data...)
+		ls.dropped = 0
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	resp, err := ls.c.post(ctx, fmt.Sprintf("/api/v1/runner/jobs/%d/logs", ls.jobID),
-		[]byte(chunk), "text/plain")
-	if err != nil {
-		slog.Warn("log flush failed", "job", ls.jobID, "err", err)
-		return
+	for len(ls.pending) > 0 {
+		ch := ls.pending[0]
+		if !ls.send(ch) {
+			return false
+		}
+		ls.pendingBytes -= len(ch.data)
+		ls.pending = ls.pending[1:]
 	}
-	resp.Body.Close()
+	return true
 }
 
+func (ls *logStreamer) send(ch logChunk) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), reportTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		ls.c.base+fmt.Sprintf("/api/v1/runner/jobs/%d/logs", ls.jobID), bytes.NewReader(ch.data))
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Content-Type", "text/plain")
+	req.Header.Set(proto.LogSeqHeader, strconv.FormatInt(ch.seq, 10))
+	resp, err := ls.c.do(req)
+	if resp != nil {
+		resp.Body.Close()
+	}
+	if retryable(resp, err) {
+		slog.Warn("log flush failed; will resend", "job", ls.jobID, "seq", ch.seq, "err", err, "http_status", statusOf(resp))
+		return false
+	}
+	// Any other answer (accepted, or a 4xx the server will not change its
+	// mind about) settles the chunk.
+	return true
+}
+
+// close stops the periodic flush and sends what is left, retrying with
+// backoff for up to reportRetryFor.
 func (ls *logStreamer) close() {
 	close(ls.done)
 	ls.wg.Wait()
-	ls.flush()
+	deadline := time.Now().Add(reportRetryFor)
+	backoff := reportBackoffMin
+	for !ls.flush() {
+		if time.Now().Add(backoff).After(deadline) {
+			slog.Error("giving up on unsent log output", "job", ls.jobID, "chunks", len(ls.pending))
+			return
+		}
+		time.Sleep(backoff)
+		backoff = min(backoff*2, reportBackoffMax)
+	}
 }
 
 func envOr(key, fallback string) string {

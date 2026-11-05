@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -38,9 +39,12 @@ func main() {
 		kubeconfig = flag.String("kubeconfig", "", "kubeconfig to use outside a cluster (default: in-cluster)")
 		appLabels  = flag.String("app-labels", "app.kubernetes.io/instance,app.kubernetes.io/name", "labels naming a top-level object's application; the first present wins")
 		groupLabel = flag.String("group-label", "app.kubernetes.io/part-of", "label naming the system an application is part of")
+		envLabel   = flag.String("environment-label", kube.DefaultEnvironmentLabel, "label on an application's top-level objects naming its environment (\"-\": none)")
 		rootSel    = flag.String("root-selector", "", "label selector limiting which top-level objects are applications")
-		excludeNS  = flag.String("exclude-namespaces", "kube-system,kube-public,kube-node-lease", "namespaces never watched")
+		excludeNS  = flag.String("exclude-namespaces", "kube-system,kube-public,kube-node-lease", "namespaces never watched (wins over --include-namespaces)")
+		includeNS  = flag.String("include-namespaces", "", "if set, the only namespaces watched (comma-separated); --exclude-namespaces still applies")
 		sourceURL  = flag.String("source-url", "", "Git repository holding desired state (enables Diff; GIT_TOKEN authenticates)")
+		sourceAuth = flag.String("source-auth", envOr("GIT_AUTH", "auto"), "how GIT_TOKEN is sent: auto (Basic for github.com/gitlab.com, else Bearer) | basic | bearer")
 		branch     = flag.String("source-branch", "main", "branch of the source")
 		sourcePath = flag.String("source-path", "apps/{group}/{name}", "an application's directory in the source ({group}, {name}, {namespace})")
 		sourcePoll = flag.Duration("source-poll", 30*time.Second, "how often the source is fetched")
@@ -75,10 +79,15 @@ func main() {
 		if err != nil {
 			fatal("kubernetes client: %v", err)
 		}
-		kc := kube.Config{AppLabels: split(*appLabels), GroupLabel: *groupLabel, RootSelector: *rootSel, ExcludeNamespaces: split(*excludeNS),
-			Orphans: *orphans}
+		kc := kube.Config{AppLabels: split(*appLabels), GroupLabel: *groupLabel, EnvironmentLabel: *envLabel, RootSelector: *rootSel, ExcludeNamespaces: split(*excludeNS),
+			IncludeNamespaces: split(*includeNS),
+			Orphans:           *orphans}
 		if *sourceURL != "" {
-			kc.Source = &kube.Source{URL: *sourceURL, Branch: *branch, Path: *sourcePath, Poll: *sourcePoll, Token: os.Getenv("GIT_TOKEN")}
+			kc.Source = &kube.Source{URL: *sourceURL, Branch: *branch, Path: *sourcePath, Poll: *sourcePoll, Token: os.Getenv("GIT_TOKEN"),
+				Auth: *sourceAuth, Username: os.Getenv("GIT_USERNAME")}
+			if !slices.Contains(kube.SourceAuthModes, *sourceAuth) {
+				fatal("--source-auth must be one of %v", kube.SourceAuthModes)
+			}
 		}
 		if *allowSync {
 			jsonCfg := rest.CopyConfig(cfg)
@@ -127,6 +136,13 @@ func restConfig(kubeconfig string) (*rest.Config, error) {
 	cfg.AcceptContentTypes = "application/vnd.kubernetes.protobuf,application/json"
 	cfg.UserAgent = "forge-agent/" + buildinfo.Version
 	return cfg, nil
+}
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
 
 func split(s string) []string {

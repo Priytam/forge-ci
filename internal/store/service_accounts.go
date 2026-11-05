@@ -123,9 +123,9 @@ func (s *Store) DeleteServiceAccount(ctx context.Context, id int64) error {
 }
 
 // CreateServiceToken mints a token for a service account.
-func (s *Store) CreateServiceToken(ctx context.Context, a *ServiceAccount, description string, expiresAt *time.Time) (*APIToken, error) {
+func (s *Store) CreateServiceToken(ctx context.Context, a *ServiceAccount, description, scope string, expiresAt *time.Time) (*APIToken, error) {
 	id := a.ID
-	return s.createAPIToken(ctx, a.Identity, a.Name, description, expiresAt, &id)
+	return s.createAPIToken(ctx, a.Identity, a.Name, description, scope, expiresAt, &id)
 }
 
 // ListServiceTokens returns a service account's tokens (secrets masked).

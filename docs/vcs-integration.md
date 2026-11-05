@@ -277,8 +277,20 @@ precisely what executed.
 ref tip and then applies `config_source` at that sha (in-repo preferred by
 default, registered fallback).
 
-The manual API path (`POST /api/v1/pipelines` with an explicit `config`) is
-unchanged — it always runs the config you supply.
+The manual API path (`POST /api/v1/pipelines`) runs the `config` you supply.
+Leave `config` out and it applies the same precedence as a push at the ref's
+commit (or the `sha` you give): the in-repo file, else the registered config.
+That is how to replay a webhook that never arrived, without pasting YAML:
+
+```bash
+curl -X POST https://forge.example.com/api/v1/pipelines \
+  -H "Authorization: Bearer $FORGE_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"repo": "acme/api", "ref": "main"}'
+```
+
+**Run pipeline** in the UI does the same for connected repos (the *Run the
+repo's own pipeline config* box, on by default); untick it to edit YAML for
+one run.
 
 ### Who did what
 

@@ -91,6 +91,7 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 	m.HandleFunc("POST /api/v1/jobs/{id}/cancel", srv.cancelJob)
 	m.HandleFunc("POST /api/v1/jobs/{id}/play", srv.playJob)
 	m.HandleFunc("POST /api/v1/jobs/{id}/retry", srv.retryJob)
+	m.HandleFunc("POST /api/v1/jobs/retry-failed", srv.retryFailedJobs)
 	m.HandleFunc("GET /api/v1/permissions", srv.permissions)
 	m.HandleFunc("POST /api/v1/lint", srv.lint)
 	m.HandleFunc("GET /api/v1/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -155,6 +156,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuth(w, r) {
 		return
 	}
+	if !s.requireTokenScope(w, r) {
+		return
+	}
 	s.mux.ServeHTTP(w, r)
 }
 
@@ -181,10 +185,14 @@ func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if req.Repo == "" || req.Ref == "" || req.Config == "" {
-		writeErr(w, http.StatusBadRequest, "repo, ref and config are required")
+	if req.Repo == "" || req.Ref == "" {
+		writeErr(w, http.StatusBadRequest, "repo and ref are required")
 		return
 	}
+	// No config: run what a push of the ref would run — the repo's
+	// .forge-ci.yml at the ref's commit (or its registered config, per the
+	// repo's config source). This replays a missed webhook without YAML.
+	fromRepo := req.Config == ""
 	// Identity-from-session: when SSO is enforced, the trigger identity is the
 	// authenticated user — a client-supplied triggered_by is ignored. This keeps
 	// the separation-of-duties self-approval check (pipeline author may not
@@ -208,6 +216,21 @@ func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
 		}
 		req.SHA = sha
 	}
+	var configVersion *int
+	if fromRepo {
+		cfg, version, source, err := s.store.ResolvePipelineConfig(r.Context(), req.Repo, req.SHA)
+		if errors.Is(err, store.ErrNotFound) {
+			writeErr(w, http.StatusBadRequest, fmt.Sprintf(
+				"no config given and %s has no pipeline config at %s (no %s in the repo and no registered config)",
+				req.Repo, req.Ref, vcs.DefaultConfigPath))
+			return
+		}
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, "could not read the repo's pipeline config: "+err.Error())
+			return
+		}
+		req.Config, req.ConfigSource, configVersion = cfg, source, version
+	}
 	jobs, err := compiler.CompileWith(req.Config, req.Ref, compiler.SourceAPI, s.store.CompileOpts(r.Context(), req.Repo))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -220,8 +243,7 @@ func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
 	}
 	// Stamp the config version when the submitted YAML matches the current
 	// registered config; otherwise it's recorded as a one-off custom run.
-	var configVersion *int
-	if current, err := s.store.GetRepoConfig(r.Context(), req.Repo); err == nil && current == req.Config {
+	if current, err := s.store.GetRepoConfig(r.Context(), req.Repo); !fromRepo && err == nil && current == req.Config {
 		if v, err := s.store.CurrentConfigVersion(r.Context(), req.Repo); err == nil && v > 0 {
 			configVersion = &v
 		}
@@ -929,6 +951,25 @@ func (s *Server) pushLogs(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "empty log chunk")
 		return
 	}
+	// A runner resends a chunk whose POST timed out; if the first copy was
+	// stored, skip it rather than duplicating lines.
+	if v := r.Header.Get(proto.LogSeqHeader); v != "" {
+		seq, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || seq < 1 {
+			writeErr(w, http.StatusBadRequest, "invalid "+proto.LogSeqHeader)
+			return
+		}
+		fresh, err := s.store.AcceptLogChunk(r.Context(), id, seq)
+		if err != nil {
+			slog.Error("push logs: sequence", "err", err, "job", id)
+			writeErr(w, http.StatusServiceUnavailable, "log sequence check failed; resend")
+			return
+		}
+		if !fresh {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+	}
 	// Redact masked variable values before the chunk is persisted. A secret can
 	// be split across chunk boundaries, so we carry the trailing bytes that
 	// could still be a partial match into the next chunk. The carry-over tail is
@@ -1123,9 +1164,10 @@ func (s *Server) complete(w http.ResponseWriter, r *http.Request) {
 	}
 	// Flush any carried-over log tail for this job before it leaves 'running'.
 	s.flushMaskTail(r.Context(), id)
-	final, note, err := s.store.CompleteJob(r.Context(), id, req.Status, req.ExitCode)
+	final, note, err := s.store.CompleteJobClaim(r.Context(), id, req.Attempt, req.RunnerID, req.Status, req.ExitCode)
 	if errors.Is(err, store.ErrNotFound) {
-		// Job already transitioned (e.g. failed as stale) — not the runner's problem.
+		// Job already transitioned (e.g. failed as stale, or this is a retried
+		// report that already landed) — not the runner's problem.
 		w.WriteHeader(http.StatusConflict)
 		return
 	}

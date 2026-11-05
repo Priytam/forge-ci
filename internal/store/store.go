@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -42,6 +43,7 @@ var (
 
 type Store struct {
 	pool       *pgxpool.Pool
+	notify     *notifier         // shared LISTEN connection, outside the pool (see listen.go)
 	cipher     *secret.Cipher    // envelope encryption for secrets at rest
 	appMinter  *githubapp.Minter // mints/caches GitHub App installation tokens
 	oidcSigner *oidc.Signer      // mints per-job OIDC ID tokens (keyless cloud auth)
@@ -97,11 +99,45 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 // Migrate re-runs the (idempotent) migrations — what every server start does.
 func (s *Store) Migrate(ctx context.Context) error { return runMigrations(ctx, s.pool) }
 
-func New(ctx context.Context, dsn string) (*Store, error) {
-	pool, err := pgxpool.New(ctx, dsn)
+// DefaultMaxConns is the pool size when neither pool_max_conns in the DSN nor
+// DATABASE_MAX_CONNS sets one. pgxpool's own default, max(4, NumCPU), is 4 on a
+// 1-vCPU instance: too few for API requests, runner log posts and the
+// scheduler under a burst of pipelines.
+const DefaultMaxConns = 20
+
+// PoolConfig parses dsn and sizes the pool: pool_max_conns in the DSN wins,
+// then DATABASE_MAX_CONNS, then DefaultMaxConns.
+func PoolConfig(dsn string) (*pgxpool.Config, error) {
+	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, err
 	}
+	if !strings.Contains(dsn, "pool_max_conns") {
+		cfg.MaxConns = DefaultMaxConns
+		if v := os.Getenv("DATABASE_MAX_CONNS"); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 1 {
+				return nil, fmt.Errorf("DATABASE_MAX_CONNS=%q: want a positive integer", v)
+			}
+			cfg.MaxConns = int32(n)
+		}
+	}
+	if cfg.MinConns > cfg.MaxConns {
+		cfg.MinConns = cfg.MaxConns
+	}
+	return cfg, nil
+}
+
+func New(ctx context.Context, dsn string) (*Store, error) {
+	cfg, err := PoolConfig(dsn)
+	if err != nil {
+		return nil, err
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	slog.Info("postgres pool", "max_conns", cfg.MaxConns)
 	if err := pool.Ping(ctx); err != nil {
 		return nil, fmt.Errorf("postgres ping: %w", err)
 	}
@@ -123,6 +159,7 @@ func New(ctx context.Context, dsn string) (*Store, error) {
 		queueTimeout:      envDuration("QUEUE_TIMEOUT", 24*time.Hour),
 		runnerStaleAfter:  envDuration("RUNNER_STALE_AFTER", defaultStaleAfter),
 	}
+	s.notify = newNotifier(s.listenerConnect)
 	if err := s.initSecrets(ctx); err != nil {
 		return nil, err
 	}
@@ -244,7 +281,12 @@ func (s *Store) MigrateSecrets(ctx context.Context) (int, error) {
 	return total, nil
 }
 
-func (s *Store) Close() { s.pool.Close() }
+func (s *Store) Close() {
+	if s.notify != nil {
+		s.notify.close()
+	}
+	s.pool.Close()
+}
 
 // ---- pipelines ----
 
@@ -372,10 +414,10 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 		var id int64
 		err = tx.QueryRow(ctx,
 			`INSERT INTO jobs (pipeline_id, name, stage, stage_idx, image, script, env, environment, tags, artifact_paths, artifact_expire_seconds, report_junit, cache_paths, cache_key, cache_key_files, cache_policy, services, network, timeout_seconds, max_attempts, status, manual, allow_failure, blocked_at, finished_at, status_reason, resource_group, affinity_key,
-			                   environment_url, report_dotenv, coverage_regex, coverage_report, secrets, registry_logins, retry_when)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35) RETURNING id`,
+			                   environment_url, report_dotenv, coverage_regex, coverage_report, secrets, registry_logins, retry_when, shell)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36) RETURNING id`,
 			p.ID, j.Name, j.Stage, j.StageIdx, image, j.Script, env, environment, tags, artifacts, j.ArtifactExpireSeconds, reportJUnit, cachePaths, j.CacheKey, cacheKeyFiles, j.CachePolicy, services, j.Network, timeoutSec, j.Retry+1, status, j.Manual, j.AllowFailure, blockedAt, finishedAt, denied, resourceGroup, affinityKey,
-			j.EnvironmentURL, j.ReportDotenv, j.CoverageRegex, j.CoverageReportPath, secretsJSON, registryLogins, retryWhen).Scan(&id)
+			j.EnvironmentURL, j.ReportDotenv, j.CoverageRegex, j.CoverageReportPath, secretsJSON, registryLogins, retryWhen, jobShell(j.Shell)).Scan(&id)
 		if err != nil {
 			return nil, err
 		}
@@ -1373,23 +1415,24 @@ func (s *Store) AcquireJob(ctx context.Context, req proto.AcquireRequest) (*prot
 	}
 	err = tx.QueryRow(ctx,
 		`UPDATE jobs j
-		 SET status='running', started_at=now(), heartbeat_at=now(), runner_id=$1
+		 SET status='running', started_at=now(), heartbeat_at=now(), runner_id=$1, log_seq=0
 		 FROM pipelines p
 		 WHERE j.id = $3 AND p.id = j.pipeline_id AND j.status = 'pending' AND j.tags <@ $2::text[]
 		 RETURNING j.id, j.pipeline_id, j.name, j.image, j.script, j.env,
 		           j.artifact_paths, j.report_junit, j.cache_paths, j.cache_key, j.cache_key_files,
 		           j.cache_policy, j.services, j.network, j.environment, j.timeout_seconds,
 		           p.repo, p.ref, p.sha, p.source, p.triggered_by, p.commit_author, p.commit_message,
-		           j.report_dotenv, j.coverage_report, j.secrets, j.registry_logins`,
+		           j.report_dotenv, j.coverage_report, j.secrets, j.registry_logins, j.attempt, j.shell`,
 		req.RunnerID, runnerTags, candidate).
 		Scan(&j.ID, &j.PipelineID, &j.Name, &image, &j.Script, &envRaw,
 			&artifactsRaw, &reportJUnitRaw, &cachePathsRaw, &j.CacheKey, &cacheKeyFilesRaw,
 			&cachePolicy, &servicesRaw, &j.Network, &environment, &j.TimeoutSeconds, &repo, &ref, &sha,
 			&source, &triggeredBy, &commitAuthor, &commitMessage,
-			&j.ReportDotenvPath, &j.CoverageReportPath, &secretsRaw, &j.RegistryLogins)
+			&j.ReportDotenvPath, &j.CoverageReportPath, &secretsRaw, &j.RegistryLogins, &j.Attempt, &j.Shell)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
+	j.RunnerID = req.RunnerID
 	if err != nil {
 		return nil, err
 	}
@@ -1547,13 +1590,21 @@ func (s *Store) Heartbeat(ctx context.Context, jobID int64) (cancel bool, err er
 // separator lands in the right place whether logs live in Postgres or Redis
 // (CompleteJob no longer writes log bodies itself — see internal/logstore).
 func (s *Store) CompleteJob(ctx context.Context, jobID int64, status string, exitCode int) (final, note string, err error) {
+	return s.CompleteJobClaim(ctx, jobID, 0, "", status, exitCode)
+}
+
+// CompleteJobClaim is CompleteJob scoped to one claim: it applies only while
+// the job is running as attempt (0 = any) on runnerID ("" = any). Anything
+// else, including a repeat of a report already recorded, is ErrNotFound, so
+// runners can retry a report whose response they never saw.
+func (s *Store) CompleteJobClaim(ctx context.Context, jobID int64, attempt int, runnerID, status string, exitCode int) (final, note string, err error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return "", "", err
 	}
 	defer tx.Rollback(ctx)
 
-	var attempt, maxAttempts int
+	var maxAttempts int
 	var retryWhen []string
 	var cancelReq bool
 	var environment *string
@@ -1563,7 +1614,9 @@ func (s *Store) CompleteJob(ctx context.Context, jobID int64, status string, exi
 		`SELECT j.retry_when, j.attempt, j.max_attempts, j.cancel_requested, j.environment,
 		        p.id, p.repo, p.ref, p.sha, p.triggered_by
 		 FROM jobs j JOIN pipelines p ON p.id = j.pipeline_id
-		 WHERE j.id=$1 AND j.status='running' FOR UPDATE OF j`, jobID).
+		 WHERE j.id=$1 AND j.status='running'
+		   AND ($2 = 0 OR j.attempt = $2) AND ($3 = '' OR j.runner_id = $3)
+		 FOR UPDATE OF j`, jobID, attempt, runnerID).
 		Scan(&retryWhen, &attempt, &maxAttempts, &cancelReq, &environment, &pipelineID, &repo, &ref, &sha, &triggeredBy)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", "", ErrNotFound
@@ -1808,11 +1861,13 @@ func (s *Store) CancelDeadJobs(ctx context.Context) (int64, error) {
 
 // PromoteReadyJobs moves created jobs with all needs satisfied to pending, or
 // to blocked when they target a protected environment.
-// protectedFor matches a job's environment against a repo-specific rule or
-// the global (repo=”) default.
-const protectedFor = `EXISTS (
-	SELECT 1 FROM protected_environments pe, pipelines p
-	WHERE p.id = j.pipeline_id AND lower(pe.name) = lower(j.environment) AND pe.repo IN ('', p.repo))`
+// protectedFor is true when the rule for a job's environment (the
+// repo-specific one, else the global repo=” default) needs approvals. A
+// rule with required_approvals 0 does not block.
+const protectedFor = `COALESCE((
+	SELECT pe.required_approvals > 0 FROM protected_environments pe, pipelines p
+	WHERE p.id = j.pipeline_id AND lower(pe.name) = lower(j.environment) AND pe.repo IN ('', p.repo)
+	ORDER BY pe.repo DESC LIMIT 1), FALSE)`
 
 // frozenEnv is true when the job targets an environment currently inside a
 // deploy-freeze window (repo-specific or global). A frozen job is left in
@@ -1951,4 +2006,23 @@ func (s *Store) FailStuckPending(ctx context.Context) (int64, error) {
 		   AND p.created_at + $1::interval < now())`,
 		s.queueTimeout.String())
 	return tag.RowsAffected(), err
+}
+
+// AcceptLogChunk records seq as the job's latest runner log chunk and reports
+// whether it is new. A chunk at or below the last accepted number is a resend
+// whose first copy was already stored.
+func (s *Store) AcceptLogChunk(ctx context.Context, jobID, seq int64) (bool, error) {
+	tag, err := s.pool.Exec(ctx, `UPDATE jobs SET log_seq=$2 WHERE id=$1 AND log_seq < $2`, jobID, seq)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// jobShell defaults a compiled job's shell to sh.
+func jobShell(s string) string {
+	if s == "" {
+		return compiler.ShellSh
+	}
+	return s
 }

@@ -15,6 +15,7 @@ type lintJob struct {
 	Environment  string   `json:"environment,omitempty"`
 	Needs        []string `json:"needs"`
 	Image        string   `json:"image,omitempty"`
+	Shell        string   `json:"shell"` // sh or bash: what runs the script
 	Tags         []string `json:"tags,omitempty"`
 	Manual       bool     `json:"manual,omitempty"`
 	AllowFailure bool     `json:"allow_failure,omitempty"`
@@ -29,6 +30,9 @@ type lintResponse struct {
 	Ref    string    `json:"ref"`
 	Stages []string  `json:"stages"`
 	Jobs   []lintJob `json:"jobs"`
+	// Warnings do not make the config invalid; they flag what will likely
+	// fail at run time (bash syntax in a job that runs under sh).
+	Warnings []string `json:"warnings"`
 }
 
 // lint validates pipeline YAML without running anything: POST /api/v1/lint
@@ -61,7 +65,7 @@ func (s *Server) lint(w http.ResponseWriter, r *http.Request) {
 	if req.Source != "" {
 		source = req.Source
 	}
-	resp := lintResponse{Ref: req.Ref, Stages: []string{}, Jobs: []lintJob{}}
+	resp := lintResponse{Ref: req.Ref, Stages: []string{}, Jobs: []lintJob{}, Warnings: []string{}}
 	var changes *compiler.ChangeSet
 	if req.ChangedFiles != nil {
 		changes = &compiler.ChangeSet{Files: req.ChangedFiles}
@@ -94,9 +98,10 @@ func (s *Server) lint(w http.ResponseWriter, r *http.Request) {
 			needs = []string{}
 		}
 		resp.Jobs = append(resp.Jobs, lintJob{
-			Name: j.Name, Stage: j.Stage, Environment: env, Needs: needs, Image: j.Image,
+			Name: j.Name, Stage: j.Stage, Environment: env, Needs: needs, Image: j.Image, Shell: j.Shell,
 			Tags: j.Tags, Manual: j.Manual, AllowFailure: j.AllowFailure, Refused: refused,
 		})
+		resp.Warnings = append(resp.Warnings, compiler.ShellWarnings(j)...)
 	}
 	resp.Valid = true
 	writeJSON(w, http.StatusOK, resp)

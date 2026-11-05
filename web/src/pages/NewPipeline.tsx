@@ -58,6 +58,8 @@ export default function NewPipeline() {
   const [sha, setSha] = useState("");
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [config, setConfig] = useState(DEFAULT_YAML);
+  // Connected repos: run the repo's own config at the ref, like a push.
+  const [fromRepo, setFromRepo] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -144,7 +146,8 @@ export default function NewPipeline() {
     setSubmitting(true);
     setError(null);
     try {
-      const body: CreatePipelineRequest = { repo, ref, config };
+      const useRepo = connected && fromRepo;
+      const body: CreatePipelineRequest = useRepo ? { repo, ref } : { repo, ref, config };
       if (sha.trim()) body.sha = sha.trim();
       const { pipeline } = await createPipeline(body);
       navigate(`/pipelines/${pipeline.id}`);
@@ -241,6 +244,15 @@ export default function NewPipeline() {
           </div>
         )}
 
+        {connected && (
+          <label className="check-row">
+            <input type="checkbox" checked={fromRepo} onChange={(e) => setFromRepo(e.target.checked)} />
+            Run the repo&apos;s own pipeline config at this ref — what a push would run (<code>.forge-ci.yml</code> at
+            the commit, or the registered config, per the repo&apos;s config source). Untick to edit YAML for this run.
+          </label>
+        )}
+
+        {!(connected && fromRepo) && (<>
         <label className="field">
           <span>
             {registeredConfig !== null
@@ -294,6 +306,7 @@ export default function NewPipeline() {
         </label>
 
         <LintPanel config={config} repo={repo} defaultRef={ref} key={ref} fixedRef />
+        </>)}
 
         {error && <div className="error-banner">{error}</div>}
 

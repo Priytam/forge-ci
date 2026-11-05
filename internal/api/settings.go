@@ -667,12 +667,21 @@ func (s *Server) listProtectedEnvs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, envs)
 }
 
+// maxRequiredApprovals caps a protected environment's required votes.
+const maxRequiredApprovals = 20
+
 func (s *Server) upsertProtectedEnv(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	var pe proto.ProtectedEnvironment
-	if err := json.NewDecoder(r.Body).Decode(&pe); err != nil {
+	// Pointers tell "left out" (take the default) from an explicit value.
+	var given struct {
+		RequiredApprovals    *int `json:"required_approvals"`
+		ApprovalTimeoutHours *int `json:"approval_timeout_hours"`
+	}
+	if err != nil || json.Unmarshal(body, &pe) != nil || json.Unmarshal(body, &given) != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
@@ -688,11 +697,22 @@ func (s *Server) upsertProtectedEnv(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if pe.RequiredApprovals < 1 {
+	// required_approvals: 0 protects the environment without votes (a deploy
+	// job runs at once; freezes and environment rules still apply).
+	switch {
+	case given.RequiredApprovals == nil:
 		pe.RequiredApprovals = 1
+	case *given.RequiredApprovals < 0 || *given.RequiredApprovals > maxRequiredApprovals:
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("required_approvals must be between 0 and %d, got %d",
+			maxRequiredApprovals, *given.RequiredApprovals))
+		return
 	}
-	if pe.ApprovalTimeoutHours < 1 {
+	switch {
+	case given.ApprovalTimeoutHours == nil || *given.ApprovalTimeoutHours == 0:
 		pe.ApprovalTimeoutHours = 24
+	case *given.ApprovalTimeoutHours < 0:
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("approval_timeout_hours must be positive, got %d", *given.ApprovalTimeoutHours))
+		return
 	}
 	pe.RequiredGroup = strings.ToLower(strings.TrimSpace(pe.RequiredGroup))
 	if pe.RequiredGroup == "" {
@@ -705,7 +725,15 @@ func (s *Server) upsertProtectedEnv(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusInternalServerError, "failed to load approver group")
 			return
 		}
-		if pe.RequiredGroupApprovals < 1 {
+		if pe.RequiredApprovals == 0 {
+			writeErr(w, http.StatusBadRequest, "required_group needs required_approvals of at least 1")
+			return
+		}
+		if pe.RequiredGroupApprovals < 0 {
+			writeErr(w, http.StatusBadRequest, "required_group_approvals cannot be negative")
+			return
+		}
+		if pe.RequiredGroupApprovals == 0 {
 			pe.RequiredGroupApprovals = 1
 		}
 		if pe.RequiredGroupApprovals > pe.RequiredApprovals {

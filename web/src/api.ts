@@ -354,7 +354,8 @@ export interface CreatePipelineRequest {
   ref: string;
   /** Optional: connected repos resolve the ref tip server-side. */
   sha?: string;
-  config: string;
+  /** Omit to run the repo's own pipeline config at the ref (what a push runs). */
+  config?: string;
 }
 
 const BASE = "/api/v1";
@@ -472,6 +473,19 @@ async function requestVoid(
   if (!res.ok) {
     throw await parseError(res);
   }
+}
+
+async function patchJSON<T>(path: string, body: unknown): Promise<T> {
+  mutated();
+  const res = await fetch(`${BASE}${path}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    throw await parseError(res);
+  }
+  return (await res.json()) as T;
 }
 
 async function putJSON<T>(path: string, body: unknown): Promise<T> {
@@ -1539,8 +1553,12 @@ export function getPermissions(repo: string): Promise<Permissions> {
 // --- Personal API tokens ---
 
 /** A personal API token. token is only set in the create response. */
+/** read: GET only · operate: what the owner may do except admin-only actions · admin: everything the owner may do */
+export type TokenScope = "read" | "operate" | "admin";
+
 export interface ApiToken {
   id: number;
+  scope?: TokenScope;
   token?: string;
   token_suffix: string;
   owner: string;
@@ -1568,8 +1586,28 @@ export function createApiToken(body: {
   description: string;
   expires_in_days?: number;
   no_expiry?: boolean;
+  scope?: TokenScope;
 }): Promise<ApiToken> {
   return postJSON<ApiToken>("/api-tokens", body);
+}
+
+export interface RetryFailedResult {
+  dry_run: boolean;
+  since: string;
+  matched: { job_id: number; pipeline_id: number; repo: string; ref: string; name: string; reason?: string; finished_at: string }[];
+  retried: { job_id: number; new_job_id: number; pipeline_id: number; requeued: number }[];
+  skipped: { job_id: number; reason: string }[];
+}
+
+/** Retry every failed job matching name and/or error text since a time (dry_run previews). */
+export function retryFailedJobs(body: {
+  repo?: string;
+  name?: string;
+  error?: string;
+  since: string;
+  dry_run: boolean;
+}): Promise<RetryFailedResult> {
+  return postJSON("/jobs/retry-failed", body);
 }
 
 export function revokeApiToken(id: number): Promise<void> {
@@ -1874,6 +1912,8 @@ export interface LintJob {
   environment?: string;
   needs: string[];
   image?: string;
+  /** sh (POSIX, default) or bash: what runs the script */
+  shell?: string;
   tags?: string[];
   manual?: boolean;
   allow_failure?: boolean;
@@ -1887,6 +1927,8 @@ export interface LintResult {
   ref: string;
   stages: string[];
   jobs: LintJob[];
+  /** likely run-time failures, e.g. bash syntax in a job run under sh */
+  warnings?: string[];
 }
 
 /** Compile config as a run on ref would, without running anything. */
@@ -2076,7 +2118,7 @@ export function listServiceTokens(id: number): Promise<ApiToken[]> {
 
 export function createServiceToken(
   id: number,
-  b: { description: string; expires_in_days?: number; no_expiry?: boolean }
+  b: { description: string; expires_in_days?: number; no_expiry?: boolean; scope?: TokenScope }
 ): Promise<ApiToken> {
   return postJSON<ApiToken>(`/service-accounts/${id}/tokens`, b);
 }
@@ -2866,6 +2908,14 @@ export interface LiveApp {
   updated_at: string;
   target: string;
   environment: string;
+  /** where `environment` comes from, strongest first: app (set in Forge), label, namespace, target */
+  environment_source?: "app" | "label" | "namespace" | "target";
+  /** the environment set on the app in Forge ("" = none) */
+  environment_override?: string;
+  /** what its objects' environment label says, when they agree */
+  label_environment?: string;
+  /** the label's values when the app's objects disagree (then the label is not used) */
+  environment_conflict?: string[];
   repo: string;
   provider: string;
   deployed: LiveDeploy | null;
@@ -2894,8 +2944,28 @@ export interface LivePolicy {
   updated_at: string | null;
 }
 
+/** Set the app's environment in Forge ("" goes back to its label / namespace / target). Admin only. */
+export function setLiveAppEnvironment(app: number, environment: string): Promise<LiveApp> {
+  return putJSON(`/live/apps/${app}/environment`, { environment });
+}
+
 export function setLivePolicy(app: number, p: Pick<LivePolicy, "auto_sync" | "prune" | "self_heal">): Promise<LiveApp> {
   return putJSON(`/live/apps/${app}/policy`, p);
+}
+
+export interface BulkPolicyResult {
+  dry_run: boolean;
+  changed: { id: number; target: string; key: string }[];
+  skipped: { id: number; target: string; key: string; reason: string }[];
+}
+
+/** One sync policy for every app a filter matches (the Applications filters). */
+export function setLivePolicies(body: {
+  filter: Partial<Record<LiveFacet, string[]>> & { q?: string };
+  policy: Pick<LivePolicy, "auto_sync" | "prune" | "self_heal">;
+  dry_run: boolean;
+}): Promise<BulkPolicyResult> {
+  return postJSON("/live/apps/policy", { ...body.filter, policy: body.policy, dry_run: body.dry_run });
 }
 
 /** The orphaned resources of an app's namespace: top-level objects no application claims (null: none). */
@@ -3057,6 +3127,10 @@ export interface LiveTarget {
   id: number;
   name: string;
   environment: string;
+  /** Overrides `environment` for the apps in a namespace. */
+  namespace_environments: Record<string, string> | null;
+  /** The sync policy apps first seen on this target start with. */
+  default_policy: Pick<LivePolicy, "auto_sync" | "prune" | "self_heal"> | null;
   repo: string;
   provider: string;
   capabilities: LiveCapabilities;
@@ -3173,6 +3247,17 @@ export function listLiveTargets(): Promise<LiveTarget[]> {
 
 export function createLiveTarget(t: { name: string; environment: string; repo: string }): Promise<{ target: LiveTarget; token: string }> {
   return postJSON("/live/targets", t);
+}
+
+export function updateLiveTarget(
+  id: number,
+  patch: {
+    environment?: string;
+    namespace_environments?: Record<string, string>;
+    default_policy?: Pick<LivePolicy, "auto_sync" | "prune" | "self_heal"> | null;
+  }
+): Promise<LiveTarget> {
+  return patchJSON(`/live/targets/${id}`, patch);
 }
 
 export function deleteLiveTarget(id: number): Promise<void> {

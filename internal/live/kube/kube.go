@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"sync"
 
@@ -41,11 +42,19 @@ type Config struct {
 	// GroupLabel names the system an application is part of (shown and
 	// filtered on). Default: app.kubernetes.io/part-of.
 	GroupLabel string
+	// EnvironmentLabel names the label whose value is an application's
+	// environment, read from its top-level objects. Default
+	// DefaultEnvironmentLabel; "-" turns it off.
+	EnvironmentLabel string
 	// RootSelector, when set, limits applications to top-level objects it
 	// matches (a label selector, e.g. "app.kubernetes.io/part-of").
 	RootSelector string
 	// ExcludeNamespaces are never watched (filtered by the API server).
 	ExcludeNamespaces []string
+	// IncludeNamespaces, when set, are the only namespaces watched; a
+	// namespace in both lists is excluded. One namespace is filtered by the
+	// API server; several, in the agent as objects arrive.
+	IncludeNamespaces []string
 	// Source, when set, is where applications' desired state lives: the
 	// Diff view and sync status come from it.
 	Source *Source
@@ -156,6 +165,12 @@ func New(client kubernetes.Interface, cfg Config) (*Provider, error) {
 	if cfg.GroupLabel == "" {
 		cfg.GroupLabel = "app.kubernetes.io/part-of"
 	}
+	switch cfg.EnvironmentLabel {
+	case "":
+		cfg.EnvironmentLabel = DefaultEnvironmentLabel
+	case "-":
+		cfg.EnvironmentLabel = ""
+	}
 	p := &Provider{client: client, cfg: cfg, applier: cfg.Applier}
 	if cfg.Source != nil {
 		r, err := newRepo(*cfg.Source)
@@ -171,14 +186,14 @@ func New(client kubernetes.Interface, cfg Config) (*Provider, error) {
 		}
 		p.selector = sel
 	}
-	fs := make([]string, 0, len(cfg.ExcludeNamespaces))
-	for _, ns := range cfg.ExcludeNamespaces {
-		if ns = strings.TrimSpace(ns); ns != "" {
-			fs = append(fs, "metadata.namespace!="+ns)
+	fieldSelector, keep := namespaceScope(cfg.IncludeNamespaces, cfg.ExcludeNamespaces)
+	p.listWatch = func(k *kind) cache.ListerWatcher {
+		lw := k.lw(p.client, fieldSelector)
+		if keep == nil {
+			return lw
 		}
+		return &nsFilter{inner: cache.ToListerWatcherWithContext(lw), keep: keep}
 	}
-	fieldSelector := strings.Join(fs, ",")
-	p.listWatch = func(k *kind) cache.ListerWatcher { return k.lw(p.client, fieldSelector) }
 	return p, nil
 }
 
@@ -196,7 +211,7 @@ func (p *Provider) Watch(ctx context.Context, sink live.Sink) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	w := &watcher{
-		p: p, sink: sink, nodes: map[string]*node{}, apps: map[string]*live.App{},
+		p: p, sink: sink, nodes: map[string]*node{}, apps: map[string]*live.App{}, envs: map[string]map[string]int{},
 		strs: map[string]string{}, healths: map[live.Health]*live.Health{},
 		parked: map[string]map[string]parkedChild{}, parkedBy: map[string]string{},
 		listedKinds: map[*kind]bool{}, listed: make(chan struct{}), restart: make(chan struct{}),
@@ -348,6 +363,7 @@ type node struct {
 	app      *live.App // nil: not part of an application
 	owner    string
 	key      string   // live.Key, for top-level objects tracked against desired state
+	env      string   // a top-level object's environment label value
 	forge    bool     // Forge applied it (field manager "forge"): prunable when Git drops it
 	self     []string // []string{uid}: every child's Parents, shared
 	children int32    // watched objects this one controls
@@ -363,9 +379,12 @@ type watcher struct {
 	p    *Provider
 	sink live.Sink
 
-	mu      sync.Mutex
-	nodes   map[string]*node
-	apps    map[string]*live.App // interned by key
+	mu    sync.Mutex
+	nodes map[string]*node
+	apps  map[string]*live.App // interned by key
+	// envs counts, per app key, its top-level objects by environment label
+	// value.
+	envs    map[string]map[string]int
 	strs    map[string]string
 	healths map[live.Health]*live.Health
 	// Objects whose owner has not been seen yet (watches of different kinds
@@ -441,16 +460,20 @@ func (w *watcher) apply(k *kind, obj any) {
 	owner := w.str(ownerOf(meta))
 	w.intern(&res)
 	var root *live.App
+	env := ""
 	if owner == "" {
 		var named bool
 		root, named = w.appFor(meta)
+		if root != nil && w.p.cfg.EnvironmentLabel != "" {
+			env = w.str(meta.GetLabels()[w.p.cfg.EnvironmentLabel])
+		}
 		// Orphans: nothing names their application (an object the root
 		// selector leaves out is someone else's, not an orphan).
 		if !named && w.p.cfg.Orphans && len(meta.GetOwnerReferences()) == 0 && !ignoredOrphan(k, meta) {
 			root = w.orphansOf(meta.GetNamespace())
 		}
 	}
-	w.place(k, res, owner, root, forge)
+	w.place(k, res, owner, root, forge, env)
 }
 
 func managedByForge(m metav1.Object) bool {
@@ -543,7 +566,7 @@ func (w *watcher) appFor(m metav1.Object) (app *live.App, named bool) {
 
 // place records res under its application — the root's, or its owner's —
 // and settles any children that were waiting for it.
-func (w *watcher) place(k *kind, res live.Resource, owner string, app *live.App, forge bool) {
+func (w *watcher) place(k *kind, res live.Resource, owner string, app *live.App, forge bool, env string) {
 	uid := res.UID
 	if owner != "" {
 		on := w.nodes[owner]
@@ -566,6 +589,7 @@ func (w *watcher) place(k *kind, res live.Resource, owner string, app *live.App,
 		}
 		w.nodes[uid] = n
 	} else if n.app != nil && (app == nil || n.app.Key != app.Key) {
+		w.setEnv(n, "")
 		w.sink.Delete(*n.app, uid)
 		if n.children > 0 {
 			w.restarts.Do(func() { close(w.restart) })
@@ -580,6 +604,7 @@ func (w *watcher) place(k *kind, res live.Resource, owner string, app *live.App,
 		}
 	}
 	n.app, n.owner, n.forge = app, owner, forge
+	w.setEnv(n, env)
 	w.noteRoot(n, &res)
 	if app != nil {
 		w.sink.Upsert(*app, res)
@@ -588,7 +613,7 @@ func (w *watcher) place(k *kind, res live.Resource, owner string, app *live.App,
 		delete(w.parked, uid)
 		for cuid, c := range kids {
 			delete(w.parkedBy, cuid)
-			w.place(c.kind, c.res, uid, nil, false)
+			w.place(c.kind, c.res, uid, nil, false, "")
 		}
 	}
 }
@@ -618,7 +643,52 @@ func (w *watcher) removeLocked(uid string) {
 		on.children--
 	}
 	if n.app != nil {
+		w.setEnv(n, "")
 		w.sink.Delete(*n.app, uid)
+	}
+}
+
+// DefaultEnvironmentLabel is the label naming an application's environment.
+const DefaultEnvironmentLabel = "forge.dev/environment"
+
+// setEnv records top-level object n's environment label value under its
+// app and settles the app's environment: the value when every labelled
+// top-level object agrees, none (and the values as a conflict) when they
+// disagree. Objects without the label do not count.
+func (w *watcher) setEnv(n *node, v string) {
+	if n.app == nil || n.app.Orphans {
+		n.env = ""
+		return
+	}
+	if n.env == v {
+		return
+	}
+	key := n.app.Key
+	if n.env != "" {
+		if c := w.envs[key]; c != nil {
+			if c[n.env]--; c[n.env] <= 0 {
+				delete(c, n.env)
+			}
+			if len(c) == 0 {
+				delete(w.envs, key)
+			}
+		}
+	}
+	n.env = v
+	if v != "" {
+		if w.envs[key] == nil {
+			w.envs[key] = map[string]int{}
+		}
+		w.envs[key][v]++
+	}
+	vals := slices.Sorted(maps.Keys(w.envs[key]))
+	n.app.Environment, n.app.EnvironmentConflict = "", nil
+	switch len(vals) {
+	case 0:
+	case 1:
+		n.app.Environment = vals[0]
+	default:
+		n.app.EnvironmentConflict = vals
 	}
 }
 
@@ -645,4 +715,84 @@ func (w *watcher) relisted(k *kind, seen map[string]bool) {
 			close(w.listed)
 		}
 	}
+}
+
+// namespaceScope turns the include and exclude lists into a field selector
+// for the API server and, when it cannot express the rule, a filter applied
+// in the agent (nil: none needed). The rule: a namespace is watched when the
+// include list is empty or names it, and the exclude list does not.
+func namespaceScope(include, exclude []string) (string, func(ns string) bool) {
+	clean := func(in []string) []string {
+		var out []string
+		for _, ns := range in {
+			if ns = strings.TrimSpace(ns); ns != "" && !slices.Contains(out, ns) {
+				out = append(out, ns)
+			}
+		}
+		return out
+	}
+	include, exclude = clean(include), clean(exclude)
+	include = slices.DeleteFunc(include, func(ns string) bool { return slices.Contains(exclude, ns) })
+	if len(include) == 1 {
+		return "metadata.namespace=" + include[0], nil
+	}
+	fs := make([]string, 0, len(exclude))
+	for _, ns := range exclude {
+		fs = append(fs, "metadata.namespace!="+ns)
+	}
+	if len(include) == 0 {
+		return strings.Join(fs, ","), nil
+	}
+	set := map[string]bool{}
+	for _, ns := range include {
+		set[ns] = true
+	}
+	return strings.Join(fs, ","), func(ns string) bool { return set[ns] }
+}
+
+// nsFilter drops objects outside the included namespaces from lists and
+// watch events, for an include list a field selector cannot express.
+type nsFilter struct {
+	inner cache.ListerWatcherWithContext
+	keep  func(ns string) bool
+}
+
+func (f *nsFilter) List(o metav1.ListOptions) (runtime.Object, error) {
+	return f.ListWithContext(context.Background(), o)
+}
+
+func (f *nsFilter) Watch(o metav1.ListOptions) (watch.Interface, error) {
+	return f.WatchWithContext(context.Background(), o)
+}
+
+func (f *nsFilter) ListWithContext(ctx context.Context, o metav1.ListOptions) (runtime.Object, error) {
+	obj, err := f.inner.ListWithContext(ctx, o)
+	if err != nil {
+		return nil, err
+	}
+	items, err := meta.ExtractList(obj)
+	if err != nil {
+		return nil, err
+	}
+	kept := items[:0]
+	for _, it := range items {
+		if a, err := meta.Accessor(it); err != nil || f.keep(a.GetNamespace()) {
+			kept = append(kept, it)
+		}
+	}
+	return obj, meta.SetList(obj, kept)
+}
+
+func (f *nsFilter) WatchWithContext(ctx context.Context, o metav1.ListOptions) (watch.Interface, error) {
+	w, err := f.inner.WatchWithContext(ctx, o)
+	if err != nil {
+		return nil, err
+	}
+	return watch.Filter(w, func(e watch.Event) (watch.Event, bool) {
+		if e.Type == watch.Bookmark || e.Type == watch.Error {
+			return e, true
+		}
+		a, err := meta.Accessor(e.Object)
+		return e, err != nil || f.keep(a.GetNamespace())
+	}), nil
 }

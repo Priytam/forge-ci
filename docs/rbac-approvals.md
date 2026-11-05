@@ -74,10 +74,14 @@ curl -X POST $FORGE/api/v1/protected-environments -d '{
 
 | Field | Behavior |
 |---|---|
-| `required_approvals` | Votes needed before the job is released to a runner |
+| `required_approvals` | Votes needed before the job is released to a runner: `0`–`20`, default `1` when left out. `0` means no approval: jobs run at once (freezes and the environment's branch rules still apply), and Live syncs and rollbacks are not held. A repo's rule beats the global default, so a repo rule with `0` releases that repo's jobs even when the global rule asks for votes |
 | `approver_roles` | Only members with one of these roles may vote. Empty means the default `admin, owner`; developers approve only when listed. Unknown roles are rejected (`400`) |
 | `allow_self_approval` | When false, the pipeline's `triggered_by` user cannot approve their own deployment (separation of duties) |
-| `approval_timeout_hours` | Blocked jobs fail automatically after this window |
+| `approval_timeout_hours` | Blocked jobs fail automatically after this window (default 24) |
+
+Invalid values are refused with `400` and a message — a negative or too
+large `required_approvals`, a negative timeout, or `required_group` with
+`required_approvals: 0` — instead of being changed silently.
 
 `GET /api/v1/jobs/{id}/approval-permission` runs the same check for the caller
 (`{can_approve, asserted, reason, approver_roles}`); the approval gate in the UI

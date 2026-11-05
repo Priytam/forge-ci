@@ -176,7 +176,7 @@ func (s *Store) ApproveLiveOp(ctx context.Context, id int64, who Approver, verdi
 	defer tx.Rollback(ctx)
 	var state, requester, repo, env string
 	var target int64
-	err = tx.QueryRow(ctx, `SELECT o.state, o.requested_by, t.repo, t.environment, o.target_id
+	err = tx.QueryRow(ctx, `SELECT o.state, o.requested_by, t.repo, `+liveAppEnv+`, o.target_id
 		FROM live_ops o JOIN live_apps a ON a.id = o.app_id JOIN live_targets t ON t.id = a.target_id
 		WHERE o.id=$1 FOR UPDATE OF o`, id).Scan(&state, &requester, &repo, &env, &target)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -345,22 +345,9 @@ func (s *Store) ExpireLiveOps(ctx context.Context) error {
 
 // ListenLiveOps calls fn with the target id of each new operation.
 func (s *Store) ListenLiveOps(ctx context.Context, fn func(targetID int64)) error {
-	conn, err := s.pool.Acquire(ctx)
-	if err != nil {
-		return err
-	}
-	defer conn.Release()
-	if _, err := conn.Exec(ctx, "LISTEN "+opsChannel); err != nil {
-		return err
-	}
-	defer func() { _, _ = conn.Exec(context.Background(), "UNLISTEN "+opsChannel) }()
-	for {
-		n, err := conn.Conn().WaitForNotification(ctx)
-		if err != nil {
-			return err
-		}
-		if id, err := strconv.ParseInt(n.Payload, 10, 64); err == nil {
+	return s.listen(ctx, opsChannel, func(p string) {
+		if id, err := strconv.ParseInt(p, 10, 64); err == nil {
 			fn(id)
 		}
-	}
+	})
 }

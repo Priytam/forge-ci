@@ -3,8 +3,9 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { listLiveApps, relativeTime, subscribeLive, type LiveApp, type LiveAppsPage, type LiveFacet } from "../api";
 import Avatar, { displayName } from "../components/Avatar";
 import Icon from "../components/Icon";
-import { AutoSyncBadge, HEALTH_ORDER, HEALTH_TONE, HealthIcon, HealthPill, KindIcon, podsLabel, shortImage, SyncPill } from "../components/live/ui";
+import { AutoSyncBadge, EnvName, HEALTH_ORDER, HEALTH_TONE, HealthIcon, HealthPill, KindIcon, podsLabel, shortImage, SyncPill } from "../components/live/ui";
 import { Skeleton } from "../components/ui/Pill";
+import BulkPolicyDialog from "../components/live/BulkPolicyDialog";
 
 const FACETS: { id: LiveFacet; label: string }[] = [
   { id: "health", label: "Health" },
@@ -37,6 +38,7 @@ export function ApplicationList({ fixedRepo }: { fixedRepo?: string }) {
   const [search, setSearch] = useState(query);
   const [page, setPage] = useState<LiveAppsPage | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [bulk, setBulk] = useState(false);
   const selected = (f: LiveFacet) => (params.get(f) ?? "").split(",").filter(Boolean);
   const key = params.toString();
 
@@ -99,6 +101,12 @@ export function ApplicationList({ fixedRepo }: { fixedRepo?: string }) {
     set({ [f]: (cur.includes(v) ? cur.filter((x) => x !== v) : [...cur, v]).join(",") });
   };
   const filtered = FACETS.some((f) => selected(f.id).length > 0) || query !== "";
+  const currentFilter = () => {
+    const filter: Partial<Record<LiveFacet, string[]>> & { q?: string } = { q: query };
+    for (const f of FACETS) filter[f.id] = selected(f.id);
+    if (fixedRepo) filter.repo = [fixedRepo];
+    return filter;
+  };
   const facets = fixedRepo ? FACETS.filter((f) => f.id !== "repo") : FACETS;
   const views = (
     <div className="segmented" role="group" aria-label="View">
@@ -117,9 +125,28 @@ export function ApplicationList({ fixedRepo }: { fixedRepo?: string }) {
           <div className="page-head-actions">
             <Link className="btn" to="/applications/fleet">Fleet</Link>
             <Link className="btn" to="/applications/templates">Templates</Link>
+            <button
+              type="button"
+              className="btn"
+              disabled={!filtered || !page || page.total === 0}
+              title={filtered ? "Set auto-sync, prune and self-heal on every app these filters match" : "Filter the list first"}
+              onClick={() => setBulk(true)}
+            >
+              Sync policy…
+            </button>
             {views}
           </div>
         </div>
+      )}
+      {bulk && page && (
+        <BulkPolicyDialog
+          filter={currentFilter()}
+          count={page.total}
+          onClose={(changed) => {
+            setBulk(false);
+            if (changed) load();
+          }}
+        />
       )}
       <div className="lv-apps-layout">
         <aside className="lv-filters card" aria-label="Filters">
@@ -188,7 +215,7 @@ export function ApplicationList({ fixedRepo }: { fixedRepo?: string }) {
                       <td><Link to={`/applications/${a.id}`} className="lv-app-name">{a.name}</Link></td>
                       <td><HealthPill health={a.health} title={a.health_message} /></td>
                       <td><SyncPill sync={a.sync} /> <AutoSyncBadge app={a} /></td>
-                      <td>{a.environment || <span className="muted">—</span>}</td>
+                      <td><EnvName app={a} /></td>
                       <td className="muted">{a.target}</td>
                       <td className="muted">{a.namespace}</td>
                       <td className="mono lv-ellipsis" title={a.images.join("\n")}>{shortImage(a.images[0])}</td>
@@ -257,7 +284,7 @@ function Tile({ a }: { a: LiveApp }) {
         {a.environment && (
           <>
             <dt>Env</dt>
-            <dd>{a.environment}</dd>
+            <dd><EnvName app={a} /></dd>
           </>
         )}
         {a.images[0] && (

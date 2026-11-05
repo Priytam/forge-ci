@@ -107,6 +107,14 @@ ingress address.
   (`postgres://user:pass@host:5432/forge?sslmode=…`) that flows into the
   `forge-release` module and is stored in a Kubernetes Secret as `DATABASE_URL`.
   The chart runs with `postgresql.enabled=false`.
+- **Database connections** — each server replica opens a pool of up to 20
+  connections (set `DATABASE_MAX_CONNS`, or `pool_max_conns=N` in
+  `DATABASE_URL`, which wins), plus one more dedicated connection that carries
+  every `LISTEN` (code-review changes, Live hub, Live ops) and reconnects on
+  its own. Size Postgres `max_connections` (and the Cloud SQL tier) for
+  replicas × (pool + 1); runners talk HTTP only and need none. Do not
+  go below ~10 on a busy server: API requests, runner log posts and the
+  scheduler all share the pool.
 - **Artifacts** — bucket + credentials become `config.artifacts.s3.*` (endpoint,
   bucket, region, access key) plus `S3_SECRET_KEY` in the Secret.
 - **Secrets** — `FORGE_SECRET_KEY` (base64 32-byte AES key) and the runner

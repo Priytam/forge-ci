@@ -171,3 +171,25 @@ export function AutoSyncBadge({ app }: { app: Pick<LiveApp, "policy"> }) {
     </span>
   );
 }
+
+const ENV_SOURCE: Record<string, string> = {
+  app: "set on this application in Forge",
+  label: "from the environment label on its objects",
+  namespace: "from its namespace (the target's namespace map)",
+  target: "the target's environment",
+};
+
+/** An app's environment, saying where it comes from, and flagging conflicting labels. */
+export function EnvName({ app }: { app: Pick<LiveApp, "environment" | "environment_source" | "environment_conflict"> }) {
+  const conflict = app.environment_conflict ?? [];
+  return (
+    <span title={app.environment_source ? ENV_SOURCE[app.environment_source] : undefined}>
+      {app.environment || <span className="muted">—</span>}
+      {conflict.length > 0 && (
+        <span className="lv-env-conflict" title={`Its objects' environment labels disagree (${conflict.join(", ")}), so the label is not used`}>
+          {" "}⚠ labels disagree
+        </span>
+      )}
+    </span>
+  );
+}

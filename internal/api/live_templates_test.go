@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -63,7 +64,7 @@ func TestLiveTemplates(t *testing.T) {
 	apps := h.agentApps(east.Token)
 	want := live.DeclaredApp{App: live.App{Key: "edge-staging/edge", Name: "edge", Namespace: "edge-staging", Template: "edge"},
 		Path: "apps/edge/overlays/lab-east", CreateNamespace: true}
-	if len(apps) != 1 || apps[0] != want {
+	if len(apps) != 1 || !reflect.DeepEqual(apps[0], want) {
 		t.Fatalf("declared = %+v", apps)
 	}
 
