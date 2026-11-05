@@ -43,4 +43,19 @@ func TestLintEndpoint(t *testing.T) {
 		t.Errorf("deploy_sandbox refusal = %q", byName["deploy_sandbox"].Refused)
 	}
 	h.expect(h.do(testCaller{}, "POST", "/api/v1/lint", map[string]any{"config": policyYAML}), 401, "anonymous lint")
+
+	// Which shell runs each job, and bash syntax in a job that runs under sh.
+	shellYAML := "stages: [b]\njobs:\n  posix:\n    stage: b\n    script:\n      - 'echo ${CI_COMMIT_SHA:0:7}'\n" +
+		"  bashjob:\n    stage: b\n    shell: bash\n    script:\n      - 'echo ${CI_COMMIT_SHA:0:7}'\n"
+	sl := decodeInto[lintResponse](t, h.do(dev, "POST", "/api/v1/lint", map[string]any{"config": shellYAML}))
+	shells := map[string]string{}
+	for _, j := range sl.Jobs {
+		shells[j.Name] = j.Shell
+	}
+	if !sl.Valid || shells["posix"] != "sh" || shells["bashjob"] != "bash" {
+		t.Fatalf("shell lint = %+v", sl)
+	}
+	if len(sl.Warnings) != 1 || !strings.Contains(sl.Warnings[0], `"posix" runs under sh`) {
+		t.Errorf("warnings = %v, want one for the sh job", sl.Warnings)
+	}
 }

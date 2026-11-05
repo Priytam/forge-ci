@@ -1654,6 +1654,9 @@ CREATE TABLE IF NOT EXISTS platform_admins (
 -- number is not above log_seq is a duplicate and is skipped. Reset on claim.
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS log_seq BIGINT NOT NULL DEFAULT 0;
 
+-- The shell a job's script runs under: sh (POSIX) or bash.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS shell TEXT NOT NULL DEFAULT 'sh';
+
 -- One target, several environments: a namespace → environment map that
 -- overrides the target's environment for the apps in those namespaces.
 ALTER TABLE live_targets ADD COLUMN IF NOT EXISTS namespace_environments JSONB NOT NULL DEFAULT '{}';

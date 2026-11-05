@@ -79,6 +79,7 @@ fail_fast: true              # optional (default false): the first genuine job
 default:
   timeout: 1h                # per-job TTL for jobs without their own
   retry: 0                   # per-job retry count for jobs without their own
+  shell: sh                  # sh (POSIX, default) or bash; a job's shell: wins
 stages: [build, test, deploy]
 jobs:
   build-app:
@@ -102,6 +103,10 @@ jobs:
     variables: {REGION: ap-south-1}
     script: [echo deploying]
 ```
+
+Scripts run under `sh -ce` (POSIX: dash or BusyBox ash, so no `${VAR:0:7}`
+or `[[ ]]`) unless the job or `default:` sets `shell: bash` — see
+[docs/pipeline-dsl.md](docs/pipeline-dsl.md#shell--which-shell-runs-the-script).
 
 `only`/`except` are glob patterns matched against the pipeline ref at compile
 time, so the same YAML yields different DAGs for dev branches vs main —

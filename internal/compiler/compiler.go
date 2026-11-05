@@ -110,6 +110,8 @@ type jobSpec struct {
 	When         string            `yaml:"when"`          // on_success|manual|never|always (job-level; rules override)
 	AllowFailure *bool             `yaml:"allow_failure"` // failure does not fail dependents/pipeline
 	Network      string            `yaml:"network"`       // container network: bridge (default) | none | host | <named>
+	// Shell runs the script: sh (default, POSIX) or bash.
+	Shell string `yaml:"shell"`
 	// ResourceGroup serialises jobs: at most one job per (repo, group) runs at
 	// a time. "$CI_ENVIRONMENT_NAME" resolves to the job's environment.
 	ResourceGroup string `yaml:"resource_group"`
@@ -301,6 +303,7 @@ type config struct {
 	Default    struct {
 		Timeout string    `yaml:"timeout"` // pipeline-wide TTL for jobs without their own
 		Retry   retrySpec `yaml:"retry"`   // pipeline-wide retry for jobs without their own
+		Shell   string    `yaml:"shell"`   // pipeline-wide shell for jobs without their own
 	} `yaml:"default"`
 }
 
@@ -469,6 +472,8 @@ type CompiledJob struct {
 	RunnerAffinity bool
 	// Services are sidecar containers started alongside the job (docker/k8s only).
 	Services []proto.ServiceSpec
+	// Shell runs the script: "sh" (POSIX, the default) or "bash".
+	Shell string
 	// Network is the container network for the job (docker executor). Empty
 	// means the executor default (bridge). A job declaring services always gets
 	// its own per-job network instead, so the two are mutually exclusive.
@@ -806,6 +811,12 @@ func CompileWith(yml, ref, source string, opts CompileOpts) ([]CompiledJob, erro
 			return nil, fmt.Errorf("job %q: reports.dotenv needs a workspace-relative path", inst.orig)
 		}
 
+		// Shell precedence: job shell > YAML default.shell > sh.
+		shell, err := ResolveShell(fmt.Sprintf("job %q", inst.orig), spec.Shell, cfg.Default.Shell)
+		if err != nil {
+			return nil, err
+		}
+
 		// Retry precedence: job retry > YAML default.retry > 0 (no retry).
 		retry, err := validateRetry(fmt.Sprintf("job %q", inst.orig), spec.Retry.Max)
 		if err != nil {
@@ -878,6 +889,7 @@ func CompileWith(yml, ref, source string, opts CompileOpts) ([]CompiledJob, erro
 			AllowFailure:          inst.allowFailure,
 			Services:              services,
 			Network:               network,
+			Shell:                 shell,
 			ResourceGroup:         resourceGroup,
 			RunnerAffinity:        spec.RunnerAffinity,
 			ReportDotenv:          spec.Artifacts.Reports.Dotenv,
@@ -888,4 +900,27 @@ func CompileWith(yml, ref, source string, opts CompileOpts) ([]CompiledJob, erro
 		})
 	}
 	return out, nil
+}
+
+// Shells a job's script can run under. sh is POSIX (dash on Debian and
+// Ubuntu images, BusyBox ash on Alpine): no ${VAR:0:7}, [[ ]], arrays or
+// <(…). bash must be installed in the job's image (or on a shell runner).
+const (
+	ShellSh   = "sh"
+	ShellBash = "bash"
+)
+
+// ResolveShell picks a job's shell from its own shell: and default: shell:.
+func ResolveShell(where, job, def string) (string, error) {
+	for _, v := range []struct{ where, val string }{{where, job}, {"default", def}} {
+		switch strings.TrimSpace(v.val) {
+		case "":
+			continue
+		case ShellSh, ShellBash:
+			return strings.TrimSpace(v.val), nil
+		default:
+			return "", fmt.Errorf("%s: shell must be sh or bash, got %q", v.where, v.val)
+		}
+	}
+	return ShellSh, nil
 }

@@ -942,15 +942,51 @@ deliberately on jobs that transform credentials.
 `POST /api/v1/lint {"config": "<yaml>", "ref": "main", "repo": "acme/cos"}`
 compiles the YAML exactly as a run on `ref` would — includes from the repo's
 templates, `rules:` evaluated for that branch, and this server's environment
-branch rules — and returns `{valid, error, stages, jobs}`. Each job lists its
-stage, environment, needs and, if the environment rules would refuse it on
-that branch, why (`refused`). Nothing is started. The **Validate** button on
+branch rules — and returns `{valid, error, stages, jobs, warnings}`. Each job
+lists its stage, environment, needs, the `shell` that will run its script and,
+if the environment rules would refuse it on that branch, why (`refused`).
+`warnings` flags bash-only syntax in jobs that run under `sh` (see
+[`shell:`](#shell--which-shell-runs-the-script)); they do not make the config
+invalid. Nothing is started. The **Validate** button on
 Run pipeline and on Settings → Pipeline config calls it.
 
 ```sh
 curl -s -H "Authorization: Bearer $FORGE_TOKEN" -X POST $FORGE/api/v1/lint \
   -d "$(jq -n --rawfile c .forge-ci.yml '{config:$c, ref:"main"}')"
 ```
+
+## `shell:` — which shell runs the script
+
+A job's `script` lines are joined and run by **`sh -ce`** (stop at the first
+failing command) unless the job says otherwise. `sh` is POSIX: on Debian and
+Ubuntu images it is `dash`, on Alpine BusyBox `ash`. They have no
+`${VAR:0:7}` substrings, `${VAR/a/b}`, `${VAR^^}`, `[[ … ]]`, arrays, `<(…)`
+or `$'…'`; using one fails at run time, often as `Bad substitution`.
+
+```yaml
+default:
+  shell: bash            # every job without its own shell:
+
+jobs:
+  tag:
+    image: debian:12
+    script:
+      - echo "short sha ${CI_COMMIT_SHA:0:7}"
+  alpine-check:
+    image: alpine:3
+    shell: sh            # back to POSIX for an image without bash
+    script: [./check.sh]
+```
+
+- Values: `sh` (default) or `bash`; anything else is a compile error.
+  Precedence: the job's `shell:` > `default: shell:` > `sh`. `extends:` and
+  `include:` merge it like other fields.
+- `bash` must exist in the job's image (docker and kubernetes executors) or
+  on the runner host (shell executor); the flags are the same (`-ce`, plus
+  `-x` on a debug rerun).
+- The job log's first line says which shell ran it, and **Validate** (lint)
+  shows each job's shell and warns about bash syntax in a job that runs
+  under `sh`.
 
 ## `resource_group:` — one deploy at a time
 

@@ -414,10 +414,10 @@ func (s *Store) CreatePipeline(ctx context.Context, req proto.CreatePipelineRequ
 		var id int64
 		err = tx.QueryRow(ctx,
 			`INSERT INTO jobs (pipeline_id, name, stage, stage_idx, image, script, env, environment, tags, artifact_paths, artifact_expire_seconds, report_junit, cache_paths, cache_key, cache_key_files, cache_policy, services, network, timeout_seconds, max_attempts, status, manual, allow_failure, blocked_at, finished_at, status_reason, resource_group, affinity_key,
-			                   environment_url, report_dotenv, coverage_regex, coverage_report, secrets, registry_logins, retry_when)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35) RETURNING id`,
+			                   environment_url, report_dotenv, coverage_regex, coverage_report, secrets, registry_logins, retry_when, shell)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36) RETURNING id`,
 			p.ID, j.Name, j.Stage, j.StageIdx, image, j.Script, env, environment, tags, artifacts, j.ArtifactExpireSeconds, reportJUnit, cachePaths, j.CacheKey, cacheKeyFiles, j.CachePolicy, services, j.Network, timeoutSec, j.Retry+1, status, j.Manual, j.AllowFailure, blockedAt, finishedAt, denied, resourceGroup, affinityKey,
-			j.EnvironmentURL, j.ReportDotenv, j.CoverageRegex, j.CoverageReportPath, secretsJSON, registryLogins, retryWhen).Scan(&id)
+			j.EnvironmentURL, j.ReportDotenv, j.CoverageRegex, j.CoverageReportPath, secretsJSON, registryLogins, retryWhen, jobShell(j.Shell)).Scan(&id)
 		if err != nil {
 			return nil, err
 		}
@@ -1368,13 +1368,13 @@ func (s *Store) AcquireJob(ctx context.Context, req proto.AcquireRequest) (*prot
 		           j.artifact_paths, j.report_junit, j.cache_paths, j.cache_key, j.cache_key_files,
 		           j.cache_policy, j.services, j.network, j.environment, j.timeout_seconds,
 		           p.repo, p.ref, p.sha, p.source, p.triggered_by, p.commit_author, p.commit_message,
-		           j.report_dotenv, j.coverage_report, j.secrets, j.registry_logins, j.attempt`,
+		           j.report_dotenv, j.coverage_report, j.secrets, j.registry_logins, j.attempt, j.shell`,
 		req.RunnerID, runnerTags, candidate).
 		Scan(&j.ID, &j.PipelineID, &j.Name, &image, &j.Script, &envRaw,
 			&artifactsRaw, &reportJUnitRaw, &cachePathsRaw, &j.CacheKey, &cacheKeyFilesRaw,
 			&cachePolicy, &servicesRaw, &j.Network, &environment, &j.TimeoutSeconds, &repo, &ref, &sha,
 			&source, &triggeredBy, &commitAuthor, &commitMessage,
-			&j.ReportDotenvPath, &j.CoverageReportPath, &secretsRaw, &j.RegistryLogins, &j.Attempt)
+			&j.ReportDotenvPath, &j.CoverageReportPath, &secretsRaw, &j.RegistryLogins, &j.Attempt, &j.Shell)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -1961,4 +1961,12 @@ func (s *Store) AcceptLogChunk(ctx context.Context, jobID, seq int64) (bool, err
 		return false, err
 	}
 	return tag.RowsAffected() == 1, nil
+}
+
+// jobShell defaults a compiled job's shell to sh.
+func jobShell(s string) string {
+	if s == "" {
+		return compiler.ShellSh
+	}
+	return s
 }

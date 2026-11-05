@@ -1,6 +1,9 @@
 package executor
 
 import (
+	"context"
+	"io"
+	"os/exec"
 	"slices"
 	"strings"
 	"testing"
@@ -173,5 +176,27 @@ func TestDebugTraceFlags(t *testing.T) {
 	args := dockerRunArgs(job, "/tmp/ws", "alpine", "n", "bridge")
 	if args[len(args)-2] != "-cex" {
 		t.Errorf("debug docker args = %v", args)
+	}
+}
+
+// shell: bash runs the script under bash in every executor; sh otherwise.
+func TestJobShellSelectsInterpreter(t *testing.T) {
+	job := &proto.RunnerJob{ID: 8, Name: "tag", Shell: "bash", Script: `echo "${CI_COMMIT_SHA:0:7}"`}
+	if e, _ := argValue(dockerRunArgs(job, "/tmp/ws", "debian:12", "forge-job-8", "bridge"), "--entrypoint"); e != "bash" {
+		t.Errorf("docker --entrypoint = %q, want bash", e)
+	}
+	if Shell(job) != "bash" || Shell(&proto.RunnerJob{}) != "sh" || Shell(&proto.RunnerJob{Shell: "zsh"}) != "sh" {
+		t.Error("Shell() must be bash only for shell: bash")
+	}
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("no bash on this machine")
+	}
+	rc, wait, err := (shellExecutor{}).Start(context.Background(), &proto.RunnerJob{Shell: "bash", Script: `X=abcdefghij; echo "${X:0:7}"`, Env: map[string]string{}}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, _ := io.ReadAll(rc)
+	if code := wait(); code != 0 || !strings.Contains(string(out), "abcdefg") {
+		t.Fatalf("bash job: exit %d, output %q", code, out)
 	}
 }

@@ -130,12 +130,14 @@ type RunnerJob struct {
 	// Attempt and RunnerID identify this claim of the job. The runner echoes
 	// them on completion so a retried report can never complete a later
 	// attempt or another runner's claim.
-	Attempt  int               `json:"attempt,omitempty"`
-	RunnerID string            `json:"runner_id,omitempty"`
-	Name     string            `json:"name"`
-	Image    string            `json:"image"`
-	Script   string            `json:"script"`
-	Env      map[string]string `json:"env"`
+	Attempt  int    `json:"attempt,omitempty"`
+	RunnerID string `json:"runner_id,omitempty"`
+	Name     string `json:"name"`
+	Image    string `json:"image"`
+	Script   string `json:"script"`
+	// Shell runs Script: "sh" (default) or "bash". Empty means sh.
+	Shell string            `json:"shell,omitempty"`
+	Env   map[string]string `json:"env"`
 
 	ArtifactPaths []string `json:"artifact_paths"`
 

@@ -66,6 +66,7 @@ export default function LintPanel({
                 <th>Job</th>
                 <th>Environment</th>
                 <th>Needs</th>
+                <th>Shell</th>
                 <th>Notes</th>
               </tr>
             </thead>
@@ -76,6 +77,7 @@ export default function LintPanel({
                   <td>{j.name}</td>
                   <td>{j.environment && <span className="env-tag">{j.environment}</span>}</td>
                   <td className="mono muted">{j.needs.join(", ")}</td>
+                  <td className="mono muted">{j.shell ?? "sh"}</td>
                   <td>
                     {j.manual && <span className="cell-meta">manual · </span>}
                     {j.allow_failure && <span className="cell-meta">allowed to fail · </span>}
@@ -87,6 +89,11 @@ export default function LintPanel({
           </table>
         </div>
       )}
+      {(result?.warnings ?? []).map((w) => (
+        <div key={w} className="lint-warning">
+          ⚠ {w}
+        </div>
+      ))}
       {refused.length > 0 && (
         <div className="muted">
           {refused.length} job{refused.length === 1 ? "" : "s"} would be refused on {result?.ref} by this

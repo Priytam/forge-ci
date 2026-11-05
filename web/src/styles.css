@@ -8308,3 +8308,9 @@ textarea {
   flex: 1 1 280px;
   max-width: 420px;
 }
+
+.lint-warning {
+  margin-top: 6px;
+  font-size: var(--fs-sm);
+  color: var(--warning, #b7791f);
+}

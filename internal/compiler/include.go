@@ -229,6 +229,9 @@ func mergeConfig(base, overlay config) config {
 	if overlay.Default.Retry.Max != nil {
 		out.Default.Retry = overlay.Default.Retry
 	}
+	if overlay.Default.Shell != "" {
+		out.Default.Shell = overlay.Default.Shell
+	}
 
 	// auto_cancel: overlay wins when set.
 	out.AutoCancel = base.AutoCancel

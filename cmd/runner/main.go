@@ -281,7 +281,7 @@ func handleServerAction(ctx context.Context, c *client, a serverAction) {
 func runJob(execCtx, drainCtx context.Context, c *client, exec executor.Executor, job *proto.RunnerJob) {
 	slog.Info("job started", "job", job.ID, "name", job.Name)
 	logs := newLogStreamer(c, job.ID, job.RedactValues)
-	logs.printf("Running job #%d %q on %s executor\n", job.ID, job.Name, exec.Name())
+	logs.printf("Running job #%d %q on %s executor (script shell: %s)\n", job.ID, job.Name, exec.Name(), executor.Shell(job))
 
 	// Execution timeout: the context deadline kills the process (or the
 	// kubectl exec driving the pod) when it elapses. Derived from execCtx so a

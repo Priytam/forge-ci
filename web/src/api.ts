@@ -1872,6 +1872,8 @@ export interface LintJob {
   environment?: string;
   needs: string[];
   image?: string;
+  /** sh (POSIX, default) or bash: what runs the script */
+  shell?: string;
   tags?: string[];
   manual?: boolean;
   allow_failure?: boolean;
@@ -1885,6 +1887,8 @@ export interface LintResult {
   ref: string;
   stages: string[];
   jobs: LintJob[];
+  /** likely run-time failures, e.g. bash syntax in a job run under sh */
+  warnings?: string[];
 }
 
 /** Compile config as a run on ref would, without running anything. */
