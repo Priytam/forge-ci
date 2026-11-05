@@ -4,10 +4,12 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,9 +29,16 @@ import (
 // one directory per application. Rendering happens in the agent, next to
 // the cluster, with the same tools people use by hand.
 type Source struct {
-	URL    string // clone URL (credentials, if any, in Token)
-	Token  string
-	Branch string // default "main"
+	URL   string // clone URL (credentials, if any, in Token)
+	Token string
+	// Auth is how Token is sent: "basic" (HTTP Basic, Username:Token),
+	// "bearer" (Authorization: Bearer), or "auto"/"" — Basic for GitHub and
+	// GitLab, whose git-over-HTTPS rejects Bearer, Bearer elsewhere.
+	Auth string
+	// Username for Basic auth (default "x-access-token" on GitHub, "oauth2"
+	// on GitLab, "git" elsewhere).
+	Username string
+	Branch   string // default "main"
 	// Path names an application's directory: {group}, {name} and
 	// {namespace} are the app's (default "apps/{group}/{name}").
 	Path string
@@ -77,8 +86,8 @@ func newRepo(src Source) (*repo, error) {
 // in a URL, so it never lands in an error message or the clone's config).
 func (r *repo) git(ctx context.Context, stdin io.Reader, args ...string) ([]byte, error) {
 	full := []string{"-c", "core.askPass=true"}
-	if r.src.Token != "" {
-		full = append(full, "-c", "http.extraHeader=Authorization: Bearer "+r.src.Token)
+	if h := authHeader(r.src); h != "" {
+		full = append(full, "-c", "http.extraHeader=Authorization: "+h)
 	}
 	cmd := exec.CommandContext(ctx, "git", append(full, args...)...)
 	cmd.Dir = r.dir
@@ -91,6 +100,43 @@ func (r *repo) git(ctx context.Context, stdin io.Reader, args ...string) ([]byte
 		return nil, fmt.Errorf("git %s: %v: %s", args[0], err, strings.TrimSpace(stderr.String()))
 	}
 	return out, nil
+}
+
+// SourceAuthModes are the accepted values of Source.Auth.
+var SourceAuthModes = []string{"auto", "basic", "bearer"}
+
+// authHeader is the Authorization header value for src's token ("" = none).
+func authHeader(src Source) string {
+	if src.Token == "" {
+		return ""
+	}
+	host := ""
+	if u, err := url.Parse(src.URL); err == nil {
+		host = strings.ToLower(u.Hostname())
+	}
+	github := host == "github.com" || strings.HasSuffix(host, ".ghe.com")
+	gitlab := host == "gitlab.com"
+	mode := src.Auth
+	if mode == "" || mode == "auto" {
+		mode = "bearer"
+		if github || gitlab {
+			mode = "basic"
+		}
+	}
+	if mode == "bearer" {
+		return "Bearer " + src.Token
+	}
+	user := src.Username
+	switch {
+	case user != "":
+	case github:
+		user = "x-access-token"
+	case gitlab:
+		user = "oauth2"
+	default:
+		user = "git"
+	}
+	return "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+src.Token))
 }
 
 // fetch brings the branch up to date and returns its tip.

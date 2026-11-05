@@ -130,6 +130,13 @@ cluster / cloud                         Forge server                         bro
   only the apps whose directory the new commits touched: `kustomize build`
   for a kustomization, `helm template` for a chart, the YAML files as they
   are otherwise. Git credentials stay in the cluster.
+- **How `GIT_TOKEN` is sent** (`--source-auth`, or `GIT_AUTH`): `auto`
+  (default) uses HTTP Basic for `github.com`, `*.ghe.com` and `gitlab.com`,
+  whose git-over-HTTPS rejects `Authorization: Bearer`, with the user
+  `x-access-token` (GitHub App installation tokens and PATs) or `oauth2`
+  (GitLab); any other host gets `Bearer`. Set `basic` or `bearer` to choose
+  yourself, and `GIT_USERNAME` to change the Basic user (`git` by default on
+  other hosts). The token is sent as a header, never put in a URL.
 - **Drift is computed where both sides meet.** The agent compares each live
   top-level object with its desired manifest whenever either changes:
   *Synced* when the live object has every field Git sets with the same value

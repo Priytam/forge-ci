@@ -75,7 +75,9 @@ spec:
             - --provider=kubernetes
             - --exclude-namespaces=kube-system,kube-public,kube-node-lease,forge-live
             # Desired state (Diff, sync status): the GitOps repo and one app's
-            # directory in it. A token, if needed, goes in the secret as GIT_TOKEN.
+            # directory in it. A token, if needed, goes in the secret as GIT_TOKEN;
+            # it is sent as Basic x-access-token:<token> to github.com (gitlab.com:
+            # oauth2:<token>) and as Bearer elsewhere — see --source-auth.
             # - --source-url=https://git.example.com/acme/platform-gitops.git
             # - --source-path=apps/{group}/{name}
             # Sync, rollback, prune: also apply deploy/live/agent-sync.yaml.
