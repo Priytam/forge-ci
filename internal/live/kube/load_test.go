@@ -198,10 +198,23 @@ func cpuSeconds() float64 {
 	return float64(ru.Utime.Sec+ru.Stime.Sec) + float64(ru.Utime.Usec+ru.Stime.Usec)/1e6
 }
 
+// heapInuse reads HeapInuse once the heap has settled. Right after the
+// initial report, informer and delta-shipping goroutines still hold their last
+// pages for a moment, so a single GC read 4–8 MB high (more on Go 1.25 and on
+// busy CI runners) and pushed the per-object figure over budget. Collect until
+// two readings agree within 1%, pausing so those goroutines can finish.
 func heapInuse() uint64 {
-	goruntime.GC()
 	var m goruntime.MemStats
-	goruntime.ReadMemStats(&m)
+	var last uint64
+	for range 20 {
+		goruntime.GC()
+		goruntime.ReadMemStats(&m)
+		if last != 0 && m.HeapInuse <= last && last-m.HeapInuse <= last/100 {
+			break
+		}
+		last = m.HeapInuse
+		time.Sleep(50 * time.Millisecond)
+	}
 	return m.HeapInuse
 }
 
@@ -220,6 +233,9 @@ func ship(ds []live.Delta, c *counter) {
 }
 
 func TestAgentFootprint(t *testing.T) {
+	if testing.Short() {
+		t.Skip("load test; runs in the default go test, skipped under -short")
+	}
 	objects, measure := 20_000, 3*time.Second
 	if v, _ := strconv.Atoi(os.Getenv("LIVE_LOAD")); v > 0 {
 		objects, measure = v, 10*time.Second
