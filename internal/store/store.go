@@ -1807,11 +1807,13 @@ func (s *Store) CancelDeadJobs(ctx context.Context) (int64, error) {
 
 // PromoteReadyJobs moves created jobs with all needs satisfied to pending, or
 // to blocked when they target a protected environment.
-// protectedFor matches a job's environment against a repo-specific rule or
-// the global (repo=”) default.
-const protectedFor = `EXISTS (
-	SELECT 1 FROM protected_environments pe, pipelines p
-	WHERE p.id = j.pipeline_id AND lower(pe.name) = lower(j.environment) AND pe.repo IN ('', p.repo))`
+// protectedFor is true when the rule for a job's environment (the
+// repo-specific one, else the global repo=” default) needs approvals. A
+// rule with required_approvals 0 does not block.
+const protectedFor = `COALESCE((
+	SELECT pe.required_approvals > 0 FROM protected_environments pe, pipelines p
+	WHERE p.id = j.pipeline_id AND lower(pe.name) = lower(j.environment) AND pe.repo IN ('', p.repo)
+	ORDER BY pe.repo DESC LIMIT 1), FALSE)`
 
 // frozenEnv is true when the job targets an environment currently inside a
 // deploy-freeze window (repo-specific or global). A frozen job is left in
