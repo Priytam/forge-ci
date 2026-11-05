@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -42,6 +43,7 @@ var (
 
 type Store struct {
 	pool       *pgxpool.Pool
+	notify     *notifier         // shared LISTEN connection, outside the pool (see listen.go)
 	cipher     *secret.Cipher    // envelope encryption for secrets at rest
 	appMinter  *githubapp.Minter // mints/caches GitHub App installation tokens
 	oidcSigner *oidc.Signer      // mints per-job OIDC ID tokens (keyless cloud auth)
@@ -97,11 +99,45 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 // Migrate re-runs the (idempotent) migrations — what every server start does.
 func (s *Store) Migrate(ctx context.Context) error { return runMigrations(ctx, s.pool) }
 
-func New(ctx context.Context, dsn string) (*Store, error) {
-	pool, err := pgxpool.New(ctx, dsn)
+// DefaultMaxConns is the pool size when neither pool_max_conns in the DSN nor
+// DATABASE_MAX_CONNS sets one. pgxpool's own default, max(4, NumCPU), is 4 on a
+// 1-vCPU instance: too few for API requests, runner log posts and the
+// scheduler under a burst of pipelines.
+const DefaultMaxConns = 20
+
+// PoolConfig parses dsn and sizes the pool: pool_max_conns in the DSN wins,
+// then DATABASE_MAX_CONNS, then DefaultMaxConns.
+func PoolConfig(dsn string) (*pgxpool.Config, error) {
+	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, err
 	}
+	if !strings.Contains(dsn, "pool_max_conns") {
+		cfg.MaxConns = DefaultMaxConns
+		if v := os.Getenv("DATABASE_MAX_CONNS"); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 1 {
+				return nil, fmt.Errorf("DATABASE_MAX_CONNS=%q: want a positive integer", v)
+			}
+			cfg.MaxConns = int32(n)
+		}
+	}
+	if cfg.MinConns > cfg.MaxConns {
+		cfg.MinConns = cfg.MaxConns
+	}
+	return cfg, nil
+}
+
+func New(ctx context.Context, dsn string) (*Store, error) {
+	cfg, err := PoolConfig(dsn)
+	if err != nil {
+		return nil, err
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	slog.Info("postgres pool", "max_conns", cfg.MaxConns)
 	if err := pool.Ping(ctx); err != nil {
 		return nil, fmt.Errorf("postgres ping: %w", err)
 	}
@@ -123,6 +159,7 @@ func New(ctx context.Context, dsn string) (*Store, error) {
 		queueTimeout:      envDuration("QUEUE_TIMEOUT", 24*time.Hour),
 		runnerStaleAfter:  envDuration("RUNNER_STALE_AFTER", defaultStaleAfter),
 	}
+	s.notify = newNotifier(s.listenerConnect)
 	if err := s.initSecrets(ctx); err != nil {
 		return nil, err
 	}
@@ -244,7 +281,12 @@ func (s *Store) MigrateSecrets(ctx context.Context) (int, error) {
 	return total, nil
 }
 
-func (s *Store) Close() { s.pool.Close() }
+func (s *Store) Close() {
+	if s.notify != nil {
+		s.notify.close()
+	}
+	s.pool.Close()
+}
 
 // ---- pipelines ----
 

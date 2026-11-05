@@ -343,22 +343,9 @@ func (s *Store) ExpireLiveOps(ctx context.Context) error {
 
 // ListenLiveOps calls fn with the target id of each new operation.
 func (s *Store) ListenLiveOps(ctx context.Context, fn func(targetID int64)) error {
-	conn, err := s.pool.Acquire(ctx)
-	if err != nil {
-		return err
-	}
-	defer conn.Release()
-	if _, err := conn.Exec(ctx, "LISTEN "+opsChannel); err != nil {
-		return err
-	}
-	defer func() { _, _ = conn.Exec(context.Background(), "UNLISTEN "+opsChannel) }()
-	for {
-		n, err := conn.Conn().WaitForNotification(ctx)
-		if err != nil {
-			return err
-		}
-		if id, err := strconv.ParseInt(n.Payload, 10, 64); err == nil {
+	return s.listen(ctx, opsChannel, func(p string) {
+		if id, err := strconv.ParseInt(p, 10, 64); err == nil {
 			fn(id)
 		}
-	}
+	})
 }

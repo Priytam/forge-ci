@@ -687,22 +687,7 @@ func (s *Store) LiveHealthCounts(ctx context.Context) (map[string]int, error) {
 }
 
 // ListenLive calls fn with each live notification's payload until ctx ends,
-// on one pooled connection; the caller fans out.
+// on the store's shared listener connection; the caller fans out.
 func (s *Store) ListenLive(ctx context.Context, fn func(payload string)) error {
-	conn, err := s.pool.Acquire(ctx)
-	if err != nil {
-		return err
-	}
-	defer conn.Release()
-	if _, err := conn.Exec(ctx, "LISTEN "+liveChannel); err != nil {
-		return err
-	}
-	defer func() { _, _ = conn.Exec(context.Background(), "UNLISTEN "+liveChannel) }()
-	for {
-		n, err := conn.Conn().WaitForNotification(ctx)
-		if err != nil {
-			return err
-		}
-		fn(n.Payload)
-	}
+	return s.listen(ctx, liveChannel, fn)
 }

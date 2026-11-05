@@ -578,23 +578,8 @@ func repoHost(cloneURL string) string {
 	return u
 }
 
-// ListenChanges calls fn with each changed change id until ctx ends. It holds
-// one pooled connection for LISTEN; the caller fans out to subscribers.
+// ListenChanges calls fn with each changed change id until ctx ends, on the
+// store's shared listener connection; the caller fans out to subscribers.
 func (s *Store) ListenChanges(ctx context.Context, fn func(id string)) error {
-	conn, err := s.pool.Acquire(ctx)
-	if err != nil {
-		return err
-	}
-	defer conn.Release()
-	if _, err := conn.Exec(ctx, "LISTEN "+changesChannel); err != nil {
-		return err
-	}
-	defer func() { _, _ = conn.Exec(context.Background(), "UNLISTEN "+changesChannel) }()
-	for {
-		n, err := conn.Conn().WaitForNotification(ctx)
-		if err != nil {
-			return err
-		}
-		fn(n.Payload)
-	}
+	return s.listen(ctx, changesChannel, fn)
 }
