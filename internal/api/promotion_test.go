@@ -147,7 +147,10 @@ func TestDeployRecordsAndPromotion(t *testing.T) {
 	if j, _ := st.GetJob(ctx, pjobs[0].ID); j.Status != "blocked" {
 		t.Fatalf("promoted production deploy = %s, want blocked on approval", j.Status)
 	}
-	if _, err := st.Approve(ctx, pjobs[0].ID, proto.ApprovalRequest{Approver: "release@acme.io", Verdict: "approved"}); err != nil {
+	if _, err := st.AddMember(ctx, repo, "release@acme.io", "owner"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Approve(ctx, pjobs[0].ID, store.Approver{Name: "release@acme.io"}, proto.ApprovalRequest{Verdict: "approved"}); err != nil {
 		t.Fatal(err)
 	}
 	prod := runNext(t, st, db, srv, "deploy-production", "", "")

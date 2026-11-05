@@ -77,7 +77,8 @@ request body:
 
 In **open bootstrap mode** (no SSO enabled) there is no session, so a
 client-supplied approver/author is still accepted — this keeps CLI/dev bootstrap
-working. Mutating admin endpoints additionally require `requireAdmin`; with SSO
+working. An asserted approver must still be a repo member with one of the
+environment's `approver_roles` (docs/rbac-approvals.md). Mutating admin endpoints additionally require `requireAdmin`; with SSO
 enforced that means a session whose email is in `ADMIN_EMAILS`, and every
 mutating admin route is gated (unauthenticated → `401`, non-admin → `403`).
 

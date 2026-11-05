@@ -1096,44 +1096,135 @@ func (s *Store) ExpiredLogObjectKeys(ctx context.Context, olderThan time.Duratio
 
 // ---- approvals ----
 
-// Approve records a vote and, inside the same transaction, releases the job
-// (blocked -> pending) once required approvals are met, or fails it on reject.
-func (s *Store) Approve(ctx context.Context, jobID int64, req proto.ApprovalRequest) (*proto.Job, error) {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback(ctx)
+// Approver is who is casting a vote. Name is the identity the vote is recorded
+// under (the session email when there is a session). PlatformAdmin is true only
+// for an authenticated platform admin; it counts as the "admin" role on every
+// repo, so an environment whose approver_roles include admin can always be
+// approved by a platform admin even before the repo has members.
+type Approver struct {
+	Name          string
+	PlatformAdmin bool
+}
 
-	var status, repo, triggeredBy string
-	var environment *string
-	err = tx.QueryRow(ctx,
-		`SELECT j.status, j.environment, p.repo, p.triggered_by
+// gateJob is the approval-relevant state of a job.
+type gateJob struct {
+	status, repo, triggeredBy string
+	environment               *string
+	manual                    bool
+}
+
+func loadGateJob(ctx context.Context, q querier, jobID int64, lock bool) (*gateJob, error) {
+	sql := `SELECT j.status, j.environment, j.manual, p.repo, p.triggered_by
 		 FROM jobs j JOIN pipelines p ON p.id = j.pipeline_id
-		 WHERE j.id=$1 FOR UPDATE OF j`, jobID).
-		Scan(&status, &environment, &repo, &triggeredBy)
+		 WHERE j.id=$1`
+	if lock {
+		sql += ` FOR UPDATE OF j`
+	}
+	var g gateJob
+	err := q.QueryRow(ctx, sql, jobID).
+		Scan(&g.status, &g.environment, &g.manual, &g.repo, &g.triggeredBy)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-	if status != "blocked" || environment == nil {
+	return &g, nil
+}
+
+// checkApprover enforces the environment's rule for one voter and returns the
+// members of the rule's required group (lowercased). approver_roles is always
+// enforced: a repo with no members no longer lets anyone vote (it used to, as
+// a "bootstrap mode", which made every rule a no-op until the first member was
+// added). A voter must be a member of the rule's required group (naming the
+// group on the rule is what lets them vote), or hold one of the roles — a
+// platform admin counts as "admin". The pipeline's author may not vote on
+// their own deployment unless the rule allows self-approval.
+func (s *Store) checkApprover(ctx context.Context, q querier, g *gateJob, rule *proto.ProtectedEnvironment, who Approver) (map[string]bool, error) {
+	group, err := s.groupMembers(ctx, q, rule.RequiredGroup)
+	if err != nil {
+		return nil, err
+	}
+	if !group[strings.ToLower(who.Name)] {
+		role, err := s.memberRole(ctx, g.repo, who.Name)
+		if err != nil {
+			return nil, err
+		}
+		allowed := false
+		for _, r := range rule.ApproverRoles {
+			if (role != "" && role == r) || (who.PlatformAdmin && r == "admin") {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return nil, fmt.Errorf("%w: %s needs one of the roles %s on %s",
+				ErrForbidden, rule.Name, strings.Join(rule.ApproverRoles, ", "), g.repo)
+		}
+	}
+	if !rule.AllowSelfApproval && g.triggeredBy != "" && strings.EqualFold(who.Name, g.triggeredBy) {
+		return nil, ErrSelfApproval
+	}
+	return group, nil
+}
+
+// gateRule returns the rule for a job waiting on environment approval, or
+// ErrNotBlocked when the job is not at an approval gate. A manual job parked in
+// 'blocked' is waiting for Play, not for votes, even when it targets a
+// protected environment: approving it would release it past its needs.
+func (s *Store) gateRule(ctx context.Context, g *gateJob) (*proto.ProtectedEnvironment, error) {
+	if g.status != "blocked" || g.environment == nil || g.manual {
 		return nil, ErrNotBlocked
 	}
-
-	rule, err := s.resolveProtectedEnv(ctx, repo, *environment)
+	rule, err := s.resolveProtectedEnv(ctx, g.repo, *g.environment)
 	if err != nil {
 		return nil, err
 	}
 	if rule == nil {
 		return nil, ErrNotBlocked
 	}
+	return rule, nil
+}
 
-	group, err := s.checkApprover(ctx, tx, repo, rule, req.Approver, triggeredBy)
+// CanApprove reports whether who may vote on jobID right now, with the same
+// checks Approve applies (nil means yes). The UI uses it to decide whether to
+// show the Approve and Reject buttons; Approve re-checks inside its transaction.
+func (s *Store) CanApprove(ctx context.Context, jobID int64, who Approver) (*proto.ProtectedEnvironment, error) {
+	g, err := loadGateJob(ctx, s.pool, jobID, false)
 	if err != nil {
 		return nil, err
 	}
+	rule, err := s.gateRule(ctx, g)
+	if err != nil {
+		return nil, err
+	}
+	_, err = s.checkApprover(ctx, s.pool, g, rule, who)
+	return rule, err
+}
+
+// Approve records a vote and, inside the same transaction, releases the job
+// (blocked -> pending) once required approvals are met, or fails it on reject.
+// The vote is recorded under who.Name.
+func (s *Store) Approve(ctx context.Context, jobID int64, who Approver, req proto.ApprovalRequest) (*proto.Job, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	g, err := loadGateJob(ctx, tx, jobID, true)
+	if err != nil {
+		return nil, err
+	}
+	rule, err := s.gateRule(ctx, g)
+	if err != nil {
+		return nil, err
+	}
+	group, err := s.checkApprover(ctx, tx, g, rule, who)
+	if err != nil {
+		return nil, err
+	}
+	req.Approver = who.Name
 
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO job_approvals (job_id, approver, verdict, comment) VALUES ($1,$2,$3,$4)`,
@@ -1158,13 +1249,13 @@ func (s *Store) Approve(ctx context.Context, jobID int64, req proto.ApprovalRequ
 			return nil, err
 		}
 		for vrows.Next() {
-			var who string
-			if err := vrows.Scan(&who); err != nil {
+			var voter string
+			if err := vrows.Scan(&voter); err != nil {
 				vrows.Close()
 				return nil, err
 			}
 			approved++
-			if group[strings.ToLower(who)] {
+			if group[strings.ToLower(voter)] {
 				fromGroup++
 			}
 		}
@@ -1184,43 +1275,6 @@ func (s *Store) Approve(ctx context.Context, jobID int64, req proto.ApprovalRequ
 		return nil, err
 	}
 	return s.GetJob(ctx, jobID)
-}
-
-// checkApprover reports whether approver may vote under rule (ErrForbidden,
-// ErrSelfApproval otherwise) and returns the rule's required group's members.
-// RBAC is enforced when the repo has members; a repo with no members runs in
-// bootstrap mode (anyone may approve) — see docs/rbac-approvals.md. Members
-// of the rule's required group may vote even without the repo role (that is
-// what naming them on the rule means).
-func (s *Store) checkApprover(ctx context.Context, tx pgx.Tx, repo string, rule *proto.ProtectedEnvironment, approver, requester string) (map[string]bool, error) {
-	hasMembers, err := s.repoHasMembers(ctx, repo)
-	if err != nil {
-		return nil, err
-	}
-	group, err := s.groupMembers(ctx, tx, rule.RequiredGroup)
-	if err != nil {
-		return nil, err
-	}
-	if hasMembers && !group[strings.ToLower(approver)] {
-		role, err := s.memberRole(ctx, repo, approver)
-		if err != nil {
-			return nil, err
-		}
-		allowed := false
-		for _, r := range rule.ApproverRoles {
-			if role == r {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
-			return nil, ErrForbidden
-		}
-	}
-	if !rule.AllowSelfApproval && requester != "" && approver == requester {
-		return nil, ErrSelfApproval
-	}
-	return group, nil
 }
 
 // maxCommitMessageBytes bounds what a provider event can push into a pipeline

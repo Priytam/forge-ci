@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/priytamjeepandey/forge-ci/internal/proto"
 	"github.com/priytamjeepandey/forge-ci/internal/store"
@@ -397,11 +399,15 @@ func (s *Server) getReport(w http.ResponseWriter, r *http.Request) {
 // cacheBlobKey derives a deterministic, filesystem-safe blob key for a repo's
 // cache under a given cache key. The repo segment is sanitized for readability;
 // a sha256 of repo+key guarantees uniqueness (repo/key may contain slashes or
-// other unsafe characters). Being deterministic, a repeat save for the same
-// (repo, key) overwrites the same object.
-func cacheBlobKey(repo, key string) string {
+// other unsafe characters). Each save gets its own object (suffixed by the
+// saving job and time): overwriting one fixed object in place let a restore
+// read a half-written archive, and an over-cap or interrupted upload destroyed
+// the cache that was there. The row is swapped to the new object once it is
+// complete, and the old object is deleted.
+func cacheBlobKey(repo, key string, jobID int64) string {
 	sum := sha256.Sum256([]byte(repo + "\x00" + key))
-	return "cache/" + sanitizeSegment(repo) + "/" + hex.EncodeToString(sum[:]) + ".tar.gz"
+	return fmt.Sprintf("cache/%s/%s-%d-%d.tar.gz",
+		sanitizeSegment(repo), hex.EncodeToString(sum[:]), jobID, time.Now().UnixNano())
 }
 
 // sanitizeSegment reduces a string to a safe single path segment: characters
@@ -425,8 +431,8 @@ func sanitizeSegment(s string) string {
 // uploadCache stores a job's cache archive under repo+key. The repo is resolved
 // server-side from the job so the runner cannot write outside its repo's cache
 // namespace. Enforces MAX_CACHE_BYTES: an over-cap upload is rejected (413) and
-// the partial blob cleaned up — the runner treats this as non-fatal and the job
-// still succeeds.
+// the partial blob cleaned up, leaving the previous cache for the key in place —
+// the runner treats this as non-fatal and the job still succeeds.
 func (s *Server) uploadCache(w http.ResponseWriter, r *http.Request) {
 	if !s.requireRunnerAuth(w, r) {
 		return
@@ -451,7 +457,7 @@ func (s *Server) uploadCache(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "failed to resolve job")
 		return
 	}
-	blobKey := cacheBlobKey(repo, key)
+	blobKey := cacheBlobKey(repo, key, id)
 	body := r.Body
 	if s.maxCacheBytes > 0 {
 		body = io.NopCloser(io.LimitReader(r.Body, s.maxCacheBytes+1))
@@ -459,6 +465,7 @@ func (s *Server) uploadCache(w http.ResponseWriter, r *http.Request) {
 	size, err := s.blobs.Put(r.Context(), blobKey, body)
 	if err != nil {
 		slog.Error("store cache blob", "err", err)
+		_ = s.blobs.Delete(context.Background(), blobKey)
 		writeErr(w, http.StatusInternalServerError, "failed to store cache")
 		return
 	}
@@ -470,10 +477,17 @@ func (s *Server) uploadCache(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("cache exceeds MAX_CACHE_BYTES (%d bytes)", s.maxCacheBytes))
 		return
 	}
-	if err := s.store.SaveCache(r.Context(), repo, key, blobKey, size); err != nil {
+	previous, err := s.store.SaveCache(r.Context(), repo, key, blobKey, size)
+	if err != nil {
 		slog.Error("save cache meta", "err", err)
+		_ = s.blobs.Delete(context.Background(), blobKey)
 		writeErr(w, http.StatusInternalServerError, "failed to record cache")
 		return
+	}
+	if previous != "" {
+		if derr := s.blobs.Delete(r.Context(), previous); derr != nil {
+			slog.Warn("delete replaced cache blob", "err", derr, "key", previous)
+		}
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"repo": repo, "key": key, "size_bytes": size})
 }
@@ -666,6 +680,13 @@ func (s *Server) upsertProtectedEnv(w http.ResponseWriter, r *http.Request) {
 	if pe.Name == "" {
 		writeErr(w, http.StatusBadRequest, "name is required")
 		return
+	}
+	for _, role := range pe.ApproverRoles {
+		if role != "admin" && role != "owner" && role != "developer" {
+			writeErr(w, http.StatusBadRequest,
+				fmt.Sprintf("unknown approver role %q: roles are admin, owner and developer", role))
+			return
+		}
 	}
 	if pe.RequiredApprovals < 1 {
 		pe.RequiredApprovals = 1

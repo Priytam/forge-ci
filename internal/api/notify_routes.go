@@ -251,7 +251,9 @@ func (s *Server) approvalLinkAct(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, linkPage, "link", "#444", "Can't act on this link", "<p>"+html.EscapeString(err.Error())+"</p>")
 		return
 	}
-	job, err := s.store.Approve(r.Context(), jobID, proto.ApprovalRequest{Approver: approver, Verdict: verdict, Comment: "via email link"})
+	// The link is signed for approver, so it is an authenticated identity.
+	who := store.Approver{Name: approver, PlatformAdmin: s.emailIsAdmin(r.Context(), approver)}
+	job, err := s.store.Approve(r.Context(), jobID, who, proto.ApprovalRequest{Verdict: verdict, Comment: "via email link"})
 	if err != nil {
 		s.auditAs(r, approver, "approval.link", strconv.FormatInt(jobID, 10), "", "denied", map[string]any{"verdict": verdict, "error": err.Error()})
 		fmt.Fprintf(w, linkPage, "link", "#444", "Not recorded", "<p>"+html.EscapeString(err.Error())+"</p>")

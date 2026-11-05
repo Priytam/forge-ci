@@ -636,20 +636,19 @@ func (s *Server) approveLiveOp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// As for deploy jobs: with a session the approver is who is signed in.
-	if sess := s.currentSession(r); sess != nil {
-		req.Approver = sess.Email
-	} else if s.ssoEnforced(r.Context()) {
+	who, _, ok := s.approverFor(r, req.Approver)
+	if !ok {
 		writeErr(w, http.StatusUnauthorized, "authentication required — sign in via SSO")
 		return
 	}
-	if req.Approver == "" {
-		req.Approver = s.actorLabel(r)
+	if who.Name == "" {
+		who.Name = s.actorLabel(r)
 	}
 	if req.Verdict != "approved" && req.Verdict != "rejected" {
 		writeErr(w, http.StatusBadRequest, `verdict must be "approved" or "rejected"`)
 		return
 	}
-	o, err := s.store.ApproveLiveOp(r.Context(), id, req.Approver, req.Verdict, req.Comment)
+	o, err := s.store.ApproveLiveOp(r.Context(), id, who, req.Verdict, req.Comment)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		writeErr(w, http.StatusNotFound, "operation not found")

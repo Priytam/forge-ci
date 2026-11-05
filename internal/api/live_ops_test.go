@@ -152,6 +152,10 @@ func TestLiveOperations(t *testing.T) {
 		VALUES ('', 'fleet', 1, '{admin,owner,developer}')`); err != nil {
 		t.Fatal(err)
 	}
+	// approver_roles is enforced on every repo, so the voter must be a member.
+	if _, err := h.st.AddMember(context.Background(), "lab/platform-gitops", "release@lab.local", "developer"); err != nil {
+		t.Fatal(err)
+	}
 	_, o = h.op(id, map[string]any{"kind": "sync", "prune": true})
 	if o.State != "approval" {
 		t.Fatalf("protected sync state = %q", o.State)

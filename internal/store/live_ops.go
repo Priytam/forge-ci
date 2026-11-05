@@ -167,7 +167,8 @@ func (s *Store) LiveAppOps(ctx context.Context, appID int64, limit int) ([]LiveO
 // ApproveLiveOp records a vote under the environment's rule (the same rule
 // and eligibility as approving a deploy job). Enough approvals release the
 // operation to the agent; one rejection cancels it.
-func (s *Store) ApproveLiveOp(ctx context.Context, id int64, approver, verdict, comment string) (*LiveOp, error) {
+func (s *Store) ApproveLiveOp(ctx context.Context, id int64, who Approver, verdict, comment string) (*LiveOp, error) {
+	approver := who.Name
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -192,9 +193,10 @@ func (s *Store) ApproveLiveOp(ctx context.Context, id int64, approver, verdict, 
 		return nil, err
 	}
 	if rule == nil {
-		rule = &proto.ProtectedEnvironment{RequiredApprovals: 1, AllowSelfApproval: true}
+		rule = &proto.ProtectedEnvironment{RequiredApprovals: 1, AllowSelfApproval: true,
+			ApproverRoles: append([]string(nil), DefaultApproverRoles...)}
 	}
-	group, err := s.checkApprover(ctx, tx, repo, rule, approver, requester)
+	group, err := s.checkApprover(ctx, tx, &gateJob{repo: repo, triggeredBy: requester}, rule, who)
 	if err != nil {
 		return nil, err
 	}

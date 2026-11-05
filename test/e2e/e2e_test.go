@@ -122,6 +122,13 @@ func TestApprovalGate(t *testing.T) {
 		"required_approvals":  1,
 		"allow_self_approval": true,
 	}, nil, http.StatusOK)
+	// approver_roles (default admin, owner) is enforced even in open mode, so
+	// the voters must be owners. A non-member is refused.
+	for _, who := range []string{"alice@example.com", "bob@example.com"} {
+		mustJSON(t, http.MethodPost, base()+"/api/v1/members", map[string]any{
+			"repo": repo, "username": who, "role": "owner",
+		}, nil, http.StatusCreated)
+	}
 
 	config := `
 stages: [build, deploy]
@@ -140,6 +147,8 @@ jobs:
 		// deploy must reach 'blocked' awaiting approval.
 		waitJob(t, base(), p.ID, "deploy", shortRun, "blocked")
 		dj, _ := jobByName(mustJobs(t, p.ID), "deploy")
+		mustJSON(t, http.MethodPost, fmt.Sprintf("%s/api/v1/jobs/%d/approvals", base(), dj.ID),
+			map[string]string{"approver": "mallory@example.com", "verdict": "approved"}, nil, http.StatusForbidden)
 		mustJSON(t, http.MethodPost, fmt.Sprintf("%s/api/v1/jobs/%d/approvals", base(), dj.ID),
 			map[string]string{"approver": "alice@example.com", "verdict": "approved"}, nil, http.StatusOK)
 		j := waitJob(t, base(), p.ID, "deploy", shortRun, "success", "failed", "canceled")

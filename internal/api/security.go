@@ -135,22 +135,32 @@ func (s *Server) isAdmin(r *http.Request) bool {
 	if sess == nil {
 		return false
 	}
+	return s.sessionIsAdmin(r.Context(), sess)
+}
+
+// sessionIsAdmin reports whether an authenticated session belongs to a
+// platform admin, whatever the SSO mode. isAdmin adds the open-mode rule
+// (everyone is admin); approvals must not, so they call this directly.
+func (s *Server) sessionIsAdmin(ctx context.Context, sess *store.Session) bool {
 	if sess.Provider == serviceAccountProvider {
 		return sess.ServiceAdmin
 	}
-	if adminEmails()[strings.ToLower(sess.Email)] {
+	return s.emailIsAdmin(ctx, sess.Email)
+}
+
+// emailIsAdmin reports whether an authenticated identity is a platform admin:
+// ADMIN_EMAILS, granted from the Admin UI, or in an IdP group mapped to
+// platform admin. API tokens act as their owner, so these cover tokens too.
+func (s *Server) emailIsAdmin(ctx context.Context, email string) bool {
+	if adminEmails()[strings.ToLower(email)] {
 		return true
 	}
-	// Granted from the Admin UI. API tokens act as their owner, so a grant
-	// covers the owner's tokens too.
-	if ok, err := s.store.IsPlatformAdmin(r.Context(), sess.Email); err != nil {
+	if ok, err := s.store.IsPlatformAdmin(ctx, email); err != nil {
 		slog.Error("platform admin lookup", "err", err)
 	} else if ok {
 		return true
 	}
-	// An IdP group mapped to platform admin. API tokens act as their owner,
-	// so the owner's groups apply to them too.
-	ok, err := s.store.IsGroupAdmin(r.Context(), sess.Email)
+	ok, err := s.store.IsGroupAdmin(ctx, email)
 	if err != nil {
 		slog.Error("group admin lookup", "err", err)
 	}

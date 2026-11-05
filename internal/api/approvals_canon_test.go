@@ -73,7 +73,7 @@ func TestJobDetailShowsGroupProgress(t *testing.T) {
 	_, _ = h.st.PromoteReadyJobs(ctx)
 	_, js, _ := h.st.GetPipeline(ctx, p.ID)
 	job := js[0]
-	if _, err := h.st.Approve(ctx, job.ID, proto.ApprovalRequest{Approver: "owner@acme.io", Verdict: "approved"}); err != nil {
+	if _, err := h.st.Approve(ctx, job.ID, store.Approver{Name: "owner@acme.io"}, proto.ApprovalRequest{Verdict: "approved"}); err != nil {
 		t.Fatal(err)
 	}
 	// Two paths, one answer: the job detail endpoint and the pipeline endpoint.
@@ -85,7 +85,7 @@ func TestJobDetailShowsGroupProgress(t *testing.T) {
 		}
 	}
 	// One more vote, from the group: progress shows and the job releases.
-	if _, err := h.st.Approve(ctx, job.ID, proto.ApprovalRequest{Approver: "ravi@acme.io", Verdict: "approved"}); err != nil {
+	if _, err := h.st.Approve(ctx, job.ID, store.Approver{Name: "ravi@acme.io"}, proto.ApprovalRequest{Verdict: "approved"}); err != nil {
 		t.Fatal(err)
 	}
 	after, _ := h.st.GetJob(ctx, job.ID)
