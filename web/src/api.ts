@@ -1984,6 +1984,37 @@ export function deleteServiceAccount(id: number): Promise<void> {
   return requestVoid("DELETE", `/service-accounts/${id}`);
 }
 
+// --- Platform admins ---
+
+/** One platform admin: from ADMIN_EMAILS ("env") or granted from the Admin UI ("ui"). */
+export interface PlatformAdmin {
+  email: string;
+  source: "env" | "ui";
+  added_by?: string;
+  created_at?: string;
+}
+
+export interface PlatformAdmins {
+  admins: PlatformAdmin[];
+  /** IdP groups mapped to platform admin (Sign-in & identity). */
+  admin_groups: { group: string; provider: string }[];
+  /** the caller's email, lower-cased ("" in open mode) */
+  me: string;
+  sso_enforced: boolean;
+}
+
+export function listPlatformAdmins(): Promise<PlatformAdmins> {
+  return getJSON<PlatformAdmins>("/platform-admins");
+}
+
+export function addPlatformAdmin(email: string): Promise<PlatformAdmin> {
+  return postJSON<PlatformAdmin>("/platform-admins", { email });
+}
+
+export function removePlatformAdmin(email: string): Promise<void> {
+  return requestVoid("DELETE", `/platform-admins/${encodeURIComponent(email)}`);
+}
+
 export function listServiceTokens(id: number): Promise<ApiToken[]> {
   return getJSON<ApiToken[]>(`/service-accounts/${id}/tokens`);
 }

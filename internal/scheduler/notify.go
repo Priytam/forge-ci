@@ -15,14 +15,27 @@ import (
 // delays job transitions.
 const notifyEvery = 5 * time.Second
 
-// adminEmails mirrors the API's ADMIN_EMAILS parsing: the people to tell
-// when a repo has no members of its own.
-func adminEmails() []string {
+// adminEmails is who to tell when a repo has no members of its own: the
+// ADMIN_EMAILS list (parsed like the API does) plus admins granted from the
+// Admin UI.
+func (sc *Scheduler) adminEmails(ctx context.Context) []string {
 	var out []string
-	for _, e := range strings.Split(os.Getenv("ADMIN_EMAILS"), ",") {
-		if e = strings.ToLower(strings.TrimSpace(e)); e != "" {
+	seen := map[string]bool{}
+	add := func(e string) {
+		if e = strings.ToLower(strings.TrimSpace(e)); e != "" && !seen[e] {
+			seen[e] = true
 			out = append(out, e)
 		}
+	}
+	for _, e := range strings.Split(os.Getenv("ADMIN_EMAILS"), ",") {
+		add(e)
+	}
+	admins, err := sc.store.ListPlatformAdmins(ctx)
+	if err != nil {
+		slog.Error("notify: list platform admins", "err", err)
+	}
+	for _, a := range admins {
+		add(a.Email)
 	}
 	return out
 }
@@ -89,7 +102,7 @@ func (sc *Scheduler) notifyApprovals(ctx context.Context) {
 	legacyApprovals := cfg.SlackWebhookURL != "" || cfg.EmailEnabled
 
 	if legacyApprovals || subscribed(notify.EventApprovalNeeded) {
-		notices, err := sc.store.ClaimApprovalNotices(ctx, 20, adminEmails())
+		notices, err := sc.store.ClaimApprovalNotices(ctx, 20, sc.adminEmails(ctx))
 		if err != nil {
 			slog.Error("notify: claim approval waits", "err", err)
 		}

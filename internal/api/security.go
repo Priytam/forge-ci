@@ -125,7 +125,8 @@ func adminEmails() map[string]bool {
 // isAdmin reports whether the request is from a platform admin. In open
 // (bootstrap) mode — SSO not enforced — every caller is treated as admin. When
 // SSO is enforced, the caller must have a session whose email is in
-// ADMIN_EMAILS.
+// ADMIN_EMAILS, was granted admin from the Admin UI, or belongs to an IdP
+// group mapped to platform admin.
 func (s *Server) isAdmin(r *http.Request) bool {
 	if !s.ssoEnforced(r.Context()) {
 		return true
@@ -138,6 +139,13 @@ func (s *Server) isAdmin(r *http.Request) bool {
 		return sess.ServiceAdmin
 	}
 	if adminEmails()[strings.ToLower(sess.Email)] {
+		return true
+	}
+	// Granted from the Admin UI. API tokens act as their owner, so a grant
+	// covers the owner's tokens too.
+	if ok, err := s.store.IsPlatformAdmin(r.Context(), sess.Email); err != nil {
+		slog.Error("platform admin lookup", "err", err)
+	} else if ok {
 		return true
 	}
 	// An IdP group mapped to platform admin. API tokens act as their owner,

@@ -116,6 +116,7 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 	srv.registerOrgViewRoutes()
 	srv.registerNotificationRoutes()
 	srv.registerServiceAccountRoutes()
+	srv.registerPlatformAdminRoutes()
 	srv.registerAuditRoutes()
 	srv.registerOIDCRoutes()
 	srv.registerTestHistoryRoutes()
