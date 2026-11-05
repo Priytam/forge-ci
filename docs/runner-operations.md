@@ -69,6 +69,28 @@ retried, but a job whose runner vanished is re-queued (same attempt
 counter, a `[forge] runner lost … retrying` note in the log) until `max`
 is used up.
 
+## When the server is slow or unreachable
+
+A job's result does not depend on the runner reaching the server on the
+first try:
+
+- **Completion.** If `POST /jobs/{id}/complete` times out (30s) or gets a
+  5xx/429, the runner retries with backoff (1s doubling to 30s) for up to
+  10 minutes, and keeps heart-beating meanwhile so the job is not failed
+  as lost. The report names the claim (attempt and runner id), so a resend
+  of a report that already landed gets `409` and stops, and it can never
+  complete a later attempt that another runner picked up.
+- **Logs.** Log output is sent in numbered chunks. A chunk that fails is
+  kept and resent, in order, with the same number; the server stores a
+  number only once, so a chunk whose response was lost is not duplicated.
+  Up to 16 MiB is held while the server is unreachable (older chunks are
+  then dropped and the log says how many). At the end of the job the
+  runner keeps resending the rest for up to 10 minutes before it reports
+  completion.
+
+Older runners (without these fields) keep working; their reports are not
+scoped to a claim.
+
 ## Maintenance mode
 
 Admin → About → **Turn maintenance on** pauses job acquisition on **every**

@@ -125,12 +125,17 @@ type RunnerJob struct {
 	// token file. Executors expose it to the job (see executor.RunPath).
 	RunDir string `json:"-"`
 
-	ID         int64             `json:"id"`
-	PipelineID int64             `json:"pipeline_id"`
-	Name       string            `json:"name"`
-	Image      string            `json:"image"`
-	Script     string            `json:"script"`
-	Env        map[string]string `json:"env"`
+	ID         int64 `json:"id"`
+	PipelineID int64 `json:"pipeline_id"`
+	// Attempt and RunnerID identify this claim of the job. The runner echoes
+	// them on completion so a retried report can never complete a later
+	// attempt or another runner's claim.
+	Attempt  int               `json:"attempt,omitempty"`
+	RunnerID string            `json:"runner_id,omitempty"`
+	Name     string            `json:"name"`
+	Image    string            `json:"image"`
+	Script   string            `json:"script"`
+	Env      map[string]string `json:"env"`
 
 	ArtifactPaths []string `json:"artifact_paths"`
 
@@ -386,7 +391,18 @@ type AcquireRequest struct {
 type CompleteRequest struct {
 	Status   string `json:"status"` // success | failed | canceled | requeue
 	ExitCode int    `json:"exit_code"`
+	// Attempt and RunnerID (from RunnerJob) scope the report to one claim.
+	// Runners retry the report until it lands; a repeat after the first one
+	// was recorded gets 409, which the runner takes as done. Omitted by older
+	// runners, which get the unscoped behaviour.
+	Attempt  int    `json:"attempt,omitempty"`
+	RunnerID string `json:"runner_id,omitempty"`
 }
+
+// LogSeqHeader carries a runner log chunk's sequence number (1, 2, … per
+// claim). The server appends a chunk only if its number is above the last one
+// accepted, so a chunk resent after a timeout is not stored twice.
+const LogSeqHeader = "X-Forge-Log-Seq"
 
 // HeartbeatResponse is returned to the runner on every heartbeat. Cancel=true
 // tells the runner to stop the job and report completion as 'canceled'.

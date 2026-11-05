@@ -870,6 +870,25 @@ func (s *Server) pushLogs(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "empty log chunk")
 		return
 	}
+	// A runner resends a chunk whose POST timed out; if the first copy was
+	// stored, skip it rather than duplicating lines.
+	if v := r.Header.Get(proto.LogSeqHeader); v != "" {
+		seq, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || seq < 1 {
+			writeErr(w, http.StatusBadRequest, "invalid "+proto.LogSeqHeader)
+			return
+		}
+		fresh, err := s.store.AcceptLogChunk(r.Context(), id, seq)
+		if err != nil {
+			slog.Error("push logs: sequence", "err", err, "job", id)
+			writeErr(w, http.StatusServiceUnavailable, "log sequence check failed; resend")
+			return
+		}
+		if !fresh {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+	}
 	// Redact masked variable values before the chunk is persisted. A secret can
 	// be split across chunk boundaries, so we carry the trailing bytes that
 	// could still be a partial match into the next chunk. The carry-over tail is
@@ -1064,9 +1083,10 @@ func (s *Server) complete(w http.ResponseWriter, r *http.Request) {
 	}
 	// Flush any carried-over log tail for this job before it leaves 'running'.
 	s.flushMaskTail(r.Context(), id)
-	final, note, err := s.store.CompleteJob(r.Context(), id, req.Status, req.ExitCode)
+	final, note, err := s.store.CompleteJobClaim(r.Context(), id, req.Attempt, req.RunnerID, req.Status, req.ExitCode)
 	if errors.Is(err, store.ErrNotFound) {
-		// Job already transitioned (e.g. failed as stale) — not the runner's problem.
+		// Job already transitioned (e.g. failed as stale, or this is a retried
+		// report that already landed) — not the runner's problem.
 		w.WriteHeader(http.StatusConflict)
 		return
 	}

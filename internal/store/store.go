@@ -1361,23 +1361,24 @@ func (s *Store) AcquireJob(ctx context.Context, req proto.AcquireRequest) (*prot
 	}
 	err = tx.QueryRow(ctx,
 		`UPDATE jobs j
-		 SET status='running', started_at=now(), heartbeat_at=now(), runner_id=$1
+		 SET status='running', started_at=now(), heartbeat_at=now(), runner_id=$1, log_seq=0
 		 FROM pipelines p
 		 WHERE j.id = $3 AND p.id = j.pipeline_id AND j.status = 'pending' AND j.tags <@ $2::text[]
 		 RETURNING j.id, j.pipeline_id, j.name, j.image, j.script, j.env,
 		           j.artifact_paths, j.report_junit, j.cache_paths, j.cache_key, j.cache_key_files,
 		           j.cache_policy, j.services, j.network, j.environment, j.timeout_seconds,
 		           p.repo, p.ref, p.sha, p.source, p.triggered_by, p.commit_author, p.commit_message,
-		           j.report_dotenv, j.coverage_report, j.secrets, j.registry_logins`,
+		           j.report_dotenv, j.coverage_report, j.secrets, j.registry_logins, j.attempt`,
 		req.RunnerID, runnerTags, candidate).
 		Scan(&j.ID, &j.PipelineID, &j.Name, &image, &j.Script, &envRaw,
 			&artifactsRaw, &reportJUnitRaw, &cachePathsRaw, &j.CacheKey, &cacheKeyFilesRaw,
 			&cachePolicy, &servicesRaw, &j.Network, &environment, &j.TimeoutSeconds, &repo, &ref, &sha,
 			&source, &triggeredBy, &commitAuthor, &commitMessage,
-			&j.ReportDotenvPath, &j.CoverageReportPath, &secretsRaw, &j.RegistryLogins)
+			&j.ReportDotenvPath, &j.CoverageReportPath, &secretsRaw, &j.RegistryLogins, &j.Attempt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
+	j.RunnerID = req.RunnerID
 	if err != nil {
 		return nil, err
 	}
@@ -1535,13 +1536,21 @@ func (s *Store) Heartbeat(ctx context.Context, jobID int64) (cancel bool, err er
 // separator lands in the right place whether logs live in Postgres or Redis
 // (CompleteJob no longer writes log bodies itself — see internal/logstore).
 func (s *Store) CompleteJob(ctx context.Context, jobID int64, status string, exitCode int) (final, note string, err error) {
+	return s.CompleteJobClaim(ctx, jobID, 0, "", status, exitCode)
+}
+
+// CompleteJobClaim is CompleteJob scoped to one claim: it applies only while
+// the job is running as attempt (0 = any) on runnerID ("" = any). Anything
+// else, including a repeat of a report already recorded, is ErrNotFound, so
+// runners can retry a report whose response they never saw.
+func (s *Store) CompleteJobClaim(ctx context.Context, jobID int64, attempt int, runnerID, status string, exitCode int) (final, note string, err error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return "", "", err
 	}
 	defer tx.Rollback(ctx)
 
-	var attempt, maxAttempts int
+	var maxAttempts int
 	var retryWhen []string
 	var cancelReq bool
 	var environment *string
@@ -1551,7 +1560,9 @@ func (s *Store) CompleteJob(ctx context.Context, jobID int64, status string, exi
 		`SELECT j.retry_when, j.attempt, j.max_attempts, j.cancel_requested, j.environment,
 		        p.id, p.repo, p.ref, p.sha, p.triggered_by
 		 FROM jobs j JOIN pipelines p ON p.id = j.pipeline_id
-		 WHERE j.id=$1 AND j.status='running' FOR UPDATE OF j`, jobID).
+		 WHERE j.id=$1 AND j.status='running'
+		   AND ($2 = 0 OR j.attempt = $2) AND ($3 = '' OR j.runner_id = $3)
+		 FOR UPDATE OF j`, jobID, attempt, runnerID).
 		Scan(&retryWhen, &attempt, &maxAttempts, &cancelReq, &environment, &pipelineID, &repo, &ref, &sha, &triggeredBy)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", "", ErrNotFound
@@ -1939,4 +1950,15 @@ func (s *Store) FailStuckPending(ctx context.Context) (int64, error) {
 		   AND p.created_at + $1::interval < now())`,
 		s.queueTimeout.String())
 	return tag.RowsAffected(), err
+}
+
+// AcceptLogChunk records seq as the job's latest runner log chunk and reports
+// whether it is new. A chunk at or below the last accepted number is a resend
+// whose first copy was already stored.
+func (s *Store) AcceptLogChunk(ctx context.Context, jobID, seq int64) (bool, error) {
+	tag, err := s.pool.Exec(ctx, `UPDATE jobs SET log_seq=$2 WHERE id=$1 AND log_seq < $2`, jobID, seq)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
 }
