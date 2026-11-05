@@ -177,17 +177,17 @@ func parseCodeCommitPR(body []byte) (prTrigger, prSource, error) {
 	}
 	iid, _ := strconv.Atoi(detail.PullRequestID) // non-numeric ids degrade to 0
 	return prTrigger{
-		Repo:         repo,
-		IID:          iid,
-		Title:        detail.Title,
-		SourceBranch: shortRefName(detail.SourceReference),
-		TargetBranch: shortRefName(detail.DestinationReference),
-		HeadSHA:      detail.SourceCommit,
-		Author:       arnPrincipal(detail.Author),
-	}, prSource{
-		IID:     detail.PullRequestID,
-		BaseSHA: detail.DestinationCommit,
-	}, nil
+			Repo:         repo,
+			IID:          iid,
+			Title:        detail.Title,
+			SourceBranch: shortRefName(detail.SourceReference),
+			TargetBranch: shortRefName(detail.DestinationReference),
+			HeadSHA:      detail.SourceCommit,
+			Author:       arnPrincipal(detail.Author),
+		}, prSource{
+			IID:     detail.PullRequestID,
+			BaseSHA: detail.DestinationCommit,
+		}, nil
 }
 
 // shortRefName strips the refs/heads/ or refs/tags/ prefix CodeCommit uses in

@@ -41,8 +41,8 @@ jobs:
 		t.Errorf("plain = %+v", by["plain"])
 	}
 	for bad, want := range map[string]string{
-		"coverage: '/(unclosed/'":                  "invalid regex",
-		"artifacts: {reports: {dotenv: ../x.env}}": "workspace-relative",
+		"coverage: '/(unclosed/'":                                                         "invalid regex",
+		"artifacts: {reports: {dotenv: ../x.env}}":                                        "workspace-relative",
 		"artifacts: {reports: {coverage_report: {coverage_format: jacoco, path: c.xml}}}": "not supported",
 	} {
 		y := "stages: [d]\njobs:\n  j:\n    stage: d\n    script: [x]\n    " + bad + "\n"
