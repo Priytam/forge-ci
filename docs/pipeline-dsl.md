@@ -1024,6 +1024,32 @@ re-runs it **inside the same pipeline**, together with every job after it (via
   repo. The pipeline-level **Retry** still starts a fresh copy of the whole
   pipeline.
 
+## Retrying many failed jobs after an outage
+
+**Pipelines → Retry failed…** (on the all-pipelines page or a repo's) retries
+every failed job that matches a **job name** (contains, case-insensitive)
+and/or an **error text** — matched against the job's status reason and the
+last 256 KiB of its log — and failed in a recent window. **Preview** lists the
+jobs first; **Retry** re-runs each exactly as **Retry job** would (with its
+downstream jobs), so jobs of one pipeline are retried once.
+
+```bash
+curl -X POST https://forge.example.com/api/v1/jobs/retry-failed \
+  -H "Authorization: Bearer $FORGE_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name": "deploy", "error": "i/o timeout", "since": "6h", "repo": "acme/api", "dry_run": true}'
+```
+
+- `since` is required: an RFC 3339 time or a duration back from now (`"6h"`).
+  At least one of `name` and `error` is required; `repo` is optional. At most
+  200 failed jobs are considered (narrow the filter otherwise). Only the
+  latest attempt of a job counts; a job already retried is not retried again.
+- The answer lists `matched`, `retried` (old and new job ids) and `skipped`
+  with the reason — a repo you have no role on (the same rule as a single
+  retry), branch rules refusing the job, or a job already re-queued as a
+  dependent of an earlier match.
+- Each retry is audited as `job.retry` (with `bulk: true`), and the run as one
+  `job.retry.bulk` entry with the filter and counts.
+
 ## `runner_affinity:` — prefer the runner with warm caches
 
 `runner_affinity: true` on a job makes its next run prefer the runner that

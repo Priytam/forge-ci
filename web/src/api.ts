@@ -1575,6 +1575,25 @@ export function createApiToken(body: {
   return postJSON<ApiToken>("/api-tokens", body);
 }
 
+export interface RetryFailedResult {
+  dry_run: boolean;
+  since: string;
+  matched: { job_id: number; pipeline_id: number; repo: string; ref: string; name: string; reason?: string; finished_at: string }[];
+  retried: { job_id: number; new_job_id: number; pipeline_id: number; requeued: number }[];
+  skipped: { job_id: number; reason: string }[];
+}
+
+/** Retry every failed job matching name and/or error text since a time (dry_run previews). */
+export function retryFailedJobs(body: {
+  repo?: string;
+  name?: string;
+  error?: string;
+  since: string;
+  dry_run: boolean;
+}): Promise<RetryFailedResult> {
+  return postJSON("/jobs/retry-failed", body);
+}
+
 export function revokeApiToken(id: number): Promise<void> {
   return requestVoid("POST", `/api-tokens/${id}/revoke`);
 }

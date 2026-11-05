@@ -90,6 +90,7 @@ func New(s *store.Store, blobs blob.Store, logs *logstore.Service) *Server {
 	m.HandleFunc("POST /api/v1/jobs/{id}/cancel", srv.cancelJob)
 	m.HandleFunc("POST /api/v1/jobs/{id}/play", srv.playJob)
 	m.HandleFunc("POST /api/v1/jobs/{id}/retry", srv.retryJob)
+	m.HandleFunc("POST /api/v1/jobs/retry-failed", srv.retryFailedJobs)
 	m.HandleFunc("GET /api/v1/permissions", srv.permissions)
 	m.HandleFunc("POST /api/v1/lint", srv.lint)
 	m.HandleFunc("GET /api/v1/healthz", func(w http.ResponseWriter, _ *http.Request) {
