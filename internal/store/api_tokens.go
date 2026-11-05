@@ -37,6 +37,34 @@ type APIToken struct {
 	ServiceAccountID *int64 `json:"service_account_id,omitempty"`
 	// ServiceAdmin is the service account's admin flag (lookup only).
 	ServiceAdmin bool `json:"-"`
+	// Scope limits the token: ScopeRead, ScopeOperate or ScopeAdmin.
+	Scope string `json:"scope"`
+}
+
+// API token scopes, each including the ones before it. A scope never adds
+// rights: an operate or admin token can do only what its owner can.
+const (
+	ScopeRead    = "read"    // GET and HEAD only
+	ScopeOperate = "operate" // anything the owner may do except admin-only actions
+	ScopeAdmin   = "admin"   // everything the owner may do
+)
+
+// NormalizeScope validates a requested scope ("" = admin, as before scopes).
+func NormalizeScope(s string) (string, error) {
+	switch s = strings.ToLower(strings.TrimSpace(s)); s {
+	case "":
+		return ScopeAdmin, nil
+	case ScopeRead, ScopeOperate, ScopeAdmin:
+		return s, nil
+	}
+	return "", errors.New(`scope must be "read", "operate" or "admin"`)
+}
+
+func scopeOrAdmin(s string) string {
+	if s == "" {
+		return ScopeAdmin
+	}
+	return s
 }
 
 // TokenPolicy is the admin-controlled rule for personal API tokens.
@@ -89,11 +117,15 @@ func (s *Store) SetTokenPolicy(ctx context.Context, p TokenPolicy) error {
 
 // CreateAPIToken mints a token for owner. expiresAt nil = never expires; the
 // caller has already checked that against the policy.
-func (s *Store) CreateAPIToken(ctx context.Context, owner, ownerName, description string, expiresAt *time.Time) (*APIToken, error) {
-	return s.createAPIToken(ctx, owner, ownerName, description, expiresAt, nil)
+func (s *Store) CreateAPIToken(ctx context.Context, owner, ownerName, description, scope string, expiresAt *time.Time) (*APIToken, error) {
+	return s.createAPIToken(ctx, owner, ownerName, description, scope, expiresAt, nil)
 }
 
-func (s *Store) createAPIToken(ctx context.Context, owner, ownerName, description string, expiresAt *time.Time, serviceAccountID *int64) (*APIToken, error) {
+func (s *Store) createAPIToken(ctx context.Context, owner, ownerName, description, scope string, expiresAt *time.Time, serviceAccountID *int64) (*APIToken, error) {
+	scope, err := NormalizeScope(scope)
+	if err != nil {
+		return nil, err
+	}
 	buf := make([]byte, 24)
 	if _, err := rand.Read(buf); err != nil {
 		return nil, err
@@ -102,12 +134,12 @@ func (s *Store) createAPIToken(ctx context.Context, owner, ownerName, descriptio
 	t := APIToken{
 		Token: raw, TokenSuffix: raw[len(raw)-4:], Owner: owner, OwnerName: ownerName,
 		Description: description, ExpiresAt: expiresAt, Status: "active",
-		ServiceAccountID: serviceAccountID,
+		ServiceAccountID: serviceAccountID, Scope: scope,
 	}
-	err := s.pool.QueryRow(ctx,
-		`INSERT INTO api_tokens (token_hash, token_suffix, owner, owner_name, description, expires_at, service_account_id)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, created_at`,
-		hashAPIToken(raw), t.TokenSuffix, owner, ownerName, description, expiresAt, serviceAccountID).
+	err = s.pool.QueryRow(ctx,
+		`INSERT INTO api_tokens (token_hash, token_suffix, owner, owner_name, description, expires_at, service_account_id, scope)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id, created_at`,
+		hashAPIToken(raw), t.TokenSuffix, owner, ownerName, description, expiresAt, serviceAccountID, scope).
 		Scan(&t.ID, &t.CreatedAt)
 	if err != nil {
 		return nil, err
@@ -121,7 +153,7 @@ func (s *Store) createAPIToken(ctx context.Context, owner, ownerName, descriptio
 func (s *Store) ListAPITokens(ctx context.Context, owner string, policy TokenPolicy) ([]APIToken, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, token_suffix, owner, owner_name, description, created_at,
-		        expires_at, last_used_at, revoked, service_account_id
+		        expires_at, last_used_at, revoked, service_account_id, scope
 		 FROM api_tokens WHERE ($1 = '' OR lower(owner) = lower($1))
 		 ORDER BY id DESC`, owner)
 	if err != nil {
@@ -133,9 +165,10 @@ func (s *Store) ListAPITokens(ctx context.Context, owner string, policy TokenPol
 	for rows.Next() {
 		var t APIToken
 		if err := rows.Scan(&t.ID, &t.TokenSuffix, &t.Owner, &t.OwnerName, &t.Description,
-			&t.CreatedAt, &t.ExpiresAt, &t.LastUsedAt, &t.Revoked, &t.ServiceAccountID); err != nil {
+			&t.CreatedAt, &t.ExpiresAt, &t.LastUsedAt, &t.Revoked, &t.ServiceAccountID, &t.Scope); err != nil {
 			return nil, err
 		}
+		t.Scope = scopeOrAdmin(t.Scope)
 		t.Status = tokenStatus(t, policy, now)
 		out = append(out, t)
 	}
@@ -167,7 +200,7 @@ func (s *Store) LookupAPIToken(ctx context.Context, raw string, policy TokenPoli
 	var t APIToken
 	err := s.pool.QueryRow(ctx,
 		`SELECT t.id, t.owner, t.owner_name, t.created_at, t.expires_at, t.service_account_id,
-		        COALESCE(sa.is_admin, FALSE)
+		        COALESCE(sa.is_admin, FALSE), t.scope
 		 FROM api_tokens t LEFT JOIN service_accounts sa ON sa.id = t.service_account_id
 		 WHERE t.token_hash=$1 AND NOT t.revoked
 		   AND (t.service_account_id IS NULL OR NOT sa.disabled)
@@ -175,13 +208,14 @@ func (s *Store) LookupAPIToken(ctx context.Context, raw string, policy TokenPoli
 		   AND ($2 OR t.expires_at IS NOT NULL)
 		   AND ($3 = 0 OR t.created_at + make_interval(days => $3) > now())`,
 		hashAPIToken(raw), policy.AllowNoExpiry, policy.MaxLifetimeDays).
-		Scan(&t.ID, &t.Owner, &t.OwnerName, &t.CreatedAt, &t.ExpiresAt, &t.ServiceAccountID, &t.ServiceAdmin)
+		Scan(&t.ID, &t.Owner, &t.OwnerName, &t.CreatedAt, &t.ExpiresAt, &t.ServiceAccountID, &t.ServiceAdmin, &t.Scope)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
+	t.Scope = scopeOrAdmin(t.Scope)
 	_, _ = s.pool.Exec(ctx,
 		`UPDATE api_tokens SET last_used_at = now()
 		 WHERE id=$1 AND (last_used_at IS NULL OR last_used_at < now() - interval '1 minute')`, t.ID)

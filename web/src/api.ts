@@ -1537,8 +1537,12 @@ export function getPermissions(repo: string): Promise<Permissions> {
 // --- Personal API tokens ---
 
 /** A personal API token. token is only set in the create response. */
+/** read: GET only · operate: what the owner may do except admin-only actions · admin: everything the owner may do */
+export type TokenScope = "read" | "operate" | "admin";
+
 export interface ApiToken {
   id: number;
+  scope?: TokenScope;
   token?: string;
   token_suffix: string;
   owner: string;
@@ -1566,6 +1570,7 @@ export function createApiToken(body: {
   description: string;
   expires_in_days?: number;
   no_expiry?: boolean;
+  scope?: TokenScope;
 }): Promise<ApiToken> {
   return postJSON<ApiToken>("/api-tokens", body);
 }
@@ -2039,7 +2044,7 @@ export function listServiceTokens(id: number): Promise<ApiToken[]> {
 
 export function createServiceToken(
   id: number,
-  b: { description: string; expires_in_days?: number; no_expiry?: boolean }
+  b: { description: string; expires_in_days?: number; no_expiry?: boolean; scope?: TokenScope }
 ): Promise<ApiToken> {
   return postJSON<ApiToken>(`/service-accounts/${id}/tokens`, b);
 }

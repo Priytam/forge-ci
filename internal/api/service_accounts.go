@@ -179,21 +179,26 @@ func (s *Server) createServiceToken(w http.ResponseWriter, r *http.Request) {
 		Description   string `json:"description"`
 		ExpiresInDays int    `json:"expires_in_days"`
 		NoExpiry      bool   `json:"no_expiry"`
+		Scope         string `json:"scope"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
+	if _, err := store.NormalizeScope(req.Scope); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	exp, err := tokenExpiry(req.NoExpiry, req.ExpiresInDays, s.tokenPolicy(r.Context()), time.Now())
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	t, err := s.store.CreateServiceToken(r.Context(), a, strings.TrimSpace(req.Description), exp)
+	t, err := s.store.CreateServiceToken(r.Context(), a, strings.TrimSpace(req.Description), req.Scope, exp)
 	if err != nil {
 		slog.Error("create service token", "err", err)
 		writeErr(w, http.StatusInternalServerError, "failed to create token")
 		return
 	}
 	s.audit(r, "service-account.token-create", a.Identity, "", "ok", map[string]any{
-		"token_id": strconv.FormatInt(t.ID, 10), "token_suffix": t.TokenSuffix, "no_expiry": exp == nil,
+		"token_id": strconv.FormatInt(t.ID, 10), "token_suffix": t.TokenSuffix, "no_expiry": exp == nil, "scope": t.Scope,
 	})
 	writeJSON(w, http.StatusCreated, t)
 }

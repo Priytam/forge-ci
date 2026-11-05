@@ -13,6 +13,7 @@ import {
   type ApiToken,
   type AuthUser,
   type TokenPolicy,
+  type TokenScope,
 } from "../api";
 import { usePoll } from "../hooks/usePoll";
 
@@ -90,7 +91,9 @@ export function TokenTable({
             <tr key={t.id}>
               {showOwner && <td>{t.owner}</td>}
               <td>{t.description || <span className="muted">(none)</span>}</td>
-              <td className="mono">fci_…{t.token_suffix}</td>
+              <td className="mono">
+                fci_…{t.token_suffix} <span className="muted">{t.scope ?? "admin"}</span>
+              </td>
               <td className="muted" title={t.created_at}>
                 {fmtDate(t.created_at)}
               </td>
@@ -214,6 +217,7 @@ export default function ApiTokens() {
 
   const [description, setDescription] = useState("");
   const [lifetime, setLifetime] = useState("90");
+  const [scope, setScope] = useState<TokenScope>("admin");
   const [creating, setCreating] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [revealed, setRevealed] = useState<ApiToken | null>(null);
@@ -239,8 +243,8 @@ export default function ApiTokens() {
     try {
       const created = await createApiToken(
         lifetime === "never"
-          ? { description: description.trim(), no_expiry: true }
-          : { description: description.trim(), expires_in_days: Number(lifetime) }
+          ? { description: description.trim(), no_expiry: true, scope }
+          : { description: description.trim(), expires_in_days: Number(lifetime), scope }
       );
       setRevealed(created);
       setDescription("");
@@ -318,6 +322,14 @@ export default function ApiTokens() {
               onChange={(e) => setDescription(e.target.value)}
               placeholder="e.g. deploy script on jenkins"
             />
+          </label>
+          <label className="field">
+            <span>Scope</span>
+            <select value={scope} onChange={(e) => setScope(e.target.value as TokenScope)}>
+              <option value="admin">admin — everything you may do</option>
+              <option value="operate">operate — runs, retries, Live syncs; no admin-only actions</option>
+              <option value="read">read — GET only</option>
+            </select>
           </label>
           <label className="field">
             <span>Expires</span>

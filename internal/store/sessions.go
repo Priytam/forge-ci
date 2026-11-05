@@ -114,6 +114,9 @@ type Session struct {
 	Expires  time.Time `json:"expires_at"`
 	// ServiceAdmin: a service account granted platform-admin rights.
 	ServiceAdmin bool `json:"-"`
+	// Scope is an API token's scope (ScopeRead/Operate/Admin); "" for a
+	// browser session.
+	Scope string `json:"-"`
 }
 
 func (s *Store) CreateSession(ctx context.Context, email, name, provider string, ttl time.Duration) (*Session, error) {

@@ -1664,3 +1664,8 @@ ALTER TABLE live_targets ADD COLUMN IF NOT EXISTS namespace_environments JSONB N
 -- A target's default sync policy: apps first seen on it inherit it (a
 -- template's own policy wins for the apps the template declares).
 ALTER TABLE live_targets ADD COLUMN IF NOT EXISTS default_policy JSONB;
+
+-- What an API token may do: read (GET only), operate (what its owner may do,
+-- except admin-only actions) or admin (everything its owner may do). Empty is
+-- admin: tokens made before scopes existed keep working as they did.
+ALTER TABLE api_tokens ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT '';

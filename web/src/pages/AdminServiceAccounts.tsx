@@ -14,6 +14,7 @@ import {
   type ApiToken,
   type ServiceAccount,
   type TokenPolicy,
+  type TokenScope,
 } from "../api";
 
 function fmtDate(iso: string | null): string {
@@ -25,6 +26,7 @@ function AccountTokens({ account, policy }: { account: ServiceAccount; policy: T
   const [tokens, setTokens] = useState<ApiToken[] | null>(null);
   const [desc, setDesc] = useState("");
   const [lifetime, setLifetime] = useState("365");
+  const [scope, setScope] = useState<TokenScope>("admin");
   const [revealed, setRevealed] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const reload = useCallback(() => {
@@ -39,7 +41,9 @@ function AccountTokens({ account, policy }: { account: ServiceAccount; policy: T
     try {
       const t = await createServiceToken(
         account.id,
-        lifetime === "never" ? { description: desc, no_expiry: true } : { description: desc, expires_in_days: Number(lifetime) }
+        lifetime === "never"
+          ? { description: desc, no_expiry: true, scope }
+          : { description: desc, expires_in_days: Number(lifetime), scope }
       );
       setRevealed(t.token ?? "");
       setDesc("");
@@ -85,7 +89,9 @@ function AccountTokens({ account, policy }: { account: ServiceAccount; policy: T
             {tokens.map((t) => (
               <tr key={t.id}>
                 <td>{t.description || <span className="muted">(none)</span>}</td>
-                <td className="mono">fci_…{t.token_suffix}</td>
+                <td className="mono">
+                  fci_…{t.token_suffix} <span className="muted">{t.scope ?? "admin"}</span>
+                </td>
                 <td className="muted">{fmtDate(t.created_at)}</td>
                 <td className="muted">{t.last_used_at ? relativeTime(t.last_used_at) : "never"}</td>
                 <td className="muted">{fmtDate(t.expires_at)}</td>
@@ -115,6 +121,14 @@ function AccountTokens({ account, policy }: { account: ServiceAccount; policy: T
           <label className="field">
             <span>New token</span>
             <input value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="what uses it, e.g. github-actions deploy" />
+          </label>
+          <label className="field">
+            <span>Scope</span>
+            <select value={scope} onChange={(e) => setScope(e.target.value as TokenScope)}>
+              <option value="admin">admin — everything the account may do</option>
+              <option value="operate">operate — runs, retries, Live syncs; no admin-only actions</option>
+              <option value="read">read — GET only</option>
+            </select>
           </label>
           <label className="field">
             <span>Expires</span>

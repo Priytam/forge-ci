@@ -153,6 +153,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuth(w, r) {
 		return
 	}
+	if !s.requireTokenScope(w, r) {
+		return
+	}
 	s.mux.ServeHTTP(w, r)
 }
 
