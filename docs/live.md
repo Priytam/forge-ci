@@ -79,6 +79,15 @@ cluster / cloud                         Forge server                         bro
   `app.kubernetes.io/instance,app.kubernetes.io/name`; `--group-label`,
   default `app.kubernetes.io/part-of`; `--root-selector` to narrow);
   ReplicaSets and Pods follow their controller.
+- **Which namespaces.** `--exclude-namespaces` (default
+  `kube-system,kube-public,kube-node-lease`) are never watched.
+  `--include-namespaces`, when set, are the only ones watched, so a
+  namespace created later (a new system add-on) is not picked up by
+  surprise. The rule: a namespace is watched when the include list is empty
+  or names it, **and** the exclude list does not — exclude wins. With one
+  included namespace the API server filters (`metadata.namespace=`); with
+  several the agent drops other namespaces' objects as they arrive (the
+  ServiceAccount still needs cluster-wide `list/watch`).
 - **Compact, coalesced deltas with backpressure.** Changes wait at least
   250 ms per application and coalesce per resource (a pod that changes ten
   times is sent once, in its last state). One batch is in flight at a time;

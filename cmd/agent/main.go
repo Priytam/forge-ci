@@ -40,7 +40,8 @@ func main() {
 		appLabels  = flag.String("app-labels", "app.kubernetes.io/instance,app.kubernetes.io/name", "labels naming a top-level object's application; the first present wins")
 		groupLabel = flag.String("group-label", "app.kubernetes.io/part-of", "label naming the system an application is part of")
 		rootSel    = flag.String("root-selector", "", "label selector limiting which top-level objects are applications")
-		excludeNS  = flag.String("exclude-namespaces", "kube-system,kube-public,kube-node-lease", "namespaces never watched")
+		excludeNS  = flag.String("exclude-namespaces", "kube-system,kube-public,kube-node-lease", "namespaces never watched (wins over --include-namespaces)")
+		includeNS  = flag.String("include-namespaces", "", "if set, the only namespaces watched (comma-separated); --exclude-namespaces still applies")
 		sourceURL  = flag.String("source-url", "", "Git repository holding desired state (enables Diff; GIT_TOKEN authenticates)")
 		sourceAuth = flag.String("source-auth", envOr("GIT_AUTH", "auto"), "how GIT_TOKEN is sent: auto (Basic for github.com/gitlab.com, else Bearer) | basic | bearer")
 		branch     = flag.String("source-branch", "main", "branch of the source")
@@ -78,7 +79,8 @@ func main() {
 			fatal("kubernetes client: %v", err)
 		}
 		kc := kube.Config{AppLabels: split(*appLabels), GroupLabel: *groupLabel, RootSelector: *rootSel, ExcludeNamespaces: split(*excludeNS),
-			Orphans: *orphans}
+			IncludeNamespaces: split(*includeNS),
+			Orphans:           *orphans}
 		if *sourceURL != "" {
 			kc.Source = &kube.Source{URL: *sourceURL, Branch: *branch, Path: *sourcePath, Poll: *sourcePoll, Token: os.Getenv("GIT_TOKEN"),
 				Auth: *sourceAuth, Username: os.Getenv("GIT_USERNAME")}

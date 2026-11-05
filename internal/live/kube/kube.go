@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"sync"
 
@@ -46,6 +47,10 @@ type Config struct {
 	RootSelector string
 	// ExcludeNamespaces are never watched (filtered by the API server).
 	ExcludeNamespaces []string
+	// IncludeNamespaces, when set, are the only namespaces watched; a
+	// namespace in both lists is excluded. One namespace is filtered by the
+	// API server; several, in the agent as objects arrive.
+	IncludeNamespaces []string
 	// Source, when set, is where applications' desired state lives: the
 	// Diff view and sync status come from it.
 	Source *Source
@@ -171,14 +176,14 @@ func New(client kubernetes.Interface, cfg Config) (*Provider, error) {
 		}
 		p.selector = sel
 	}
-	fs := make([]string, 0, len(cfg.ExcludeNamespaces))
-	for _, ns := range cfg.ExcludeNamespaces {
-		if ns = strings.TrimSpace(ns); ns != "" {
-			fs = append(fs, "metadata.namespace!="+ns)
+	fieldSelector, keep := namespaceScope(cfg.IncludeNamespaces, cfg.ExcludeNamespaces)
+	p.listWatch = func(k *kind) cache.ListerWatcher {
+		lw := k.lw(p.client, fieldSelector)
+		if keep == nil {
+			return lw
 		}
+		return &nsFilter{inner: cache.ToListerWatcherWithContext(lw), keep: keep}
 	}
-	fieldSelector := strings.Join(fs, ",")
-	p.listWatch = func(k *kind) cache.ListerWatcher { return k.lw(p.client, fieldSelector) }
 	return p, nil
 }
 
@@ -645,4 +650,84 @@ func (w *watcher) relisted(k *kind, seen map[string]bool) {
 			close(w.listed)
 		}
 	}
+}
+
+// namespaceScope turns the include and exclude lists into a field selector
+// for the API server and, when it cannot express the rule, a filter applied
+// in the agent (nil: none needed). The rule: a namespace is watched when the
+// include list is empty or names it, and the exclude list does not.
+func namespaceScope(include, exclude []string) (string, func(ns string) bool) {
+	clean := func(in []string) []string {
+		var out []string
+		for _, ns := range in {
+			if ns = strings.TrimSpace(ns); ns != "" && !slices.Contains(out, ns) {
+				out = append(out, ns)
+			}
+		}
+		return out
+	}
+	include, exclude = clean(include), clean(exclude)
+	include = slices.DeleteFunc(include, func(ns string) bool { return slices.Contains(exclude, ns) })
+	if len(include) == 1 {
+		return "metadata.namespace=" + include[0], nil
+	}
+	fs := make([]string, 0, len(exclude))
+	for _, ns := range exclude {
+		fs = append(fs, "metadata.namespace!="+ns)
+	}
+	if len(include) == 0 {
+		return strings.Join(fs, ","), nil
+	}
+	set := map[string]bool{}
+	for _, ns := range include {
+		set[ns] = true
+	}
+	return strings.Join(fs, ","), func(ns string) bool { return set[ns] }
+}
+
+// nsFilter drops objects outside the included namespaces from lists and
+// watch events, for an include list a field selector cannot express.
+type nsFilter struct {
+	inner cache.ListerWatcherWithContext
+	keep  func(ns string) bool
+}
+
+func (f *nsFilter) List(o metav1.ListOptions) (runtime.Object, error) {
+	return f.ListWithContext(context.Background(), o)
+}
+
+func (f *nsFilter) Watch(o metav1.ListOptions) (watch.Interface, error) {
+	return f.WatchWithContext(context.Background(), o)
+}
+
+func (f *nsFilter) ListWithContext(ctx context.Context, o metav1.ListOptions) (runtime.Object, error) {
+	obj, err := f.inner.ListWithContext(ctx, o)
+	if err != nil {
+		return nil, err
+	}
+	items, err := meta.ExtractList(obj)
+	if err != nil {
+		return nil, err
+	}
+	kept := items[:0]
+	for _, it := range items {
+		if a, err := meta.Accessor(it); err != nil || f.keep(a.GetNamespace()) {
+			kept = append(kept, it)
+		}
+	}
+	return obj, meta.SetList(obj, kept)
+}
+
+func (f *nsFilter) WatchWithContext(ctx context.Context, o metav1.ListOptions) (watch.Interface, error) {
+	w, err := f.inner.WatchWithContext(ctx, o)
+	if err != nil {
+		return nil, err
+	}
+	return watch.Filter(w, func(e watch.Event) (watch.Event, bool) {
+		if e.Type == watch.Bookmark || e.Type == watch.Error {
+			return e, true
+		}
+		a, err := meta.Accessor(e.Object)
+		return e, err != nil || f.keep(a.GetNamespace())
+	}), nil
 }
