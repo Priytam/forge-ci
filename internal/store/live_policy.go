@@ -3,11 +3,63 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 )
 
 // Forge Live sync policies (phase C): which applications Forge keeps in
 // sync with Git by itself. The controller lives in internal/live/hub.
+
+// TargetDefaultPolicyActor marks policies an app inherited from its
+// target's default.
+const TargetDefaultPolicyActor = "target default"
+
+// ValidLivePolicy checks a policy's own consistency: prune and self-heal
+// only act through auto-sync.
+func ValidLivePolicy(p LivePolicy) error {
+	if (p.Prune || p.SelfHeal) && !p.AutoSync {
+		return errors.New("prune and self_heal need auto_sync")
+	}
+	return nil
+}
+
+// SetLiveTargetDefaultPolicy sets (nil: clears) the policy new apps on
+// the target start with. Existing apps keep theirs.
+func (s *Store) SetLiveTargetDefaultPolicy(ctx context.Context, id int64, p *LivePolicy) error {
+	var raw []byte
+	if p != nil {
+		if err := ValidLivePolicy(*p); err != nil {
+			return err
+		}
+		raw, _ = json.Marshal(map[string]bool{"auto_sync": p.AutoSync, "prune": p.Prune, "self_heal": p.SelfHeal})
+	}
+	tag, err := s.pool.Exec(ctx, `UPDATE live_targets SET default_policy = $2::jsonb WHERE id = $1`, id, raw)
+	if err == nil && tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return err
+}
+
+// LiveAppsMatching returns every application q matches (no paging), at most
+// limit+1 so a caller can tell it was cut.
+func (s *Store) LiveAppsMatching(ctx context.Context, q LiveAppQuery, limit int) ([]LiveApp, error) {
+	where, args := q.where("")
+	rows, err := s.pool.Query(ctx, liveAppSelect+` WHERE `+where+fmt.Sprintf(` ORDER BY a.name, a.namespace, a.id LIMIT %d`, limit+1), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []LiveApp{}
+	for rows.Next() {
+		a, err := scanLiveAppRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *a)
+	}
+	return out, rows.Err()
+}
 
 // SetLivePolicy saves app's sync policy and tells live pages.
 func (s *Store) SetLivePolicy(ctx context.Context, appID int64, p LivePolicy, by string) error {

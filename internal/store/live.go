@@ -29,20 +29,23 @@ type LiveTarget struct {
 	// NamespaceEnvironments overrides Environment for the apps in a
 	// namespace: one agent can report a cluster's staging and prod.
 	NamespaceEnvironments map[string]string `json:"namespace_environments"`
-	Repo                  string            `json:"repo"`
-	Provider              string            `json:"provider"`
-	Capabilities          live.Capabilities `json:"capabilities"`
-	AgentVersion          string            `json:"agent_version"`
-	Epoch                 string            `json:"-"`
-	Seq                   int64             `json:"-"`
-	Synced                bool              `json:"synced"`
-	Stats                 live.AgentStats   `json:"stats"`
-	BytesIn               int64             `json:"bytes_in"`
-	LastSeenAt            *time.Time        `json:"last_seen_at"`
-	CreatedBy             string            `json:"created_by"`
-	CreatedAt             time.Time         `json:"created_at"`
-	TokenSuffix           string            `json:"token_suffix"`
-	Apps                  int               `json:"apps"`
+	// DefaultPolicy, when set, is the sync policy apps first seen on this
+	// target start with.
+	DefaultPolicy *LivePolicy       `json:"default_policy"`
+	Repo          string            `json:"repo"`
+	Provider      string            `json:"provider"`
+	Capabilities  live.Capabilities `json:"capabilities"`
+	AgentVersion  string            `json:"agent_version"`
+	Epoch         string            `json:"-"`
+	Seq           int64             `json:"-"`
+	Synced        bool              `json:"synced"`
+	Stats         live.AgentStats   `json:"stats"`
+	BytesIn       int64             `json:"bytes_in"`
+	LastSeenAt    *time.Time        `json:"last_seen_at"`
+	CreatedBy     string            `json:"created_by"`
+	CreatedAt     time.Time         `json:"created_at"`
+	TokenSuffix   string            `json:"token_suffix"`
+	Apps          int               `json:"apps"`
 }
 
 // EnvironmentFor is the environment of an app in namespace.
@@ -190,13 +193,13 @@ func (s *Store) CreateLiveTarget(ctx context.Context, name, environment, repo, b
 }
 
 const liveTargetCols = `t.id, t.name, t.environment, t.repo, t.provider, t.capabilities, t.agent_version, t.epoch, t.seq,
-	t.synced, t.stats, t.bytes_in, t.last_seen_at, t.created_by, t.created_at, t.token_suffix, t.namespace_environments`
+	t.synced, t.stats, t.bytes_in, t.last_seen_at, t.created_by, t.created_at, t.token_suffix, t.namespace_environments, t.default_policy`
 
 func scanLiveTarget(row pgx.Row, extra ...any) (*LiveTarget, error) {
 	var t LiveTarget
-	var caps, stats []byte
+	var caps, stats, policy []byte
 	dest := append([]any{&t.ID, &t.Name, &t.Environment, &t.Repo, &t.Provider, &caps, &t.AgentVersion, &t.Epoch, &t.Seq,
-		&t.Synced, &stats, &t.BytesIn, &t.LastSeenAt, &t.CreatedBy, &t.CreatedAt, &t.TokenSuffix, &t.NamespaceEnvironments}, extra...)
+		&t.Synced, &stats, &t.BytesIn, &t.LastSeenAt, &t.CreatedBy, &t.CreatedAt, &t.TokenSuffix, &t.NamespaceEnvironments, &policy}, extra...)
 	if err := row.Scan(dest...); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
@@ -205,6 +208,9 @@ func scanLiveTarget(row pgx.Row, extra ...any) (*LiveTarget, error) {
 	}
 	_ = json.Unmarshal(caps, &t.Capabilities)
 	_ = json.Unmarshal(stats, &t.Stats)
+	if len(policy) > 0 {
+		_ = json.Unmarshal(policy, &t.DefaultPolicy)
+	}
 	return &t, nil
 }
 
@@ -455,6 +461,14 @@ func (l *LiveTx) SaveApp(ctx context.Context, a *LiveApp, summary bool) error {
 			l.Target.ID, a.Key, a.Name, a.Namespace, a.Group, a.Health, a.HealthMessage, a.HealthSince,
 			a.Resources, a.Pods, a.PodsReady, a.Images, a.Tree, a.Version, a.Epoch, a.Orphans, a.Template).Scan(&a.ID, &a.UpdatedAt)
 		summary = true
+		if err == nil && !a.Orphans {
+			// A new app starts with its target's default policy, if any.
+			_, err = l.tx.Exec(ctx, `INSERT INTO live_app_policies (target_id, app_key, auto_sync, prune, self_heal, updated_by)
+				SELECT id, $2, (default_policy->>'auto_sync')::boolean, (default_policy->>'prune')::boolean,
+				       (default_policy->>'self_heal')::boolean, $3
+				FROM live_targets WHERE id = $1 AND default_policy IS NOT NULL
+				ON CONFLICT (target_id, app_key) DO NOTHING`, l.Target.ID, a.Key, TargetDefaultPolicyActor)
+		}
 	} else {
 		err = l.tx.QueryRow(ctx, `UPDATE live_apps SET name=$2, namespace=$3, app_group=$4, health=$5, health_message=$6, health_since=$7,
 			resources=$8, pods=$9, pods_ready=$10, images=$11, tree=$12, version=$13, epoch=$14, sync=$15,

@@ -1660,3 +1660,7 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS shell TEXT NOT NULL DEFAULT 'sh';
 -- One target, several environments: a namespace → environment map that
 -- overrides the target's environment for the apps in those namespaces.
 ALTER TABLE live_targets ADD COLUMN IF NOT EXISTS namespace_environments JSONB NOT NULL DEFAULT '{}';
+
+-- A target's default sync policy: apps first seen on it inherit it (a
+-- template's own policy wins for the apps the template declares).
+ALTER TABLE live_targets ADD COLUMN IF NOT EXISTS default_policy JSONB;

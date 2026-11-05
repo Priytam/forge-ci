@@ -48,7 +48,8 @@ export default function AdminLive() {
   const [busy, setBusy] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [removing, setRemoving] = useState<LiveTarget | null>(null);
-  const [editing, setEditing] = useState<{ target: LiveTarget; environment: string; nsEnvs: string } | null>(null);
+  type Policy = { auto_sync: boolean; prune: boolean; self_heal: boolean };
+  const [editing, setEditing] = useState<{ target: LiveTarget; environment: string; nsEnvs: string; policy: Policy | null } | null>(null);
   const [editError, setEditError] = useState<string | null>(null);
 
   const saveEdit = async () => {
@@ -59,6 +60,7 @@ export default function AdminLive() {
       await updateLiveTarget(editing.target.id, {
         environment: editing.environment,
         namespace_environments: parseNsEnvs(editing.nsEnvs),
+        default_policy: editing.policy,
       });
       setEditing(null);
       refresh();
@@ -187,7 +189,12 @@ kubectl apply -f deploy/live/agent.yaml   # from a Forge checkout`}</pre>
                         className="btn btn-sm"
                         onClick={() => {
                           setEditError(null);
-                          setEditing({ target: t, environment: t.environment, nsEnvs: formatNsEnvs(t.namespace_environments) });
+                          setEditing({
+                            target: t,
+                            environment: t.environment,
+                            nsEnvs: formatNsEnvs(t.namespace_environments),
+                            policy: t.default_policy,
+                          });
                         }}
                       >
                         Edit
@@ -205,7 +212,7 @@ kubectl apply -f deploy/live/agent.yaml   # from a Forge checkout`}</pre>
 
       {editing && (
         <ConfirmDialog
-          title={`Environments of ${editing.target.name}`}
+          title={`Edit ${editing.target.name}`}
           confirmLabel="Save"
           busy={busy}
           onCancel={() => setEditing(null)}
@@ -224,6 +231,23 @@ kubectl apply -f deploy/live/agent.yaml   # from a Forge checkout`}</pre>
               onChange={(e) => setEditing({ ...editing, nsEnvs: e.target.value })}
             />
           </label>
+          <fieldset className="lv-admin-field">
+            <legend>Default sync policy for new apps (existing apps keep theirs; bulk-change them from Applications → Sync policy…)</legend>
+            {(["auto_sync", "prune", "self_heal"] as const).map((k) => (
+              <label key={k} className="check-row">
+                <input
+                  type="checkbox"
+                  checked={editing.policy?.[k] ?? false}
+                  disabled={k !== "auto_sync" && !editing.policy?.auto_sync}
+                  onChange={(e) => {
+                    const p = { auto_sync: false, prune: false, self_heal: false, ...editing.policy, [k]: e.target.checked };
+                    setEditing({ ...editing, policy: p.auto_sync ? p : null });
+                  }}
+                />
+                {k === "auto_sync" ? "Auto-sync" : k === "prune" ? "Prune" : "Self-heal"}
+              </label>
+            ))}
+          </fieldset>
           {editError && <div className="error-banner">{editError}</div>}
         </ConfirmDialog>
       )}

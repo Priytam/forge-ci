@@ -55,6 +55,7 @@ func (s *Server) registerLiveRoutes() {
 	s.mux.HandleFunc("POST /api/v1/live/agent/batches", s.liveAgentBatch)
 	s.mux.HandleFunc("POST /api/v1/live/apps/{id}/ops", s.createLiveOp)
 	s.mux.HandleFunc("PUT /api/v1/live/apps/{id}/policy", s.setLivePolicy)
+	s.mux.HandleFunc("POST /api/v1/live/apps/policy", s.setLivePolicies)
 	s.mux.HandleFunc("POST /api/v1/live/templates", s.saveLiveTemplate)
 	s.mux.HandleFunc("PUT /api/v1/live/templates/{id}", s.saveLiveTemplate)
 	s.mux.HandleFunc("DELETE /api/v1/live/templates/{id}", s.deleteLiveTemplate)
@@ -328,10 +329,32 @@ func (s *Server) updateLiveTarget(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Environment           *string           `json:"environment"`
 		NamespaceEnvironments map[string]string `json:"namespace_environments"`
+		// DefaultPolicy: absent leaves it, null clears it.
+		DefaultPolicy json.RawMessage `json:"default_policy"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
+	}
+	if len(req.DefaultPolicy) > 0 {
+		var p *store.LivePolicy
+		if err := json.Unmarshal(req.DefaultPolicy, &p); err != nil {
+			writeErr(w, http.StatusBadRequest, "default_policy: want {auto_sync, prune, self_heal} or null")
+			return
+		}
+		if p != nil {
+			if t, err := s.store.LiveTarget(r.Context(), id); err == nil && p.AutoSync && t.Provider != "" && !t.Capabilities.Sync {
+				writeErr(w, http.StatusBadRequest, t.Name+"'s agent cannot sync (it has no write access)")
+				return
+			}
+		}
+		if err := s.store.SetLiveTargetDefaultPolicy(r.Context(), id, p); errors.Is(err, store.ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "target not found")
+			return
+		} else if err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 	if req.Environment != nil {
 		e := strings.TrimSpace(*req.Environment)
@@ -347,7 +370,7 @@ func (s *Server) updateLiveTarget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, "live.target.update", t.Name, t.Repo, "success", map[string]any{"environment": t.Environment,
-		"namespace_environments": t.NamespaceEnvironments})
+		"namespace_environments": t.NamespaceEnvironments, "default_policy": t.DefaultPolicy})
 	writeJSON(w, http.StatusOK, t)
 }
 
@@ -603,21 +626,9 @@ func (s *Server) setLivePolicy(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "failed to load the target")
 		return
 	}
-	if p.AutoSync && !t.Capabilities.Sync {
-		writeErr(w, http.StatusBadRequest, t.Name+"'s agent cannot sync (it has no write access)")
+	if code, msg := s.checkLivePolicy(r.Context(), a, t, p); code != 0 {
+		writeErr(w, code, msg)
 		return
-	}
-	if p.AutoSync && p.SelfHeal {
-		_, approvals, err := s.store.LiveChangeGate(r.Context(), a.Repo, a.Environment)
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "failed to read the environment's rules")
-			return
-		}
-		if approvals > 0 {
-			writeErr(w, http.StatusConflict, fmt.Sprintf("Every change to %s needs an approval, so it cannot heal itself. "+
-				"Auto-sync without self-heal works: each new revision waits for its approval.", a.Environment))
-			return
-		}
 	}
 	p.Status = ""
 	if err := s.store.SetLivePolicy(r.Context(), id, p, s.actorLabel(r)); err != nil {
@@ -632,6 +643,129 @@ func (s *Server) setLivePolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, a)
+}
+
+// checkLivePolicy says why p cannot be set on app a of target t (0 = it
+// can): an agent without write access cannot auto-sync, and an app whose
+// every change needs an approval cannot heal itself.
+func (s *Server) checkLivePolicy(ctx context.Context, a *store.LiveApp, t *store.LiveTarget, p store.LivePolicy) (int, string) {
+	if err := store.ValidLivePolicy(p); err != nil {
+		return http.StatusBadRequest, err.Error()
+	}
+	if p.AutoSync && !t.Capabilities.Sync {
+		return http.StatusBadRequest, t.Name + "'s agent cannot sync (it has no write access)"
+	}
+	if p.AutoSync && p.SelfHeal {
+		_, approvals, err := s.store.LiveChangeGate(ctx, a.Repo, a.Environment)
+		if err != nil {
+			return http.StatusInternalServerError, "failed to read the environment's rules"
+		}
+		if approvals > 0 {
+			return http.StatusConflict, fmt.Sprintf("Every change to %s needs an approval, so it cannot heal itself. "+
+				"Auto-sync without self-heal works: each new revision waits for its approval.", a.Environment)
+		}
+	}
+	return 0, ""
+}
+
+// maxBulkPolicyApps caps one bulk policy change.
+const maxBulkPolicyApps = 1000
+
+// bulkPolicyResult is one application's outcome in a bulk policy change.
+type bulkPolicyResult struct {
+	ID     int64  `json:"id"`
+	Target string `json:"target"`
+	Key    string `json:"key"`
+	Reason string `json:"reason,omitempty"` // why it was skipped
+}
+
+// setLivePolicies is POST /api/v1/live/apps/policy: set one sync policy on
+// every application a filter matches (the Applications page's filters:
+// target, environment, namespace, group, repo, health, sync, q). Each app
+// gets the same checks as PUT .../policy — the operate role on its repo, an
+// agent that can sync, no self-heal where changes need approval — and is
+// skipped with the reason otherwise. dry_run says what would change.
+func (s *Server) setLivePolicies(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Target      []string         `json:"target"`
+		Environment []string         `json:"environment"`
+		Namespace   []string         `json:"namespace"`
+		Group       []string         `json:"group"`
+		Repo        []string         `json:"repo"`
+		Health      []string         `json:"health"`
+		Sync        []string         `json:"sync"`
+		Search      string           `json:"q"`
+		Policy      store.LivePolicy `json:"policy"`
+		DryRun      bool             `json:"dry_run"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if err := store.ValidLivePolicy(req.Policy); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if len(req.Target)+len(req.Environment)+len(req.Namespace)+len(req.Group)+len(req.Repo)+len(req.Health)+len(req.Sync) == 0 &&
+		strings.TrimSpace(req.Search) == "" {
+		writeErr(w, http.StatusBadRequest, "give at least one filter (target, environment, namespace, group, repo, health, sync or q)")
+		return
+	}
+	q := store.LiveAppQuery{Target: req.Target, Environment: req.Environment, Namespace: req.Namespace, Group: req.Group,
+		Repo: req.Repo, Health: req.Health, Sync: req.Sync, Search: req.Search}
+	apps, err := s.store.LiveAppsMatching(r.Context(), q, maxBulkPolicyApps)
+	if err != nil {
+		slog.Error("live: bulk policy: list", "err", err)
+		writeErr(w, http.StatusInternalServerError, "failed to list applications")
+		return
+	}
+	if len(apps) > maxBulkPolicyApps {
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("the filter matches more than %d applications; narrow it", maxBulkPolicyApps))
+		return
+	}
+	targets := map[int64]*store.LiveTarget{}
+	changed, skipped := []bulkPolicyResult{}, []bulkPolicyResult{}
+	p := req.Policy
+	p.Status = ""
+	for i := range apps {
+		a := &apps[i]
+		res := bulkPolicyResult{ID: a.ID, Target: a.Target, Key: a.Key}
+		if !s.canOperate(r, a.Repo) {
+			res.Reason = "you need a role on " + a.Repo
+			skipped = append(skipped, res)
+			continue
+		}
+		t := targets[a.TargetID]
+		if t == nil {
+			if t, err = s.store.LiveAppTarget(r.Context(), a.ID); err != nil {
+				writeErr(w, http.StatusInternalServerError, "failed to load the target")
+				return
+			}
+			targets[a.TargetID] = t
+		}
+		if code, msg := s.checkLivePolicy(r.Context(), a, t, p); code != 0 {
+			res.Reason = msg
+			skipped = append(skipped, res)
+			continue
+		}
+		if !req.DryRun {
+			if err := s.store.SetLivePolicy(r.Context(), a.ID, p, s.actorLabel(r)); err != nil {
+				slog.Error("live: bulk policy", "id", a.ID, "err", err)
+				res.Reason = "failed to save"
+				skipped = append(skipped, res)
+				continue
+			}
+			s.audit(r, "live.policy", a.Target+"/"+a.Key, a.Repo, "updated", map[string]any{
+				"auto_sync": p.AutoSync, "prune": p.Prune, "self_heal": p.SelfHeal, "bulk": true})
+		}
+		changed = append(changed, res)
+	}
+	if !req.DryRun {
+		s.audit(r, "live.policy.bulk", fmt.Sprintf("%d apps", len(changed)), "", "updated", map[string]any{
+			"filter": q, "auto_sync": p.AutoSync, "prune": p.Prune, "self_heal": p.SelfHeal,
+			"changed": len(changed), "skipped": len(skipped)})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"dry_run": req.DryRun, "changed": changed, "skipped": skipped})
 }
 
 // liveOrphans is GET /api/v1/live/apps/{id}/orphans: the orphaned resources

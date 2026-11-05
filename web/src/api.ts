@@ -2861,6 +2861,21 @@ export function setLivePolicy(app: number, p: Pick<LivePolicy, "auto_sync" | "pr
   return putJSON(`/live/apps/${app}/policy`, p);
 }
 
+export interface BulkPolicyResult {
+  dry_run: boolean;
+  changed: { id: number; target: string; key: string }[];
+  skipped: { id: number; target: string; key: string; reason: string }[];
+}
+
+/** One sync policy for every app a filter matches (the Applications filters). */
+export function setLivePolicies(body: {
+  filter: Partial<Record<LiveFacet, string[]>> & { q?: string };
+  policy: Pick<LivePolicy, "auto_sync" | "prune" | "self_heal">;
+  dry_run: boolean;
+}): Promise<BulkPolicyResult> {
+  return postJSON("/live/apps/policy", { ...body.filter, policy: body.policy, dry_run: body.dry_run });
+}
+
 /** The orphaned resources of an app's namespace: top-level objects no application claims (null: none). */
 export function getLiveOrphans(app: number): Promise<{ id: number; tree: { version: number; resources: LiveResource[] } } | null> {
   return fetchJSON(`/live/apps/${app}/orphans`);
@@ -3022,6 +3037,8 @@ export interface LiveTarget {
   environment: string;
   /** Overrides `environment` for the apps in a namespace. */
   namespace_environments: Record<string, string> | null;
+  /** The sync policy apps first seen on this target start with. */
+  default_policy: Pick<LivePolicy, "auto_sync" | "prune" | "self_heal"> | null;
   repo: string;
   provider: string;
   capabilities: LiveCapabilities;
@@ -3142,7 +3159,11 @@ export function createLiveTarget(t: { name: string; environment: string; repo: s
 
 export function updateLiveTarget(
   id: number,
-  patch: { environment?: string; namespace_environments?: Record<string, string> }
+  patch: {
+    environment?: string;
+    namespace_environments?: Record<string, string>;
+    default_policy?: Pick<LivePolicy, "auto_sync" | "prune" | "self_heal"> | null;
+  }
 ): Promise<LiveTarget> {
   return patchJSON(`/live/targets/${id}`, patch);
 }

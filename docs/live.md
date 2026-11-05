@@ -211,6 +211,30 @@ cluster / cloud                         Forge server                         bro
     self-heal is refused there (a heal that waits for a person is not one);
   - when all that differs is what auto-sync would not prune, it does nothing.
   The panel shows what auto-sync is doing or why it waits.
+- **Many apps at once.** A target can have a **default policy** (Settings →
+  Live agents → Edit, or `PATCH /api/v1/live/targets/{id}` with
+  `"default_policy": {"auto_sync": true, "prune": true, "self_heal": true}`;
+  `null` clears it): every app first seen on that target starts with it.
+  Apps that already exist keep theirs, and an app template's own policy wins
+  for the apps it declares. For existing apps, **Applications → Sync
+  policy…** sets one policy on every app the current filters match;
+  **Preview** lists what would change and what would be skipped and why, then
+  **Apply**. The API is
+  `POST /api/v1/live/apps/policy` with the list filters (`target`,
+  `environment`, `namespace`, `group`, `repo`, `health`, `sync`, `q`; at least
+  one), `policy` and `dry_run`:
+
+  ```bash
+  curl -X POST https://forge.example.com/api/v1/live/apps/policy \
+    -H "Authorization: Bearer $FORGE_TOKEN" -H 'Content-Type: application/json' \
+    -d '{"target": ["travafa-gke"], "environment": ["staging"],
+         "policy": {"auto_sync": true, "prune": true, "self_heal": true}, "dry_run": true}'
+  ```
+
+  Each app gets the same checks as its own Auto-sync button — the operate
+  role on its repo, an agent that can sync, no self-heal where every change
+  needs approval — and is listed under `skipped` with the reason otherwise.
+  Each change is audited (`live.policy`), plus one `live.policy.bulk` entry.
 - **Rollback turns auto-sync off** (it would undo the rollback at once), and
   a sync to any revision other than Git's is refused while auto-sync is on.
 - **Prune only removes what Forge put there.** A live top-level object Git

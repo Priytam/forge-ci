@@ -8314,3 +8314,9 @@ textarea {
   font-size: var(--fs-sm);
   color: var(--warning, #b7791f);
 }
+
+.lv-bulk-result {
+  margin-top: 10px;
+  font-size: var(--fs-sm);
+}
+.lv-bulk-result ul { margin: 6px 0 0; padding-left: 18px; }

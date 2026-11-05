@@ -184,8 +184,12 @@ func (s *Store) LiveDeclaredApps(ctx context.Context, target *LiveTarget) ([]liv
 		}
 		d := t.declaredOn(target)
 		out = append(out, d)
+		// A template's policy wins over one inherited from the target default.
 		if _, err := s.pool.Exec(ctx, `INSERT INTO live_app_policies (target_id, app_key, auto_sync, prune, self_heal, updated_by)
-			VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (target_id, app_key) DO NOTHING`,
+			VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (target_id, app_key) DO UPDATE
+			SET auto_sync = EXCLUDED.auto_sync, prune = EXCLUDED.prune, self_heal = EXCLUDED.self_heal,
+			    updated_by = EXCLUDED.updated_by, updated_at = now()
+			WHERE live_app_policies.updated_by = '`+TargetDefaultPolicyActor+`'`,
 			target.ID, d.App.Key, t.AutoSync, t.Prune, t.SelfHeal, templatePolicyActor(t.Name)); err != nil {
 			return nil, err
 		}
