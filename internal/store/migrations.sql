@@ -1649,3 +1649,25 @@ CREATE TABLE IF NOT EXISTS platform_admins (
     added_by   TEXT        NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- People directory: one row per person who has signed in, written on every
+-- sign-in (Server.finishLogin). Backs Admin → People, where admins search
+-- people and change their platform role. Emails are lower-cased.
+CREATE TABLE IF NOT EXISTS users (
+    email           TEXT        PRIMARY KEY CHECK (email = lower(email) AND email <> ''),
+    name            TEXT        NOT NULL DEFAULT '',
+    provider        TEXT        NOT NULL DEFAULT '',
+    first_seen_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_sign_in_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS users_last_sign_in_idx ON users (last_sign_in_at DESC);
+-- Backfill from what earlier sign-ins left behind (a no-op once filled):
+-- user_groups has a row per person, sessions carry display names.
+INSERT INTO users (email, name, provider, first_seen_at, last_sign_in_at)
+SELECT g.email,
+       COALESCE((SELECT s.name FROM sessions s WHERE lower(s.email) = g.email AND s.name <> ''
+                 ORDER BY s.created_at DESC LIMIT 1), ''),
+       g.provider, g.updated_at, g.updated_at
+FROM user_groups g
+WHERE g.email <> ''
+ON CONFLICT (email) DO NOTHING;

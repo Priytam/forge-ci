@@ -2015,6 +2015,45 @@ export function removePlatformAdmin(email: string): Promise<void> {
   return requestVoid("DELETE", `/platform-admins/${encodeURIComponent(email)}`);
 }
 
+// --- People (Admin → People) ---
+
+/** Someone who has signed in (or a platform admin who hasn't yet). */
+export interface Person {
+  email: string;
+  name: string;
+  provider: string;
+  /** null: never signed in */
+  last_sign_in_at: string | null;
+  /** why they're a platform admin: server config, set on this page, or an IdP group */
+  admin_source: "env" | "ui" | "group" | "";
+  admin_groups: string[];
+  repo_roles: { repo: string; role: string }[];
+}
+
+export interface PeoplePage {
+  items: Person[];
+  total: number;
+  hasMore: boolean;
+}
+
+/** One page of people; search, filter and paging happen on the server. */
+export async function listPeople(q: string, adminsOnly: boolean, offset: number, limit: number): Promise<PeoplePage> {
+  const qs = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  if (q) qs.set("q", q);
+  if (adminsOnly) qs.set("role", "admin");
+  const res = await fetch(`${BASE}/people?${qs.toString()}`, { headers: { Accept: "application/json" } });
+  if (!res.ok) throw await parseError(res);
+  return {
+    items: (await res.json()) as Person[],
+    total: Number(res.headers.get("X-Total-Count") ?? 0),
+    hasMore: res.headers.get("X-Has-More") === "true",
+  };
+}
+
+export function setPlatformRole(email: string, role: "admin" | "member"): Promise<void> {
+  return requestVoid("PUT", `/people/${encodeURIComponent(email)}/platform-role`, { role });
+}
+
 export function listServiceTokens(id: number): Promise<ApiToken[]> {
   return getJSON<ApiToken[]>(`/service-accounts/${id}/tokens`);
 }
