@@ -45,13 +45,16 @@ server:
     maxReplicas: 6
     targetCPUUtilizationPercentage: 75
     targetMemoryUtilizationPercentage: 0   # 0 disables the memory metric
+  # The server rebuilds and holds an agent's full initial report in memory
+  # (a large fleet is several MB gzipped); 512Mi could OOM mid-ingest and wedge
+  # the agent that was reporting. Give it headroom by default.
   resources:
     requests:
-      cpu: 100m
-      memory: 128Mi
-    limits:
-      cpu: "1"
+      cpu: 250m
       memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
   # Probes hit GET /api/v1/healthz (returns 200 when the server is up).
   livenessProbe:
     initialDelaySeconds: 10

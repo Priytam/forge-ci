@@ -92,7 +92,7 @@ func (h *Hub) autoSyncApp(ctx context.Context, a *store.LiveApp) error {
 	d := decideAuto(in)
 	if d.Trigger != "" {
 		op.Trigger = d.Trigger
-		o, err := h.st.CreateLiveOp(ctx, a.ID, op, AutoSyncActor)
+		o, auth, err := h.createAutoOp(ctx, a, op, in)
 		switch {
 		case errors.Is(err, store.ErrOpBusy):
 			return nil // another replica, or a person, got there first
@@ -101,14 +101,63 @@ func (h *Hub) autoSyncApp(ctx context.Context, a *store.LiveApp) error {
 		case err != nil:
 			return err
 		default:
+			result, detail := "requested", map[string]any{
+				"op": o.ID, "trigger": d.Trigger, "revision": in.Want, "prune": op.Prune, "state": o.State}
+			switch {
+			case auth != nil:
+				result = "authorized"
+				detail["authorized_by"] = fmt.Sprintf("deploy #%d", auth.DeploymentID)
+				d.Status = "Syncing to " + wantLabel(in) + " — approved with its deploy"
+			case o.State == "approval":
+				d.Status = "Waiting for approval to sync " + wantLabel(in)
+			}
 			if err := h.st.InsertAudit(ctx, store.AuditEntry{Actor: AutoSyncActor, Action: "live.sync",
-				Target: a.Target + "/" + a.Key, Repo: a.Repo, Result: "requested", Detail: map[string]any{
-					"op": o.ID, "trigger": d.Trigger, "revision": in.Want, "prune": op.Prune, "state": o.State}}); err != nil {
+				Target: a.Target + "/" + a.Key, Repo: a.Repo, Result: result, Detail: detail}); err != nil {
 				slog.Error("audit write failed", "err", err, "action", "live.sync")
 			}
 		}
 	}
 	return h.st.SetLivePolicyStatus(ctx, a.ID, d.Status)
+}
+
+// createAutoOp queues the auto-sync. On a protected environment a new revision
+// would wait for approval; but when an approved deploy shipped this very change
+// (a successful deployment to the app's repo+environment, newer than the last
+// applied sync), that human approval carries over and the op is released at
+// once. Anything else — self-heal, drift, a revision no deploy stands behind —
+// takes the ordinary path and waits.
+func (h *Hub) createAutoOp(ctx context.Context, a *store.LiveApp, op live.Op, in autoInput) (*store.LiveOp, *store.DeployAuthorization, error) {
+	if in.Approvals > 0 && op.Trigger == live.TriggerAutoSync {
+		auth, ok, err := h.st.DeployAuthorizationSince(ctx, a.Repo, a.Environment, lastAppliedSync(in.Ops))
+		if err != nil {
+			return nil, nil, err
+		}
+		if ok {
+			o, err := h.st.CreateApprovedLiveOp(ctx, a.ID, op, AutoSyncActor, auth)
+			return o, &auth, err
+		}
+	}
+	o, err := h.st.CreateLiveOp(ctx, a.ID, op, AutoSyncActor)
+	return o, nil, err
+}
+
+// lastAppliedSync is when the app's newest successful sync finished (zero if it
+// has never synced). It bounds which deploy may authorize the next auto-sync.
+func lastAppliedSync(ops []store.LiveOp) time.Time {
+	for _, o := range ops { // newest first
+		if o.Kind == live.OpSync && o.State == "succeeded" {
+			return finishedAt(o)
+		}
+	}
+	return time.Time{}
+}
+
+// wantLabel is the short revision auto-sync is moving the app to, for people.
+func wantLabel(in autoInput) string {
+	if in.Rev != "" {
+		return shortRev(in.Rev)
+	}
+	return shortRev(in.Want)
 }
 
 // autoInput is everything auto-sync decides on.

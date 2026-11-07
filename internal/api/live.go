@@ -575,7 +575,7 @@ func (s *Server) setLivePolicy(w http.ResponseWriter, r *http.Request) {
 		}
 		if approvals > 0 {
 			writeErr(w, http.StatusConflict, fmt.Sprintf("Every change to %s needs an approval, so it cannot heal itself. "+
-				"Auto-sync without self-heal works: each new revision waits for its approval.", a.Environment))
+				"Auto-sync without self-heal works: a revision an approved deploy shipped syncs on that approval; any other waits for one.", a.Environment))
 			return
 		}
 	}

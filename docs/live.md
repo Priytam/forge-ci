@@ -191,10 +191,26 @@ cluster / cloud                         Forge server                         bro
     says something keeps changing the app;
   - nothing happens while a sync or rollback is in flight or the environment
     is frozen (the page says *Paused*);
-  - a protected environment's auto-syncs wait for approval like anyone's, and
+  - a protected environment's auto-syncs wait for approval like anyone's —
+    **unless an approved deploy already shipped this change** (see below);
     self-heal is refused there (a heal that waits for a person is not one);
   - when all that differs is what auto-sync would not prune, it does nothing.
   The panel shows what auto-sync is doing or why it waits.
+- **An approved deploy authorizes the sync it shipped.** A deploy job to a
+  protected environment already passes that environment's approval gate before
+  it runs, and its success writes a `deployments` row for (repo, environment).
+  So when auto-sync sees the revision that deploy produced, it inherits that
+  approval instead of asking for a second, identical one: the op is released at
+  once (`CreateApprovedLiveOp`), its history recording *Approved with deploy
+  #N*. This is the pipeline-approval → Live-sync linkage — no second gate, and
+  CD flows through Live without a hand-run `kubectl apply`.
+  - One approval buys one apply. Auto-sync only inherits a deployment **newer
+    than the app's last applied sync** (`DeployAuthorizationSince`), so a later
+    hand-pushed commit or in-cluster drift finds no fresh deploy behind it and
+    still waits for its own approval. Self-heal stays refused for the same
+    reason: drift has no approved deploy to stand on.
+  - A freeze still blocks it; the inherited approval only stands in for the
+    approval gate, never for a freeze.
 - **Rollback turns auto-sync off** (it would undo the rollback at once), and
   a sync to any revision other than Git's is refused while auto-sync is on.
 - **Prune only removes what Forge put there.** A live top-level object Git

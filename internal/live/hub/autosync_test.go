@@ -111,3 +111,20 @@ func TestDecideAutoByDigest(t *testing.T) {
 		t.Errorf("after a failed render: %+v", d)
 	}
 }
+
+func TestLastAppliedSync(t *testing.T) {
+	// Newest succeeded sync wins; an unfinished op falls back to CreatedAt; a
+	// rollback or a failed/in-flight sync is not an "applied sync".
+	heal := op("succeeded", "aaaaaaa1", live.TriggerSelfHeal, time.Hour) // a sync, succeeded
+	failed := op("failed", "bbbbbbb2", live.TriggerAutoSync, time.Minute)
+	rollback := store.LiveOp{Kind: live.OpRollback, State: "succeeded", CreatedAt: t0}
+	if got := lastAppliedSync([]store.LiveOp{failed, heal}); !got.Equal(t0.Add(-time.Hour)) {
+		t.Errorf("want the succeeded sync at -1h, got %v", got)
+	}
+	if got := lastAppliedSync([]store.LiveOp{failed, rollback}); !got.IsZero() {
+		t.Errorf("no succeeded sync → zero, got %v", got)
+	}
+	if got := lastAppliedSync(nil); !got.IsZero() {
+		t.Errorf("no ops → zero, got %v", got)
+	}
+}

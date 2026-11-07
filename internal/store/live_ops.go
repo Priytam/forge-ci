@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -109,6 +110,91 @@ func (s *Store) CreateLiveOp(ctx context.Context, appID int64, p live.Op, by str
 
 // ErrFrozen: deploys to the environment are frozen right now.
 var ErrFrozen = errors.New("deploys to this environment are frozen")
+
+// DeployAuthorization is the approved deploy whose human approval Forge Live
+// inherits. A deployment row exists only when an environment-targeting job
+// succeeded; on a protected environment that job cleared the same approval gate
+// a sync would — so the deployment stands as a person's approval of this very
+// change, and auto-sync need not ask for a second, identical one.
+type DeployAuthorization struct {
+	DeploymentID int64
+	JobID        int64
+	By           string // the environment approver the deployment recorded
+	At           time.Time
+}
+
+// DeployAuthorizationSince returns the most recent successful deployment to
+// repo+environment made after `after` (ok=false when there is none). Auto-sync
+// scopes `after` to the app's last applied sync so one approval authorizes one
+// apply: a later hand-pushed commit or in-cluster drift finds no fresh
+// deployment and still waits for its own approval.
+func (s *Store) DeployAuthorizationSince(ctx context.Context, repo, env string, after time.Time) (DeployAuthorization, bool, error) {
+	var a DeployAuthorization
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, job_id, deployed_by, deployed_at FROM deployments
+		 WHERE repo=$1 AND environment=$2 AND status='success' AND deployed_at > $3
+		 ORDER BY id DESC LIMIT 1`, repo, env, after).
+		Scan(&a.DeploymentID, &a.JobID, &a.By, &a.At)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return DeployAuthorization{}, false, nil
+	}
+	if err != nil {
+		return DeployAuthorization{}, false, err
+	}
+	return a, true, nil
+}
+
+// CreateApprovedLiveOp queues a sync already released to the agent — its
+// approval inherited from an approved deploy (auth). It is auto-sync's path on
+// a protected environment when the deploy that shipped this revision was
+// already approved: the op skips the 'approval' wait but still honors a freeze,
+// still takes the per-app lock (ErrOpBusy), and records the inherited approval
+// so its history shows who authorized it and which deploy it came from.
+func (s *Store) CreateApprovedLiveOp(ctx context.Context, appID int64, p live.Op, by string, auth DeployAuthorization) (*LiveOp, error) {
+	a, err := s.LiveApp(ctx, appID)
+	if err != nil {
+		return nil, err
+	}
+	frozen, _, err := s.LiveChangeGate(ctx, a.Repo, a.Environment)
+	if err != nil {
+		return nil, err
+	}
+	if frozen {
+		return nil, ErrFrozen
+	}
+	p.App = live.App{Key: a.Key, Name: a.Name, Namespace: a.Namespace, Group: a.Group}
+	params, _ := json.Marshal(p)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	o, err := scanLiveOp(tx.QueryRow(ctx, `INSERT INTO live_ops (app_id, target_id, kind, state, params, revision, requested_by)
+		VALUES ($1,$2,$3,'pending',$4,$5,$6) RETURNING `+liveOpCols, appID, a.TargetID, p.Kind, params, p.Revision, by))
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		return nil, ErrOpBusy
+	}
+	if err != nil {
+		return nil, err
+	}
+	approver := auth.By
+	if approver == "" {
+		approver = by
+	}
+	comment := fmt.Sprintf("Approved with deploy #%d", auth.DeploymentID)
+	if auth.JobID != 0 {
+		comment = fmt.Sprintf("Approved with deploy #%d (job #%d)", auth.DeploymentID, auth.JobID)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO live_op_approvals (op_id, approver, verdict, comment) VALUES ($1,$2,'approved',$3)`,
+		o.ID, approver, comment); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return o, s.notifyOp(ctx, o)
+}
 
 func (s *Store) notifyOp(ctx context.Context, o *LiveOp) error {
 	if _, err := s.pool.Exec(ctx, `SELECT pg_notify($1, $2)`, opsChannel, strconv.FormatInt(o.TargetID, 10)); err != nil {
